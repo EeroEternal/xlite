@@ -71,19 +71,20 @@ impl Upstream {
 
     pub async fn post_stream(
         &self,
-        base_url: &str,
+        endpoint: &str,
         api_key: &str,
-        body: &[u8],
+        body: Bytes,
     ) -> Result<UpstreamResponse> {
-        let url = chat_completions_url(base_url);
-        if self.h2c && url.starts_with("http://") {
-            self.post_h2c(&url, api_key, body).await
+        // `endpoint` is the full chat/completions URL, precomputed once per
+        // channel at snapshot build — no per-request URL formatting.
+        if self.h2c && endpoint.starts_with("http://") {
+            self.post_h2c(endpoint, api_key, body).await
         } else {
-            self.post_reqwest(&url, api_key, body).await
+            self.post_reqwest(endpoint, api_key, body).await
         }
     }
 
-    async fn post_h2c(&self, url: &str, api_key: &str, body: &[u8]) -> Result<UpstreamResponse> {
+    async fn post_h2c(&self, url: &str, api_key: &str, body: Bytes) -> Result<UpstreamResponse> {
         let parsed = url::Url::parse(url).context("invalid upstream url")?;
         let host = parsed
             .host_str()
@@ -117,7 +118,7 @@ impl Upstream {
             .map_err(|e| anyhow::anyhow!("h2 send_request: {e}"))?;
         if !eos {
             send_stream
-                .send_data(Bytes::copy_from_slice(body), true)
+                .send_data(body, true)
                 .map_err(|e| anyhow::anyhow!("h2 send_data: {e}"))?;
         }
         drop(send_stream);
@@ -150,14 +151,14 @@ impl Upstream {
         &self,
         url: &str,
         api_key: &str,
-        body: &[u8],
+        body: Bytes,
     ) -> Result<UpstreamResponse> {
         let response = self
             .http
             .post(url)
             .header("content-type", "application/json")
             .bearer_auth(api_key)
-            .body(body.to_vec())
+            .body(body)
             .send()
             .await
             .context("upstream request")?;
