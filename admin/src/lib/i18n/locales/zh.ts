@@ -124,6 +124,7 @@ export const zh = {
   },
   settings: {
     title: "设置",
+    version: "版本",
     listen: "监听地址",
     h2c: "上游明文 HTTP/2",
     h2cOn: "已开启",

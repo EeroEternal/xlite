@@ -174,6 +174,7 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
             "h2c": state.config.h2c,
             "listen": state.config.listen,
             "storage": state.store.catalog().kind().as_str(),
+            "version": env!("CARGO_PKG_VERSION"),
         }))
         .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),

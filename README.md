@@ -2,6 +2,8 @@
 
 Thin OpenAI-compatible AI gateway. Simple channel routing, streaming passthrough.
 
+Current release: **0.1.0**. See [docs/getting-started.md](docs/getting-started.md) and [docs/changelog.md](docs/changelog.md).
+
 Scheduling matches New API: weighted random inside the lowest priority group, then failover before the first response byte.
 
 ## Run

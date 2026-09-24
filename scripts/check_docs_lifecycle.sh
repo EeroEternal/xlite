@@ -27,37 +27,8 @@ released="$(awk '/^## \[Unreleased\]/{skip=1; next} /^## \[[0-9]/{skip=0} !skip'
 # 常设面：元代码（AGENTS.md + skills）。dev/ 中的活跃提案（未提交/本周修改）跳过不报。
 standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 
-# 已裁决保留白名单（2026-08-28 逐项裁决；落地/归位条件变化时重新裁决并更新）：
-#   adaptive-routing            进行中（smart-routing 一期骨架落地中）
-#   api-key-create-standard.html  intelligence-product（进行中）的线框产物
-#   v4-issue-report.html          2026-09-18 v4.0.0 黑盒测试报告原文（BUG-012~015）
-#   customer-governance-scope   范围决策记录，非交付提案
-#   future-optimization-plan    未来路线图（v3.15.2 刚发布）
-#   ha-shadow-cutover           shadow→execute 切换未执行，清单仍需可用
-#   key-multi-route             阶段 B 核心已落地，后续阶段未完
-#   mcp-oauth21                 设计稿（未落地）
-#   plugin-migration-plan       持续执行的插件化治理计划
-#   queue-design                含暂停中的 Redis 分布式阶段（活设计）
-#   routing-pipeline            提案（未实施）
-#   catalog-pricing             价目 A/B/C 已落地，实例合同价（D）未做，草案仍作后续入口
-#   ha-sentinel                 已落地设计锁定，部署/手册仍引用为 Sentinel 路径权威
-#   agent-security-enhancement-plan / mcp-gateway-aggregation /
-#   mcp-runner-security-architecture  2026-09-11 裁决：仍为设计提案（src/ 与 crates/ 无对应实现），
-#                               仅因 v3.25.0 发版把 Unreleased 条目转正而命中 released，保留待实施
-#   loadtest-ttft-queue-analysis-2026-09  2026-09-21 裁决：对标压测分析 + P0-P3 roadmap；
-#                                P0/P1 已落地（v4.3.0），P2/P3 推迟与解锁条件仍在第九节，
-#                                next-round 真机数据仍需引用它，保留作 roadmap
-#   loadtest-linkbound-2026-09   2026-09-23 裁决：双机 1 GbE 台架在 40k 长流上被链路饱和的定案
-#                                （~890 rps = 链路带宽，非网关；同机 loopback 直连地板 2553 rps）；
-#                                换 10G/双前重测前仍需它作为为什么不能做网关吞吐结论的依据
-#   h2-pinned-poll-2026-09       2026-09-23 裁决：由 loadtest-linkbound-2026-09 §十三 指向的最小结构实验
-#                                （一份池 + 连接单任务 poll）；已落地（默认关），保留作入口
-#   per-runtime-epoll-shard-2026-09  2026-09-23 裁决：残留 18% = 内核 epoll 等待队列锁（调用栈已对）；
-#                                下一刀 = epoll 实例按 runtime 分片（不含每核池）；未实施，保留作下次入口
-#   （已归位 docs/architecture/：smart-routing / routing-strategies / org-user-model /
-#    unigateway-protocol / plugin-system；已删除：force-model-match / ha-progress /
-#    multi-org-plan / anthropic-adaptation）
-keep=" adaptive-routing.md agent-security-enhancement-plan.md api-key-create-standard.html catalog-pricing.md customer-governance-scope.md future-optimization-plan.md h2-pinned-poll-2026-09.md ha-sentinel.md ha-shadow-cutover.md key-multi-route.md loadtest-linkbound-2026-09.md loadtest-ttft-queue-analysis-2026-09.md mcp-gateway-aggregation.md mcp-oauth21.md mcp-runner-security-architecture.md per-runtime-epoll-shard-2026-09.md plugin-migration-plan.md queue-design.md routing-pipeline.md v4-issue-report.html "
+# xlite has no retained docs/dev drafts yet.
+keep=" "
 
 findings=0
 for f in docs/dev/*; do

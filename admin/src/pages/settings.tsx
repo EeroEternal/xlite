@@ -54,6 +54,7 @@ export function SettingsPage() {
   }
 
   const rows = [
+    { label: t("settings.version"), value: data?.version ?? "—" },
     { label: t("settings.listen"), value: data?.listen ?? "—" },
     { label: t("settings.storage"), value: storageLabel(data?.storage) },
     { label: t("settings.h2c"), value: data?.h2c ? t("settings.h2cOn") : t("settings.h2cOff") },

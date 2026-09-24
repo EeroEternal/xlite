@@ -124,6 +124,7 @@ export const en = {
   },
   settings: {
     title: "Settings",
+    version: "Version",
     listen: "Listen address",
     h2c: "Upstream plaintext HTTP/2",
     h2cOn: "On",

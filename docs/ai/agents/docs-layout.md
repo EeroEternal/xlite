@@ -10,7 +10,7 @@
 4. **`docs/manual/`**：产品手册、运维操作、验收清单、管理员指南。
 5. **`docs/market/`**：售前 / 竞品对照。只放对外可讲的产品对比，不放未落地设计、不放内部排期。
 
-`docs/` 根目录只保留稳定宏观入口：`README.md`、`architecture.md`、`getting-started.md`、`design.md`（UI 规范唯一入口）、`changelog.md`。UI 分章正文在 [`docs/design/`](../../design/)，不得在 `docs/` 根再堆平行设计长文。产品定位与能力总览见 [`docs/manual/xgateway.md`](../../manual/xgateway.md)。细则见 [`docs/rules/documentation.md`](../../rules/documentation.md)。
+`docs/` 根目录只保留稳定宏观入口：[`README.md`](../../README.md)、[`architecture.md`](../../architecture.md)、[`getting-started.md`](../../getting-started.md)、[`design.md`](../../design.md)（UI 规范唯一入口）、[`changelog.md`](../../changelog.md)。UI 分章正文在 [`docs/design/`](../../design/)，不得在 `docs/` 根再堆平行设计长文。产品手册见 [`docs/manual/xlite.md`](../../manual/xlite.md)。
 
 文档文件名必须简短且可读，建议使用 kebab-case，长度控制在 **32 个字符以内（不含扩展名）**；禁止使用冗长文件名（如超过 40 字符）导致路径可读性和维护性下降。
 

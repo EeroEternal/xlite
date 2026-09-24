@@ -6,4 +6,5 @@ export interface Overview {
   h2c: boolean
   listen: string
   storage: "sqlite" | "memory" | "redis"
+  version: string
 }

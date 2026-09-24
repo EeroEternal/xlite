@@ -62,16 +62,9 @@
 
 ---
 
-## 六、限流 / 队列相关参数变更额外约束
+## 六、限流 / 队列
 
-`src/pool/` 下流控、限流、队列、ETA、saturation 等默认值直接影响生产稳定性。任何默认值调整必须：
-
-1. **单独 commit**，不得与 bug fix / refactor 合并。
-2. **commit message 必须列出**：旧值、新值、调整理由、预期影响范围。
-3. **至少跑一次 `cargo test --lib pool::`**。
-4. **影响线上 SLO 的改动**必须在 `docs/changelog.md` 记录。
-
-完整拆分与验证步骤见 skill [`pool-param-change`](../../../.agents/skills/pool-param-change/SKILL.md)。
+xlite 没有 `src/pool/` 准入队列。不要把 xrouter 的限流默认值或 AIMD 调参带进本仓库。
 
 ---
 

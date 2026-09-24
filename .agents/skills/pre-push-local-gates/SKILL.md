@@ -37,8 +37,4 @@ UI 页面改动另跑对应 e2e spec;`workflow_dispatch` 部署 / 打 tag 前,�
 
 ## Scope
 - 大重构允许中间 commit 不全跑,但 **push 前最后一次提交必须全绿**。
-- 视觉回归套件(`e2e/visual/`,Playwright 截图基线)需要完整栈(网关 + 数据库 + admin 构建产物)。CI 已迁本机 Linux,可在本地直接生成/比对基线:`scripts/ci_local.sh --visual-update`(重新生成并提交)或 `scripts/ci_local.sh --full`(比对);改了用户可见外观时按 skill [`admin-ui-change`](../admin-ui-change/SKILL.md) 的截图回归流程。
-- 本地跑集成测试被中断(Ctrl-C / 超时杀进程)时 `TestContext` 的 `Drop` 不会执行,会在本机 Postgres 留下 `xrouter_<suite>_<32位hex>` 孤儿库;用 [`scripts/cleanup_test_dbs.sh`](../../../scripts/cleanup_test_dbs.sh) 清理(默认 dry-run,`--apply` 执行,自带“活动连接跳过”与“新建库年龄保护”两道护栏)。
-- 本地跑不动整个集成矩阵时,至少覆盖:① 与改动同模块的套件;② 随机抽 1 个
-  跨模块套件作哨兵。
 - 本地门禁挂了不算完:修复后先复现该失败的等价命令并确认通过,再推。
