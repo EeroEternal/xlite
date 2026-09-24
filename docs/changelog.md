@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **热路径零拷贝透传**：`upstream_model` 与请求 `model` 同名（常规情形）时不再 JSON 反序列化/重序列化，原请求字节直接透传（字节透传边界名副其实）；需要改名时才惰性构建 DOM（每请求至多一次）。上游请求体改传 `Bytes`，去掉 h2c `copy_from_slice` 与 reqwest `to_vec` 第三次拷贝。
+- **热路径零拷贝透传**：`upstream_model` 与请求 `model` 同名（常规情形）时不再 JSON 反序列化/重序列化，原请求字节直接透传（字节透传边界名副其实）；需要改名时才惰性构建 DOM（每请求至多一次）。上游请求体改传 `Bytes`，去掉 h2c `copy_from_slice` 与 reqwest `to_vec` 第三次拷贝。注意：含重复 `model` 键的请求体现在返回 400（原为末键生效）。
 - **快照 Arc 化 + 端点预计算**：路由快照里模型/通道改存 `Arc`，每请求排序只克隆指针不克隆 5 个 `String`；通道的 `chat/completions` URL 在快照构建时算好，不在每请求重拼。5 秒重载在路由未变时跳过写锁交换。
 - **Key 哈希与 failover 细节**：API key 哈希改手写 hex（免 `format!` fmt 机器）；failover 前的错误体排空封顶 64 KiB，坏上游不再能拖住重试。
 ## [0.2.0] - 2026-09-24
