@@ -6,6 +6,7 @@ xlite is a thin OpenAI-compatible gateway. It forwards `/v1/chat/completions` as
 
 - Data plane: `src/proxy.rs` authenticates an API key, reads `model`, picks channels, copies the upstream stream.
 - Control plane: `src/admin.rs` plus `admin/` for providers, models, channels, and API keys.
+- Admin sessions: stateless HMAC-signed cookies (`src/auth.rs`), keyed from `ADMIN_PASSWORD` or `ADMIN_SESSION_SECRET`, so any node validates a cookie with no Redis and no sticky routing.
 - Snapshot: `src/store.rs` holds the in-memory routing table reloaded from the catalog.
 - Catalog: SQLite file by default, in-memory SQLite when `DATABASE_URL=memory`, Redis when `REDIS_URL` is set (cluster).
 

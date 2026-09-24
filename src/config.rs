@@ -7,6 +7,7 @@ pub struct Config {
     pub listen: String,
     pub h2c: bool,
     pub admin_password: String,
+    pub session_secret: Option<String>,
     pub max_conns_per_host: usize,
 }
 
@@ -23,6 +24,10 @@ impl Config {
         let h2c = env_flag("XLITE_UPSTREAM_H2C");
         let admin_password =
             std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "admin".to_string());
+        let session_secret = std::env::var("ADMIN_SESSION_SECRET")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
         let max_conns_per_host = std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -34,6 +39,7 @@ impl Config {
             listen: format!("{host}:{port}"),
             h2c,
             admin_password,
+            session_secret,
             max_conns_per_host,
         })
     }

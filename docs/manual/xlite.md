@@ -10,6 +10,7 @@ Current version is the `version` field in the repo-root `Cargo.toml`, also retur
 | `REDIS_URL` | unset | If set, catalog is Redis (`xlite:catalog`) |
 | `PORT` / `LISTEN_HOST` | `8080` / `0.0.0.0` | Listen address |
 | `ADMIN_PASSWORD` | `admin` | Console login |
+| `ADMIN_SESSION_SECRET` | unset | Overrides the key used to sign Admin session cookies; set the same on every node |
 | `XLITE_UPSTREAM_H2C` | off | Plaintext HTTP/2 to `http://` upstreams |
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | h2c pool cap per host |
 

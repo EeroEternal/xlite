@@ -103,10 +103,8 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginBody>) -> im
     response
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    if let Some(token) = auth::cookie_value(&headers) {
-        state.sessions.revoke(&token);
-    }
+async fn logout(State(_state): State<AppState>) -> impl IntoResponse {
+    // Sessions are stateless signatures, so logout only clears the cookie.
     let mut response = ok(json!({ "ok": true })).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,

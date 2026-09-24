@@ -128,7 +128,7 @@ async fn run_server() -> Result<()> {
     let upstream = Upstream::new(&config);
     let state = AppState {
         store: store.clone(),
-        sessions: Sessions::default(),
+        sessions: Sessions::new(&config.admin_password, config.session_secret.as_deref()),
         admin_password: config.admin_password.clone(),
         upstream,
         config: config.clone(),

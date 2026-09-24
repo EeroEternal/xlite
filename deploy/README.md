@@ -60,6 +60,7 @@ cp env.example .env
 | `REDIS_URL` | 空 | **compose 已写** `redis://redis:6379` | 非空则目录走 Redis，忽略 SQLite |
 | `XLITE_UPSTREAM_H2C` | 关 | `1` | 上游 URL 为 `http://` 时走明文 HTTP/2 |
 | `ADMIN_PASSWORD` | `admin` | 自己改 | Admin 登录密码 |
+| `ADMIN_SESSION_SECRET` | 空 | 可不设 | 签名 Admin 会话 Cookie 的密钥；不设则从 `ADMIN_PASSWORD` 派生。多节点必须一致 |
 | `PORT` | `8080` | `8080` | **容器内**监听端口（映射仍是 8080:8080） |
 | `LISTEN_HOST` | `0.0.0.0` | `0.0.0.0` | 必须全接口，否则宿主机进不去 |
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | `32`，打满再加 | 每个上游 host 的 h2c 连接上限 |
@@ -93,7 +94,7 @@ Compose 里是 `redis:7-alpine`，`--save "" --appendonly no`（压测不落盘�
 - `xlite:catalog`：整份目录 JSON
 - `xlite:catalog:lock`：写入时的短锁
 
-没有别的 xlite 配置键。登录 session **不**进 Redis，每个网关进程各自一份。
+没有别的 xlite 配置键。登录 session 是**无状态签名 Cookie**（HMAC-SHA256），不进 Redis；只要各节点 `ADMIN_PASSWORD`（或显式 `ADMIN_SESSION_SECRET`）一致，任意节点都能校验，HAProxy 轮询下也不用粘性。
 
 ---
 
@@ -211,7 +212,7 @@ docker compose --profile ha up -d xlite-2
 curl -sS -H "Authorization: Bearer $KEY" http://127.0.0.1:8081/v1/models
 ```
 
-两个 Admin 要分别登录（cookie 不共享）。
+两个网关共用同一份 `ADMIN_PASSWORD`，Admin 会话是无状态签名 Cookie，`:8080` 登录后直接访问 `:8081` 也是登录态（有负载均衡时同样无需粘性）。
 
 ---
 
