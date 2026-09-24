@@ -17,11 +17,8 @@ pub async fn health() -> impl IntoResponse {
 }
 
 pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(state.store.pool())
-        .await
-    {
-        Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))).into_response(),
+    match state.store.catalog().ping().await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ready" }))).into_response(),
         Err(err) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "status": "not_ready", "error": err.to_string() })),

@@ -18,8 +18,16 @@ export function SettingsPage() {
       .catch(() => setData(null))
   }, [])
 
+  const storageLabel = (kind: Overview["storage"] | undefined) => {
+    if (kind === "redis") return t("settings.storageRedis")
+    if (kind === "memory") return t("settings.storageMemory")
+    if (kind === "sqlite") return t("settings.storageSqlite")
+    return "—"
+  }
+
   const rows = [
     { label: t("settings.listen"), value: data?.listen ?? "—" },
+    { label: t("settings.storage"), value: storageLabel(data?.storage) },
     { label: t("settings.h2c"), value: data?.h2c ? t("settings.h2cOn") : t("settings.h2cOff") },
     { label: t("settings.routing"), value: t("settings.routingValue") },
   ]

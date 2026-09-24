@@ -14,8 +14,8 @@ You add `migrations/NNN_*.sql`, run `cargo build`, start the gateway, and the ne
 ## Procedure
 1. Create `migrations/NNN_<short_snake_name>.sql` with the next unused version prefix.
 2. **Force rebuild**: `touch src/main.rs` (or any file under `src/` that participates in the binary), then `cargo build --bin xlite`.
-3. Start the gateway with a valid `DATABASE_URL`; migrations run on startup.
-4. Confirm: `\dt` / query `_sqlx_migrations` shows the new `version`, or logs show it applied.
+3. Start the gateway. Default catalog is SQLite (`sqlite:xlite.db`); migrations run on startup. Redis mode does not use SQL migrations.
+4. Confirm: open the sqlite file and query `_sqlx_migrations`, or logs show it applied.
 
 ## Editing an existing migration
 - Changing an already-applied file triggers sqlx checksum checks.

@@ -132,5 +132,9 @@ export const zh = {
     routingValue: "同一优先级内按权重随机，失败后按优先级依次重试",
     password: "管理密码",
     passwordHint: "通过环境变量 ADMIN_PASSWORD 设置，界面不保存明文密码。",
+    storage: "配置存储",
+    storageSqlite: "本机 SQLite 文件",
+    storageMemory: "内存（压测，进程退出即清空）",
+    storageRedis: "Redis（集群共享）",
   },
 }

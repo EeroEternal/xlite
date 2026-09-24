@@ -5,4 +5,5 @@ export interface Overview {
   channels: number
   h2c: boolean
   listen: string
+  storage: "sqlite" | "memory" | "redis"
 }

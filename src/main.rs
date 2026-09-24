@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::{get, post};
-use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
@@ -13,6 +12,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use xlite::admin::{self, AppState};
 use xlite::auth::Sessions;
+use xlite::catalog::Catalog;
 use xlite::config::Config;
 use xlite::proxy;
 use xlite::store::Store;
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "xlite=info,tower_http=info,sqlx=warn".into()),
+                .unwrap_or_else(|_| "xlite=info,tower_http=info,sqlx=warn,redis=warn".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -39,6 +39,8 @@ async fn main() -> Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         listen = %config.listen,
         h2c = config.h2c,
+        redis = config.redis_url.is_some(),
+        database = %config.database_url,
         max_conns = config.max_conns_per_host,
         "starting"
     );
@@ -46,17 +48,8 @@ async fn main() -> Result<()> {
         tracing::warn!("ADMIN_PASSWORD is the default; set it before any shared deployment");
     }
 
-    let pool = PgPoolOptions::new()
-        .max_connections(16)
-        .connect(&config.database_url)
-        .await
-        .context("connect postgres")?;
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("run migrations")?;
-
-    let store = Store::new(pool);
+    let catalog = Catalog::connect(&config).await.context("open catalog")?;
+    let store = Store::new(catalog);
     store.reload().await.context("load routing snapshot")?;
     let upstream = Upstream::new(&config);
     let state = AppState {

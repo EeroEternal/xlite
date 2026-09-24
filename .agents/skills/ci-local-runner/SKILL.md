@@ -12,4 +12,4 @@ scripts/ci_local.sh --full # also run xlite-h2-pool integration tests
 
 需要：Rust 工具链（`rust-toolchain.toml`）、Node 22（`.mise.toml`）、`admin/node_modules`。
 
-`cargo test --lib` 不连 Postgres。启动网关才需要 `DATABASE_URL`。
+`cargo test --lib` 用内存 SQLite，不需要 Postgres。单机启动默认 `sqlite:xlite.db`；压测 `DATABASE_URL=memory`；集群设 `REDIS_URL`。

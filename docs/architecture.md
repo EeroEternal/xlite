@@ -6,7 +6,8 @@ xlite is a thin OpenAI-compatible gateway. It forwards `/v1/chat/completions` as
 
 - Data plane: `src/proxy.rs` authenticates an API key, reads `model`, picks channels, copies the upstream stream.
 - Control plane: `src/admin.rs` plus `admin/` for providers, models, channels, and API keys.
-- Snapshot: `src/store.rs` holds the in-memory routing table reloaded from Postgres.
+- Snapshot: `src/store.rs` holds the in-memory routing table reloaded from the catalog.
+- Catalog: SQLite file by default, in-memory SQLite when `DATABASE_URL=memory`, Redis when `REDIS_URL` is set (cluster).
 
 ## Routing
 
@@ -29,4 +30,14 @@ Cleartext HTTP/2 (`XLITE_UPSTREAM_H2C=1` and `http://` base URL) uses `crates/xl
 | Provider | Upstream `base_url` + API key |
 | Model | Public name clients send |
 | Channel | Model → provider, with weight and priority |
-| API Key | SHA-256 hash in the database; plaintext shown once on create/rotate |
+| API Key | SHA-256 hash in the catalog; plaintext shown once on create/rotate |
+
+## Persistence
+
+| Mode | How to enable | Where config lives |
+| --- | --- | --- |
+| SQLite | default, or `DATABASE_URL=sqlite:xlite.db` | local file |
+| Memory | `DATABASE_URL=memory` | process RAM, for load tests |
+| Redis | `REDIS_URL=redis://...` | `xlite:catalog` JSON, shared by every node |
+
+The request path never talks to SQLite or Redis. Admin writes update the catalog, then the snapshot reloads.

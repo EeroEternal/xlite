@@ -6,10 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::FromRow;
 
 use crate::auth::{self, Sessions};
 use crate::config::Config;
@@ -125,36 +123,19 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    let pool = state.store.pool();
-    let providers = count(pool, "SELECT COUNT(*) FROM providers").await;
-    let models = count(pool, "SELECT COUNT(*) FROM models").await;
-    let keys = count(pool, "SELECT COUNT(*) FROM api_keys").await;
-    let channels = count(pool, "SELECT COUNT(*) FROM channels").await;
-    ok(json!({
-        "providers": providers,
-        "models": models,
-        "api_keys": keys,
-        "channels": channels,
-        "h2c": state.config.h2c,
-        "listen": state.config.listen,
-    }))
-    .into_response()
-}
-
-async fn count(pool: &sqlx::PgPool, sql: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>(sql)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0)
-}
-
-#[derive(FromRow, Serialize)]
-struct ProviderRow {
-    id: i64,
-    name: String,
-    base_url: String,
-    enabled: bool,
-    created_at: DateTime<Utc>,
+    match state.store.catalog().overview_counts().await {
+        Ok(counts) => ok(json!({
+            "providers": counts.providers,
+            "models": counts.models,
+            "api_keys": counts.api_keys,
+            "channels": counts.channels,
+            "h2c": state.config.h2c,
+            "listen": state.config.listen,
+            "storage": state.store.catalog().kind().as_str(),
+        }))
+        .into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -175,12 +156,7 @@ async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -> Re
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ProviderRow>(
-        "SELECT id, name, base_url, enabled, created_at FROM providers ORDER BY id DESC",
-    )
-    .fetch_all(state.store.pool())
-    .await
-    {
+    match state.store.catalog().list_providers().await {
         Ok(rows) => ok(rows).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
@@ -194,13 +170,7 @@ async fn get_provider(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ProviderRow>(
-        "SELECT id, name, base_url, enabled, created_at FROM providers WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
-    {
+    match state.store.catalog().get_provider(id).await {
         Ok(Some(row)) => ok(row).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "provider not found").into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
@@ -215,17 +185,11 @@ async fn create_provider(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ProviderRow>(
-        "INSERT INTO providers (name, base_url, api_key, enabled)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, name, base_url, enabled, created_at",
-    )
-    .bind(&body.name)
-    .bind(&body.base_url)
-    .bind(&body.api_key)
-    .bind(body.enabled)
-    .fetch_one(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .create_provider(&body.name, &body.base_url, &body.api_key, body.enabled)
+        .await
     {
         Ok(row) => {
             let _ = state.store.reload().await;
@@ -244,18 +208,11 @@ async fn update_provider(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ProviderRow>(
-        "UPDATE providers SET name = $1, base_url = $2, api_key = CASE WHEN $3 = '' THEN api_key ELSE $3 END, enabled = $4
-         WHERE id = $5
-         RETURNING id, name, base_url, enabled, created_at",
-    )
-    .bind(&body.name)
-    .bind(&body.base_url)
-    .bind(&body.api_key)
-    .bind(body.enabled)
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .update_provider(id, &body.name, &body.base_url, &body.api_key, body.enabled)
+        .await
     {
         Ok(Some(row)) => {
             let _ = state.store.reload().await;
@@ -274,25 +231,13 @@ async fn delete_provider(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query("DELETE FROM providers WHERE id = $1")
-        .bind(id)
-        .execute(state.store.pool())
-        .await
-    {
-        Ok(_) => {
+    match state.store.catalog().delete_provider(id).await {
+        Ok(()) => {
             let _ = state.store.reload().await;
             ok(json!({ "id": id })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
     }
-}
-
-#[derive(FromRow, Serialize)]
-struct ModelRow {
-    id: i64,
-    name: String,
-    enabled: bool,
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize)]
@@ -306,12 +251,7 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ModelRow>(
-        "SELECT id, name, enabled, created_at FROM models ORDER BY id DESC",
-    )
-    .fetch_all(state.store.pool())
-    .await
-    {
+    match state.store.catalog().list_models().await {
         Ok(rows) => ok(rows).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
@@ -325,13 +265,7 @@ async fn get_model(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ModelRow>(
-        "SELECT id, name, enabled, created_at FROM models WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
-    {
+    match state.store.catalog().get_model(id).await {
         Ok(Some(row)) => ok(row).into_response(),
         Ok(None) => err(StatusCode::NOT_FOUND, "model not found").into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
@@ -346,14 +280,11 @@ async fn create_model(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ModelRow>(
-        "INSERT INTO models (name, enabled) VALUES ($1, $2)
-         RETURNING id, name, enabled, created_at",
-    )
-    .bind(&body.name)
-    .bind(body.enabled)
-    .fetch_one(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .create_model(&body.name, body.enabled)
+        .await
     {
         Ok(row) => {
             let _ = state.store.reload().await;
@@ -372,15 +303,11 @@ async fn update_model(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ModelRow>(
-        "UPDATE models SET name = $1, enabled = $2 WHERE id = $3
-         RETURNING id, name, enabled, created_at",
-    )
-    .bind(&body.name)
-    .bind(body.enabled)
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .update_model(id, &body.name, body.enabled)
+        .await
     {
         Ok(Some(row)) => {
             let _ = state.store.reload().await;
@@ -399,28 +326,13 @@ async fn delete_model(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query("DELETE FROM models WHERE id = $1")
-        .bind(id)
-        .execute(state.store.pool())
-        .await
-    {
-        Ok(_) => {
+    match state.store.catalog().delete_model(id).await {
+        Ok(()) => {
             let _ = state.store.reload().await;
             ok(json!({ "id": id })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
     }
-}
-
-#[derive(FromRow, Serialize)]
-struct ChannelRow {
-    id: i64,
-    model_id: i64,
-    provider_id: i64,
-    upstream_model: String,
-    weight: i32,
-    priority: i32,
-    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -444,13 +356,7 @@ async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Res
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, model_id, provider_id, upstream_model, weight, priority, enabled
-         FROM channels ORDER BY priority ASC, id ASC",
-    )
-    .fetch_all(state.store.pool())
-    .await
-    {
+    match state.store.catalog().list_channels().await {
         Ok(rows) => ok(rows).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
@@ -464,19 +370,18 @@ async fn create_channel(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ChannelRow>(
-        "INSERT INTO channels (model_id, provider_id, upstream_model, weight, priority, enabled)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, model_id, provider_id, upstream_model, weight, priority, enabled",
-    )
-    .bind(body.model_id)
-    .bind(body.provider_id)
-    .bind(&body.upstream_model)
-    .bind(body.weight.max(1))
-    .bind(body.priority)
-    .bind(body.enabled)
-    .fetch_one(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .create_channel(
+            body.model_id,
+            body.provider_id,
+            &body.upstream_model,
+            body.weight,
+            body.priority,
+            body.enabled,
+        )
+        .await
     {
         Ok(row) => {
             let _ = state.store.reload().await;
@@ -495,21 +400,19 @@ async fn update_channel(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ChannelRow>(
-        "UPDATE channels SET model_id = $1, provider_id = $2, upstream_model = $3,
-            weight = $4, priority = $5, enabled = $6
-         WHERE id = $7
-         RETURNING id, model_id, provider_id, upstream_model, weight, priority, enabled",
-    )
-    .bind(body.model_id)
-    .bind(body.provider_id)
-    .bind(&body.upstream_model)
-    .bind(body.weight.max(1))
-    .bind(body.priority)
-    .bind(body.enabled)
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .update_channel(
+            id,
+            body.model_id,
+            body.provider_id,
+            &body.upstream_model,
+            body.weight,
+            body.priority,
+            body.enabled,
+        )
+        .await
     {
         Ok(Some(row)) => {
             let _ = state.store.reload().await;
@@ -528,26 +431,13 @@ async fn delete_channel(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query("DELETE FROM channels WHERE id = $1")
-        .bind(id)
-        .execute(state.store.pool())
-        .await
-    {
-        Ok(_) => {
+    match state.store.catalog().delete_channel(id).await {
+        Ok(()) => {
             let _ = state.store.reload().await;
             ok(json!({ "id": id })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
     }
-}
-
-#[derive(FromRow, Serialize)]
-struct ApiKeyRow {
-    id: i64,
-    name: String,
-    key_prefix: String,
-    enabled: bool,
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize)]
@@ -568,49 +458,30 @@ struct ApiKeyUpdateBody {
     enabled: bool,
 }
 
-#[derive(FromRow)]
-struct KeyBindingRow {
-    api_key_id: i64,
-    model_id: i64,
-}
-
 async fn list_api_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    let rows = match sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id, name, key_prefix, enabled, created_at FROM api_keys ORDER BY id DESC",
-    )
-    .fetch_all(state.store.pool())
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
-    };
-    let bindings =
-        sqlx::query_as::<_, KeyBindingRow>("SELECT api_key_id, model_id FROM api_key_models")
-            .fetch_all(state.store.pool())
-            .await
-            .unwrap_or_default();
-    let mut by_key: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
-    for b in bindings {
-        by_key.entry(b.api_key_id).or_default().push(b.model_id);
+    match state.store.catalog().list_api_keys().await {
+        Ok(rows) => {
+            let data: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "id": row.id,
+                        "name": row.name,
+                        "key_prefix": row.key_prefix,
+                        "masked_key": format!("{}...****", row.key_prefix),
+                        "enabled": row.enabled,
+                        "created_at": row.created_at,
+                        "model_ids": row.model_ids,
+                    })
+                })
+                .collect();
+            ok(data).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
-    let data: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "id": row.id,
-                "name": row.name,
-                "key_prefix": row.key_prefix,
-                "masked_key": format!("{}...****", row.key_prefix),
-                "enabled": row.enabled,
-                "created_at": row.created_at,
-                "model_ids": by_key.get(&row.id).cloned().unwrap_or_default(),
-            })
-        })
-        .collect();
-    ok(data).into_response()
 }
 
 async fn create_api_key(
@@ -624,35 +495,27 @@ async fn create_api_key(
     let plaintext = generate_api_key();
     let hash = hash_api_key(&plaintext);
     let prefix = key_prefix(&plaintext);
-    let row = match sqlx::query_as::<_, ApiKeyRow>(
-        "INSERT INTO api_keys (name, key_hash, key_prefix, enabled)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, name, key_prefix, enabled, created_at",
-    )
-    .bind(&body.name)
-    .bind(&hash)
-    .bind(&prefix)
-    .bind(body.enabled)
-    .fetch_one(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .create_api_key(&body.name, &hash, &prefix, body.enabled, &body.model_ids)
+        .await
     {
-        Ok(row) => row,
-        Err(e) => return err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
-    };
-    if let Err(e) = replace_key_models(state.store.pool(), row.id, &body.model_ids).await {
-        return err(StatusCode::BAD_REQUEST, &e.to_string()).into_response();
+        Ok(row) => {
+            let _ = state.store.reload().await;
+            ok(json!({
+                "id": row.id,
+                "name": row.name,
+                "key": plaintext,
+                "key_prefix": row.key_prefix,
+                "masked_key": mask_api_key(&plaintext),
+                "enabled": row.enabled,
+                "created_at": row.created_at,
+            }))
+            .into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
     }
-    let _ = state.store.reload().await;
-    ok(json!({
-        "id": row.id,
-        "name": row.name,
-        "key": plaintext,
-        "key_prefix": row.key_prefix,
-        "masked_key": mask_api_key(&plaintext),
-        "enabled": row.enabled,
-        "created_at": row.created_at,
-    }))
-    .into_response()
 }
 
 async fn update_api_key(
@@ -664,22 +527,13 @@ async fn update_api_key(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query_as::<_, ApiKeyRow>(
-        "UPDATE api_keys SET name = $1, enabled = $2 WHERE id = $3
-         RETURNING id, name, key_prefix, enabled, created_at",
-    )
-    .bind(&body.name)
-    .bind(body.enabled)
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .update_api_key(id, &body.name, body.enabled, body.model_ids.as_deref())
+        .await
     {
         Ok(Some(row)) => {
-            if let Some(model_ids) = body.model_ids
-                && let Err(e) = replace_key_models(state.store.pool(), id, &model_ids).await
-            {
-                return err(StatusCode::BAD_REQUEST, &e.to_string()).into_response();
-            }
             let _ = state.store.reload().await;
             ok(row).into_response()
         }
@@ -699,15 +553,11 @@ async fn rotate_api_key(
     let plaintext = generate_api_key();
     let hash = hash_api_key(&plaintext);
     let prefix = key_prefix(&plaintext);
-    match sqlx::query_as::<_, ApiKeyRow>(
-        "UPDATE api_keys SET key_hash = $1, key_prefix = $2 WHERE id = $3
-         RETURNING id, name, key_prefix, enabled, created_at",
-    )
-    .bind(&hash)
-    .bind(&prefix)
-    .bind(id)
-    .fetch_optional(state.store.pool())
-    .await
+    match state
+        .store
+        .catalog()
+        .rotate_api_key(id, &hash, &prefix)
+        .await
     {
         Ok(Some(row)) => {
             let _ = state.store.reload().await;
@@ -735,34 +585,11 @@ async fn delete_api_key(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    match sqlx::query("DELETE FROM api_keys WHERE id = $1")
-        .bind(id)
-        .execute(state.store.pool())
-        .await
-    {
-        Ok(_) => {
+    match state.store.catalog().delete_api_key(id).await {
+        Ok(()) => {
             let _ = state.store.reload().await;
             ok(json!({ "id": id })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
     }
-}
-
-async fn replace_key_models(
-    pool: &sqlx::PgPool,
-    key_id: i64,
-    model_ids: &[i64],
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM api_key_models WHERE api_key_id = $1")
-        .bind(key_id)
-        .execute(pool)
-        .await?;
-    for model_id in model_ids {
-        sqlx::query("INSERT INTO api_key_models (api_key_id, model_id) VALUES ($1, $2)")
-            .bind(key_id)
-            .bind(model_id)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
 }

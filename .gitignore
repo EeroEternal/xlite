@@ -10,6 +10,9 @@
 admin/dist/
 *.log
 xlite.db
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 __pycache__/
 data.db
 scripts/loadtest/results/

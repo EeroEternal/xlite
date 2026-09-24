@@ -132,5 +132,9 @@ export const en = {
     routingValue: "Weighted random inside a priority group, then failover by priority",
     password: "Admin password",
     passwordHint: "Set ADMIN_PASSWORD in the environment. The console does not store the plaintext password.",
+    storage: "Catalog storage",
+    storageSqlite: "Local SQLite file",
+    storageMemory: "In-memory (cleared when the process exits)",
+    storageRedis: "Redis (shared across the cluster)",
   },
 }

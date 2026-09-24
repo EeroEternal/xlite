@@ -3,44 +3,44 @@
 -- Failover tries the next channel only before the first response byte.
 
 CREATE TABLE providers (
-    id            BIGSERIAL PRIMARY KEY,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL,
     base_url      TEXT NOT NULL,
     api_key       TEXT NOT NULL DEFAULT '',
-    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE models (
-    id            BIGSERIAL PRIMARY KEY,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL UNIQUE,
-    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE channels (
-    id              BIGSERIAL PRIMARY KEY,
-    model_id        BIGINT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
-    provider_id     BIGINT NOT NULL REFERENCES providers(id) ON DELETE RESTRICT,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id        INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    provider_id     INTEGER NOT NULL REFERENCES providers(id) ON DELETE RESTRICT,
     upstream_model  TEXT NOT NULL,
-    weight          INT NOT NULL DEFAULT 1 CHECK (weight >= 1),
-    priority        INT NOT NULL DEFAULT 0,
-    enabled         BOOLEAN NOT NULL DEFAULT TRUE
+    weight          INTEGER NOT NULL DEFAULT 1 CHECK (weight >= 1),
+    priority        INTEGER NOT NULL DEFAULT 0,
+    enabled         INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE INDEX idx_channels_model ON channels(model_id) WHERE enabled;
+CREATE INDEX idx_channels_model ON channels(model_id) WHERE enabled = 1;
 
 CREATE TABLE api_keys (
-    id            BIGSERIAL PRIMARY KEY,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL,
     key_hash      TEXT NOT NULL UNIQUE,
     key_prefix    TEXT NOT NULL,
-    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE api_key_models (
-    api_key_id    BIGINT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
-    model_id      BIGINT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    api_key_id    INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+    model_id      INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
     PRIMARY KEY (api_key_id, model_id)
 );

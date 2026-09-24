@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
+    pub redis_url: Option<String>,
     pub listen: String,
     pub h2c: bool,
     pub admin_password: String,
@@ -11,7 +12,12 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
+        let redis_url = std::env::var("REDIS_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let database_url =
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:xlite.db".into());
         let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
         let host = std::env::var("LISTEN_HOST").unwrap_or_else(|_| "0.0.0.0".into());
         let h2c = env_flag("XLITE_UPSTREAM_H2C");
@@ -24,6 +30,7 @@ impl Config {
             .unwrap_or(32);
         Ok(Self {
             database_url,
+            redis_url,
             listen: format!("{host}:{port}"),
             h2c,
             admin_password,
@@ -45,6 +52,15 @@ fn parse_flag(value: &str) -> bool {
     )
 }
 
+pub fn is_memory_url(url: &str) -> bool {
+    let u = url.trim().to_ascii_lowercase();
+    u == "memory"
+        || u == ":memory:"
+        || u == "sqlite::memory:"
+        || u == "sqlite://:memory:"
+        || u.contains("mode=memory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +72,12 @@ mod tests {
         assert!(parse_flag(" yes "));
         assert!(!parse_flag("0"));
         assert!(!parse_flag("false"));
+    }
+
+    #[test]
+    fn memory_urls() {
+        assert!(is_memory_url("memory"));
+        assert!(is_memory_url("sqlite::memory:"));
+        assert!(!is_memory_url("sqlite:xlite.db"));
     }
 }

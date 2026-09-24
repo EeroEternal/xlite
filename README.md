@@ -7,10 +7,16 @@ Scheduling matches New API: weighted random inside the lowest priority group, th
 ## Run
 
 ```bash
-export DATABASE_URL=postgres://localhost/xlite
+# Single node: SQLite file (default sqlite:xlite.db)
 export ADMIN_PASSWORD=admin
 export XLITE_UPSTREAM_H2C=1   # for plaintext HTTP/2 mocks
 cargo run --release
+
+# Load test: in-memory catalog
+# DATABASE_URL=memory cargo run --release
+
+# Cluster: shared catalog in Redis
+# REDIS_URL=redis://127.0.0.1:6379 cargo run --release
 ```
 
 Listen defaults to `0.0.0.0:8080`.

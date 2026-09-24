@@ -1,13 +1,13 @@
-//! In-memory snapshot of keys, models, and channels. Reloaded from Postgres.
+//! In-memory snapshot of keys, models, and channels.
 //! Routing is new-api style: pick a weighted random enabled channel for the
 //! requested model, then failover to the rest before the first byte.
 
 use anyhow::Result;
 use rand::Rng;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::catalog::{Catalog, RoutingChannel, RoutingSnapshot};
 use crate::hash::hash_api_key;
 
 #[derive(Clone, Debug)]
@@ -43,121 +43,24 @@ pub struct Snapshot {
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<RwLock<Snapshot>>,
-    pool: PgPool,
-}
-
-#[derive(sqlx::FromRow)]
-struct KeyRow {
-    id: i64,
-    key_hash: String,
-}
-
-#[derive(sqlx::FromRow)]
-struct BindingRow {
-    api_key_id: i64,
-    model_id: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct ModelRow {
-    id: i64,
-    name: String,
-}
-
-#[derive(sqlx::FromRow)]
-struct ChannelRow {
-    id: i64,
-    model_id: i64,
-    provider_id: i64,
-    upstream_model: String,
-    weight: i32,
-    priority: i32,
-    base_url: String,
-    api_key: String,
+    catalog: Catalog,
 }
 
 impl Store {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(catalog: Catalog) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Snapshot::default())),
-            pool,
+            catalog,
         }
     }
 
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
     }
 
     pub async fn reload(&self) -> Result<()> {
-        let keys =
-            sqlx::query_as::<_, KeyRow>("SELECT id, key_hash FROM api_keys WHERE enabled = TRUE")
-                .fetch_all(&self.pool)
-                .await?;
-        let bindings =
-            sqlx::query_as::<_, BindingRow>("SELECT api_key_id, model_id FROM api_key_models")
-                .fetch_all(&self.pool)
-                .await?;
-        let mut allowed: HashMap<i64, Vec<i64>> = HashMap::new();
-        for b in &bindings {
-            allowed.entry(b.api_key_id).or_default().push(b.model_id);
-        }
-        let mut key_map = HashMap::new();
-        for k in keys {
-            key_map.insert(
-                k.key_hash,
-                KeyRecord {
-                    id: k.id,
-                    allowed_model_ids: allowed.get(&k.id).cloned(),
-                },
-            );
-        }
-
-        let models =
-            sqlx::query_as::<_, ModelRow>("SELECT id, name FROM models WHERE enabled = TRUE")
-                .fetch_all(&self.pool)
-                .await?;
-        let channels = sqlx::query_as::<_, ChannelRow>(
-            r#"
-            SELECT c.id, c.model_id, c.provider_id, c.upstream_model, c.weight, c.priority,
-                   p.base_url, p.api_key
-            FROM channels c
-            JOIN providers p ON p.id = c.provider_id
-            WHERE c.enabled = TRUE AND p.enabled = TRUE
-            ORDER BY c.priority ASC, c.id ASC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let mut by_model: HashMap<i64, Vec<Channel>> = HashMap::new();
-        for c in channels {
-            by_model.entry(c.model_id).or_default().push(Channel {
-                id: c.id,
-                provider_id: c.provider_id,
-                base_url: c.base_url,
-                api_key: c.api_key,
-                upstream_model: c.upstream_model,
-                weight: c.weight,
-                priority: c.priority,
-            });
-        }
-        let mut model_map = HashMap::new();
-        for m in models {
-            if let Some(chs) = by_model.remove(&m.id) {
-                model_map.insert(
-                    m.name.clone(),
-                    ModelRoute {
-                        model_id: m.id,
-                        name: m.name,
-                        channels: chs,
-                    },
-                );
-            }
-        }
-
-        *self.inner.write().expect("snapshot lock") = Snapshot {
-            keys: key_map,
-            models: model_map,
-        };
+        let routing = self.catalog.load_routing().await?;
+        *self.inner.write().expect("snapshot lock") = snapshot_from_routing(routing);
         Ok(())
     }
 
@@ -183,8 +86,6 @@ impl Store {
         names
     }
 
-    /// Weighted random among the first priority group, then the remaining
-    /// channels in priority order for failover. Same idea as new-api channel groups.
     pub fn channels_for(&self, key: &KeyRecord, model: &str) -> Option<Vec<Channel>> {
         let snap = self.inner.read().ok()?;
         let route = snap.models.get(model)?;
@@ -197,6 +98,43 @@ impl Store {
             return None;
         }
         Some(order_channels(&route.channels))
+    }
+}
+
+fn snapshot_from_routing(routing: RoutingSnapshot) -> Snapshot {
+    let mut keys = HashMap::new();
+    for k in routing.keys {
+        keys.insert(
+            k.key_hash,
+            KeyRecord {
+                id: k.id,
+                allowed_model_ids: k.allowed_model_ids,
+            },
+        );
+    }
+    let mut models = HashMap::new();
+    for m in routing.models {
+        models.insert(
+            m.name.clone(),
+            ModelRoute {
+                model_id: m.model_id,
+                name: m.name,
+                channels: m.channels.into_iter().map(to_channel).collect(),
+            },
+        );
+    }
+    Snapshot { keys, models }
+}
+
+fn to_channel(c: RoutingChannel) -> Channel {
+    Channel {
+        id: c.id,
+        provider_id: c.provider_id,
+        base_url: c.base_url,
+        api_key: c.api_key,
+        upstream_model: c.upstream_model,
+        weight: c.weight,
+        priority: c.priority,
     }
 }
 
