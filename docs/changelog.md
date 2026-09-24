@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **在途上限 `XLITE_MAX_IN_FLIGHT`**：0 为不限制。1GbE 上建议约 8000，避免 3 万 VU 把网卡切成 30s 流。等待拿槽位，不是公平队列。
+
 ## [0.2.0] - 2026-09-24
 
 - **Admin 会话改为无状态签名 Cookie**：`xlite_session` 变为 HMAC-SHA256 签名的 `exp.nonce`（密钥取自 `ADMIN_SESSION_SECRET`，未设则用 `ADMIN_PASSWORD`）。任意网关节点都能独立校验，HAProxy/负载均衡后无需会话粘性，也不再依赖进程内内存；集群各节点设置同一个 `ADMIN_PASSWORD`（或显式 `ADMIN_SESSION_SECRET`）即可共用登录态。

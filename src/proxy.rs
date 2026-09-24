@@ -1,16 +1,35 @@
 //! OpenAI-compatible data plane: authenticate, pick a channel, copy bytes.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::admin::AppState;
 use crate::store::Channel;
-use crate::upstream::{UpstreamResponse, should_failover};
+use crate::upstream::{UpstreamBody, UpstreamResponse, should_failover};
+
+struct GuardedBody {
+    inner: UpstreamBody,
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl Stream for GuardedBody {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_next(cx)
+    }
+}
 
 pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok", "gateway": "xlite" }))
@@ -87,11 +106,31 @@ pub async fn chat_completions(
             .into_response();
     };
 
+    let mut permit = if let Some(sem) = &state.in_flight {
+        match sem.clone().acquire_owned().await {
+            Ok(p) => Some(p),
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": { "message": "in-flight limiter closed", "type": "server_error" }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let mut last_error = "no channel available".to_string();
     for channel in channels {
-        match try_channel(&state, &channel, &mut payload).await {
+        match try_channel(&state, &channel, &mut payload, permit).await {
             Ok(response) => return response,
-            Err(err) => last_error = err,
+            Err((err, returned_permit)) => {
+                last_error = err;
+                permit = returned_permit;
+            }
         }
     }
     (
@@ -107,45 +146,54 @@ async fn try_channel(
     state: &AppState,
     channel: &Channel,
     payload: &mut Value,
-) -> Result<Response, String> {
+    permit: Option<OwnedSemaphorePermit>,
+) -> Result<Response, (String, Option<OwnedSemaphorePermit>)> {
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(
             "model".into(),
             Value::String(channel.upstream_model.clone()),
         );
     }
-    let body = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
-    let upstream = state
+    let body = match serde_json::to_vec(payload) {
+        Ok(b) => b,
+        Err(e) => return Err((e.to_string(), permit)),
+    };
+    let upstream = match state
         .upstream
         .post_stream(&channel.base_url, &channel.api_key, &body)
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(u) => u,
+        Err(e) => return Err((e.to_string(), permit)),
+    };
     if should_failover(upstream.status, false) {
         let _ = drain_error_body(upstream).await;
-        return Err(format!(
-            "upstream {} returned {}",
-            channel.base_url, "retryable status"
+        return Err((
+            format!("upstream {} returned retryable status", channel.base_url),
+            permit,
         ));
     }
-    Ok(forward_response(upstream))
+    Ok(forward_response(upstream, permit))
 }
 
-fn forward_response(upstream: UpstreamResponse) -> Response {
+fn forward_response(upstream: UpstreamResponse, permit: Option<OwnedSemaphorePermit>) -> Response {
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY));
     let content_type = upstream
         .content_type
         .unwrap_or_else(|| "application/json".into());
     builder = builder.header(axum::http::header::CONTENT_TYPE, content_type);
-    builder
-        .body(Body::from_stream(upstream.body))
-        .unwrap_or_else(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": { "message": "failed to build response" } })),
-            )
-                .into_response()
-        })
+    let body = GuardedBody {
+        inner: upstream.body,
+        _permit: permit,
+    };
+    builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": { "message": "failed to build response" } })),
+        )
+            .into_response()
+    })
 }
 
 async fn drain_error_body(upstream: UpstreamResponse) {

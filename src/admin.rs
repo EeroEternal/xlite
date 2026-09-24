@@ -15,6 +15,8 @@ use crate::config::Config;
 use crate::hash::{generate_api_key, hash_api_key, key_prefix, mask_api_key};
 use crate::store::Store;
 use crate::upstream::Upstream;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +25,7 @@ pub struct AppState {
     pub admin_password: String,
     pub upstream: Upstream,
     pub config: Config,
+    pub in_flight: Option<Arc<Semaphore>>,
 }
 
 pub fn router() -> Router<AppState> {
