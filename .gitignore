@@ -21,6 +21,7 @@ xlite.db
 __pycache__/
 data.db
 scripts/loadtest/results/
+/bench/
 .gstack/
 # (removed product tarball)
 # IDE / agent local state — shareable project skills & rules are tracked
