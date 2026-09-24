@@ -137,15 +137,20 @@ async fn run_server() -> Result<()> {
         config: config.clone(),
     };
 
-    let reload_store = store.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Err(err) = reload_store.reload().await {
-                tracing::warn!("snapshot reload failed: {err}");
+    if config.catalog_reload_secs > 0 {
+        let reload_store = store.clone();
+        let period = Duration::from_secs(config.catalog_reload_secs);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(period).await;
+                if let Err(err) = reload_store.reload().await {
+                    tracing::warn!("snapshot reload failed: {err}");
+                }
             }
-        }
-    });
+        });
+    } else {
+        info!("catalog snapshot reload disabled");
+    }
 
     let mut app = Router::new()
         .route("/health", get(proxy::health))

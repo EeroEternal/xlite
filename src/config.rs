@@ -9,6 +9,8 @@ pub struct Config {
     pub admin_password: String,
     pub session_secret: Option<String>,
     pub max_conns_per_host: usize,
+    /// Catalog snapshot reload period. `0` disables the background loop (load test).
+    pub catalog_reload_secs: u64,
 }
 
 impl Config {
@@ -33,6 +35,10 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .filter(|&n: &usize| n > 0)
             .unwrap_or(32);
+        let catalog_reload_secs = std::env::var("XLITE_CATALOG_RELOAD_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
         Ok(Self {
             database_url,
             redis_url,
@@ -41,6 +47,7 @@ impl Config {
             admin_password,
             session_secret,
             max_conns_per_host,
+            catalog_reload_secs,
         })
     }
 }
