@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **示例 YAML 写死压测 Key**：`examples/mock-24*.yaml` 与 `catalog.yaml` 的 `api_keys.loadtest.key` 为 `sk-loadtest`，import 后无需打开 Admin。
 - **24 mock Docker 台架**：`Dockerfile` / `Dockerfile.mock`；Compose 与操作说明在 `deploy/`。配置走 Redis；上游 YAML 为 `examples/mock-24.docker.yaml`（主机名 `mocks`）。
 
 ## [0.1.0] - 2026-09-24

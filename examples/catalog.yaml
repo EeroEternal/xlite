@@ -32,6 +32,6 @@ models:
 
 api_keys:
   - name: loadtest
-    # Omit `key` to generate one. Import prints the plaintext once.
+    key: sk-loadtest
     models: []
     enabled: true

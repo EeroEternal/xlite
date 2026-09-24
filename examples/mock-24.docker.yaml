@@ -226,5 +226,6 @@ models:
 
 api_keys:
   - name: loadtest
+    key: sk-loadtest
     models: []
     enabled: true

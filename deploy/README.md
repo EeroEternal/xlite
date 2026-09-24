@@ -131,14 +131,16 @@ cd ~/github/xlite/deploy
 docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
 ```
 
-成功时类似：
+示例 YAML 已写死客户端密钥，不必开 Admin：
 
-```
-imported providers +24/~0 models +1/~0 channels +24/~0 keys +1/~0
-api key loadtest: sk-0123abcd...
+```yaml
+api_keys:
+  - name: loadtest
+    key: sk-loadtest
+    models: []
 ```
 
-把 `sk-` 开头那一整行保存。明文只出现这一次。之后 `--replace` 会再生成一把新的，旧 Key 立刻失效。
+import 成功后 curl / k6 直接用 `sk-loadtest`。要换一把，改 YAML 里的 `key:` 再 import。不写 `key` 时才会现场生成，并在终端打印一次；生成之后界面里也只能看到掩码，看不到完整明文。
 
 `--replace`：先清空 Redis 目录再写入。合并（按名称更新、保留未出现的对象）去掉 `--replace`。
 
@@ -155,7 +157,7 @@ docker compose exec redis redis-cli GET xlite:catalog | grep -c mock-41
 ## 5. 冒烟
 
 ```bash
-export KEY='sk-上一步完整密钥'
+export KEY=sk-loadtest
 
 curl -sS http://127.0.0.1:8080/health
 # {"status":"ok","gateway":"xlite"}
@@ -271,7 +273,7 @@ xlite 启动日志应含 `catalog backend redis` 且 `h2c=true`。
 | mock 健康检查失败 | 监听 `127.0.0.1` | `MOCK_LISTEN=0.0.0.0` |
 | Admin 空白 | 镜像没打进 `admin/dist` | 在仓库根用 `Dockerfile` 重新 `--build` |
 | 第二台没有模型 | 快照未 reload | 等 5 秒；两台 `REDIS_URL` 必须相同 |
-| 401 | Key 抄漏或再次 `--replace` | 用最新一次 import 打印的 Key |
+| 401 | YAML 没写 `key` 或和请求不一致 | 示例用 `sk-loadtest`；改 YAML 后重新 import |
 
 ---
 
