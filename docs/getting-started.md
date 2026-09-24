@@ -35,6 +35,16 @@ curl -H "Authorization: Bearer sk-..." \
 
 Admin → Settings can import or export the same YAML.
 
+## 24 mock + Redis (Docker)
+
+Do not use a local `cargo` binary. Build images and follow [manual/mock-24-docker.md](manual/mock-24-docker.md):
+
+```bash
+docker compose -f docker-compose.mock-24.yml up -d --build
+docker compose -f docker-compose.mock-24.yml run --rm xlite \
+  import /opt/xlite/examples/mock-24.docker.yaml --replace
+```
+
 ## Health
 
 - `GET /health` — process is up

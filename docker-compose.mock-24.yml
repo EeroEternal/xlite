@@ -1,0 +1,81 @@
+# 24 mock + Redis + xlite. From the repo root:
+#   docker compose -f docker-compose.mock-24.yml up -d --build
+#   docker compose -f docker-compose.mock-24.yml run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+
+name: xlite-mock-24
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  mocks:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock
+    image: xlite-mock:0.1.0
+    environment:
+      MOCK_MODEL: mock
+      MOCK_CHUNKS: "20"
+      MOCK_INTERVAL_MS: "10"
+      MOCK_TTFT_MS: "0"
+      MOCK_LISTEN: "0.0.0.0"
+    ports:
+      - "4101-4124:4101-4124"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4101/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  xlite:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: xlite:0.1.0
+    environment:
+      REDIS_URL: redis://redis:6379
+      XLITE_UPSTREAM_H2C: "1"
+      ADMIN_PASSWORD: admin
+      PORT: "8080"
+      LISTEN_HOST: "0.0.0.0"
+      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: "32"
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mocks:
+        condition: service_healthy
+
+  xlite-2:
+    profiles: ["ha"]
+    image: xlite:0.1.0
+    environment:
+      REDIS_URL: redis://redis:6379
+      XLITE_UPSTREAM_H2C: "1"
+      ADMIN_PASSWORD: admin
+      PORT: "8080"
+      LISTEN_HOST: "0.0.0.0"
+      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: "32"
+    ports:
+      - "8081:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mocks:
+        condition: service_healthy

@@ -38,6 +38,16 @@ Admin API is under `/api/*`. After `cd admin && npm run build`, the binary serve
 
 Pages: overview, providers, models (channels), API keys, settings.
 
+## 24 mock + Redis (Docker)
+
+See [docs/manual/mock-24-docker.md](docs/manual/mock-24-docker.md).
+
+```bash
+docker compose -f docker-compose.mock-24.yml up -d --build
+docker compose -f docker-compose.mock-24.yml run --rm xlite \
+  import /opt/xlite/examples/mock-24.docker.yaml --replace
+```
+
 ## Catalog YAML
 
 One public model can bind many providers. Import with merge (update by name) or replace (wipe first):

@@ -1,0 +1,11 @@
+.git
+target
+admin/node_modules
+admin/dist
+*.db
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+**/.DS_Store
+artifacts
+docs/sessions

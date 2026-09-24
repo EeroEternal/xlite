@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **24 mock Docker 台架**：`Dockerfile` / `Dockerfile.mock` / `docker-compose.mock-24.yml`。配置走 Redis；上游 YAML 为 `examples/mock-24.docker.yaml`（主机名 `mocks`）。操作说明见 `docs/manual/mock-24-docker.md`。
+
 ## [0.1.0] - 2026-09-24
 
 - **YAML 导入/导出路由目录**：供应商、模型（含通道权重/优先级）、API Key 可用一份 YAML 合并或整表替换。设置页导入导出；命令行 `xlite import file.yaml` / `xlite export`。导出不含用户 API Key 明文；导入未写 `key` 时会生成并把明文返回一次。示例见 `examples/catalog.yaml`、`examples/mock-24.yaml`。
