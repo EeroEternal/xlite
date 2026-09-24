@@ -72,47 +72,45 @@ impl Upstream {
     pub async fn post_stream(
         &self,
         endpoint: &str,
-        api_key: &str,
+        authority: &str,
+        path: &str,
+        authorization: &str,
         body: Bytes,
     ) -> Result<UpstreamResponse> {
-        // `endpoint` is the full chat/completions URL, precomputed once per
-        // channel at snapshot build — no per-request URL formatting.
+        // Authority / path / Authorization are computed once per channel at
+        // snapshot build — the request path does not parse the URL again.
         if self.h2c && endpoint.starts_with("http://") {
-            self.post_h2c(endpoint, api_key, body).await
+            self.post_h2c(authority, path, authorization, body).await
         } else {
-            self.post_reqwest(endpoint, api_key, body).await
+            self.post_reqwest(endpoint, authorization, body).await
         }
     }
 
-    async fn post_h2c(&self, url: &str, api_key: &str, body: Bytes) -> Result<UpstreamResponse> {
-        let parsed = url::Url::parse(url).context("invalid upstream url")?;
-        let host = parsed
-            .host_str()
-            .context("upstream url missing host")?
-            .to_string();
-        let port = parsed.port_or_known_default().unwrap_or(80);
-        let authority = format!("{host}:{port}");
-        let path = parsed.path();
-        let uri = if let Some(q) = parsed.query() {
-            format!("{path}?{q}")
-        } else {
-            path.to_string()
-        };
-
+    async fn post_h2c(
+        &self,
+        authority: &str,
+        path: &str,
+        authorization: &str,
+        body: Bytes,
+    ) -> Result<UpstreamResponse> {
+        if authority.is_empty() {
+            anyhow::bail!("upstream url missing host");
+        }
         let mut lease = self
             .pool
-            .acquire(&authority)
+            .acquire(authority)
             .await
             .context("h2 pool acquire")?;
         let eos = body.is_empty();
-        let request = Request::builder()
+        let mut builder = Request::builder()
             .method("POST")
-            .uri(uri)
-            .header("host", &authority)
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {api_key}"))
-            .body(())
-            .context("build h2 request")?;
+            .uri(path)
+            .header("host", authority)
+            .header("content-type", "application/json");
+        if !authorization.is_empty() {
+            builder = builder.header("authorization", authorization);
+        }
+        let request = builder.body(()).context("build h2 request")?;
         let (response_future, mut send_stream) = lease
             .send_request(request, eos)
             .map_err(|e| anyhow::anyhow!("h2 send_request: {e}"))?;
@@ -150,18 +148,18 @@ impl Upstream {
     async fn post_reqwest(
         &self,
         url: &str,
-        api_key: &str,
+        authorization: &str,
         body: Bytes,
     ) -> Result<UpstreamResponse> {
-        let response = self
+        let mut req = self
             .http
             .post(url)
             .header("content-type", "application/json")
-            .bearer_auth(api_key)
-            .body(body)
-            .send()
-            .await
-            .context("upstream request")?;
+            .body(body);
+        if !authorization.is_empty() {
+            req = req.header("authorization", authorization);
+        }
+        let response = req.send().await.context("upstream request")?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -229,6 +227,26 @@ pub fn chat_completions_url(base: &str) -> String {
     }
 }
 
+/// `(authority, path[+query])` for an already-built chat/completions URL.
+pub fn h2c_parts(endpoint: &str) -> Option<(String, String)> {
+    let parsed = url::Url::parse(endpoint).ok()?;
+    let host = parsed.host_str()?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let path = match parsed.query() {
+        Some(q) => format!("{}?{q}", parsed.path()),
+        None => parsed.path().to_string(),
+    };
+    Some((format!("{host}:{port}"), path))
+}
+
+pub fn authorization_header(api_key: &str) -> String {
+    if api_key.is_empty() {
+        String::new()
+    } else {
+        format!("Bearer {api_key}")
+    }
+}
+
 /// Fail over only before the first byte has been written to the client.
 pub fn should_failover(status: u16, bytes_sent: bool) -> bool {
     !bytes_sent && (status >= 500 || status == 429)
@@ -248,6 +266,19 @@ mod tests {
             chat_completions_url("http://127.0.0.1:8000/v1/"),
             "http://127.0.0.1:8000/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn h2c_parts_splits_host_port_and_path() {
+        let (authority, path) = h2c_parts("http://10.99.255.102:4101/v1/chat/completions").unwrap();
+        assert_eq!(authority, "10.99.255.102:4101");
+        assert_eq!(path, "/v1/chat/completions");
+    }
+
+    #[test]
+    fn authorization_header_empty_when_no_key() {
+        assert_eq!(authorization_header(""), "");
+        assert_eq!(authorization_header("sk-test"), "Bearer sk-test");
     }
 
     #[test]

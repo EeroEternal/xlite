@@ -1,3 +1,4 @@
+use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -5,6 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::routing::{get, post};
+use axum::serve::ListenerExt;
+use tokio::net::{TcpListener, TcpSocket};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
@@ -180,12 +183,31 @@ async fn run_server() -> Result<()> {
     }
 
     let addr: SocketAddr = config.listen.parse().context("parse listen address")?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind {addr}"))?;
-    info!("listening on {addr}");
-    axum::serve(listener, app.into_make_service())
-        .await
-        .context("serve")?;
+    let listener = bind_listener(addr).with_context(|| format!("bind {addr}"))?;
+    info!(backlog = LISTEN_BACKLOG, "listening on {addr}");
+    axum::serve(
+        listener.tap_io(|stream| {
+            let _ = stream.set_nodelay(true);
+        }),
+        app.into_make_service(),
+    )
+    .await
+    .context("serve")?;
     Ok(())
+}
+
+/// libc `SOMAXCONN` is 128 on Linux even when `net.core.somaxconn` is larger.
+/// `TcpListener::bind` uses that 128, so a 30k-VU ramp drops SYNs before the
+/// workers ever see them. Pass a large backlog; the kernel clamps it.
+const LISTEN_BACKLOG: u32 = 65535;
+
+fn bind_listener(addr: SocketAddr) -> io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
 }

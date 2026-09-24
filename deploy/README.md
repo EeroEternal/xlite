@@ -12,7 +12,7 @@
 
 镜像在仓库根构建：`Dockerfile`（网关）、`Dockerfile.mock`（24 端口 SSE）。目录 YAML 用 `examples/mock-24.docker.yaml`（上游主机名是 `mocks`）。
 
-当前镜像标签：`xlite:0.1.0`、`xlite-mock:0.1.0`。
+当前镜像标签：`xlite:0.3.0`、`xlite-mock:0.1.0`。
 
 ---
 
@@ -33,7 +33,7 @@ Compose 服务名：
 | --- | --- | --- | --- |
 | `redis` | `redis:7-alpine` | 6379 | `redis:6379` |
 | `mocks` | `xlite-mock:0.1.0` | 4101–4124 | `http://mocks:4101` … `http://mocks:4124` |
-| `xlite` | `xlite:0.1.0` | 8080 | 网关自己 |
+| `xlite` | `xlite:0.3.0` | 8080 | 网关自己 |
 | `xlite-2`（`--profile ha`） | 同上 | 8081 | 第二台网关，同一 Redis |
 
 调度固定为：对外模型名 `mock` → 24 条通道，权重 1、优先级 0 → 同一优先级内按权重随机，首字节前 5xx/429/连接失败才换下一条。一把 API Key，`models: []` 表示不限制模型。
@@ -67,6 +67,17 @@ cp env.example .env
 | `DATABASE_URL` | `sqlite:xlite.db` | **不要设** | 有 Redis 时用不到 |
 
 `XLITE_UPSTREAM_H2C` 为真的写法：`1`、`true`、`yes`、`on`（大小写不敏感）。
+
+网关进程 listen backlog 是 65535，内核按 `net.core.somaxconn` 封顶。压 3 万连接时网关机执行：
+
+```bash
+sysctl -w net.core.somaxconn=65535
+sysctl -w net.core.netdev_max_backlog=65535
+sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+```
+
+不要设 `XLITE_MAX_IN_FLIGHT`。容器 `ulimit nofile` 至少 1048576（compose 外手跑 docker 时加 `--ulimit nofile=1048576:1048576`）。HAProxy 健康检查用 `GET /health`，不是 New API 的 `/api/status`。
 
 h2c 池：对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 满了会再拨一条连接，直到 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`。24 个 mock × 32 条约 768 条连接、按对端 250 流/连接估算约 19 万流上限，一般够本机压测。
 
@@ -117,7 +128,7 @@ docker compose ps
 
 ```bash
 cd ~/github/xlite
-docker build -t xlite:0.1.0 .
+docker build -t xlite:0.3.0 .
 docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
@@ -230,14 +241,14 @@ docker run -d --name xlite-mocks --network xlite-net --network-alias mocks \
 
 docker run --rm --network xlite-net \
   -e REDIS_URL=redis://xlite-redis:6379 \
-  xlite:0.1.0 import /opt/xlite/examples/mock-24.docker.yaml --replace
+  xlite:0.3.0 import /opt/xlite/examples/mock-24.docker.yaml --replace
 
 docker run -d --name xlite-gw --network xlite-net -p 8080:8080 \
   -e REDIS_URL=redis://xlite-redis:6379 \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD=admin \
   -e LISTEN_HOST=0.0.0.0 \
-  xlite:0.1.0
+  xlite:0.3.0
 ```
 
 `--network-alias mocks` 不能省，否则 YAML 里的主机名 `mocks` 解析不到。

@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::catalog::{Catalog, RoutingChannel, RoutingSnapshot};
 use crate::hash::hash_api_key;
-use crate::upstream::chat_completions_url;
+use crate::upstream::{authorization_header, chat_completions_url, h2c_parts};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
@@ -19,7 +19,13 @@ pub struct Channel {
     /// Full chat/completions URL, computed once at snapshot build instead of
     /// re-formatted on every request.
     pub endpoint: String,
+    /// `host:port` for the h2c pool key and Host header.
+    pub authority: String,
+    /// Path (+ query) sent on the h2 request.
+    pub path: String,
     pub api_key: String,
+    /// Pre-rendered `Authorization` value (`Bearer …`), empty when unused.
+    pub authorization: String,
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
@@ -148,12 +154,19 @@ fn snapshot_from_routing(routing: RoutingSnapshot) -> Snapshot {
 }
 
 fn to_channel(c: RoutingChannel) -> Channel {
+    let endpoint = chat_completions_url(&c.base_url);
+    let (authority, path) =
+        h2c_parts(&endpoint).unwrap_or_else(|| (String::new(), "/v1/chat/completions".to_string()));
+    let authorization = authorization_header(&c.api_key);
     Channel {
         id: c.id,
         provider_id: c.provider_id,
-        endpoint: chat_completions_url(&c.base_url),
+        endpoint,
+        authority,
+        path,
         base_url: c.base_url,
         api_key: c.api_key,
+        authorization,
         upstream_model: c.upstream_model,
         weight: c.weight,
         priority: c.priority,
@@ -202,12 +215,18 @@ mod tests {
     use super::*;
 
     fn ch(id: i64, w: i32, p: i32) -> Arc<Channel> {
+        let base_url = format!("http://p{id}");
+        let endpoint = chat_completions_url(&base_url);
+        let (authority, path) = h2c_parts(&endpoint).unwrap_or_default();
         Arc::new(Channel {
             id,
             provider_id: id,
-            base_url: format!("http://p{id}"),
-            endpoint: chat_completions_url(&format!("http://p{id}")),
+            base_url,
+            endpoint,
+            authority,
+            path,
             api_key: String::new(),
+            authorization: String::new(),
             upstream_model: "m".into(),
             weight: w,
             priority: p,

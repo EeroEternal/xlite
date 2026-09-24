@@ -160,7 +160,13 @@ async fn try_channel(
     let body = outbound_body(model, &channel.upstream_model, original, dom)?;
     let upstream = state
         .upstream
-        .post_stream(&channel.endpoint, &channel.api_key, body)
+        .post_stream(
+            &channel.endpoint,
+            &channel.authority,
+            &channel.path,
+            &channel.authorization,
+            body,
+        )
         .await
         .map_err(|e| e.to_string())?;
     if should_failover(upstream.status, false) {
