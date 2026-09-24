@@ -40,12 +40,13 @@ Pages: overview, providers, models (channels), API keys, settings.
 
 ## 24 mock + Redis (Docker)
 
-See [docs/manual/mock-24-docker.md](docs/manual/mock-24-docker.md).
+See [deploy/README.md](deploy/README.md).
 
 ```bash
-docker compose -f docker-compose.mock-24.yml up -d --build
-docker compose -f docker-compose.mock-24.yml run --rm xlite \
-  import /opt/xlite/examples/mock-24.docker.yaml --replace
+cd deploy
+cp env.example .env
+docker compose up -d --build
+docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
 ```
 
 ## Catalog YAML

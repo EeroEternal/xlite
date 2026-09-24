@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **24 mock Docker 台架**：`Dockerfile` / `Dockerfile.mock` / `docker-compose.mock-24.yml`。配置走 Redis；上游 YAML 为 `examples/mock-24.docker.yaml`（主机名 `mocks`）。操作说明见 `docs/manual/mock-24-docker.md`。
+- **24 mock Docker 台架**：`Dockerfile` / `Dockerfile.mock`；Compose 与操作说明在 `deploy/`。配置走 Redis；上游 YAML 为 `examples/mock-24.docker.yaml`（主机名 `mocks`）。
 
 ## [0.1.0] - 2026-09-24
 

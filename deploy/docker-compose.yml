@@ -1,6 +1,9 @@
-# 24 mock + Redis + xlite. From the repo root:
-#   docker compose -f docker-compose.mock-24.yml up -d --build
-#   docker compose -f docker-compose.mock-24.yml run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+# 在本目录执行：
+#   cp env.example .env
+#   docker compose up -d --build
+#   docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+#
+# 构建上下文是仓库根。
 
 name: xlite-mock-24
 
@@ -18,15 +21,15 @@ services:
 
   mocks:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile.mock
     image: xlite-mock:0.1.0
     environment:
-      MOCK_MODEL: mock
-      MOCK_CHUNKS: "20"
-      MOCK_INTERVAL_MS: "10"
-      MOCK_TTFT_MS: "0"
-      MOCK_LISTEN: "0.0.0.0"
+      MOCK_MODEL: ${MOCK_MODEL:-mock}
+      MOCK_CHUNKS: ${MOCK_CHUNKS:-20}
+      MOCK_INTERVAL_MS: ${MOCK_INTERVAL_MS:-10}
+      MOCK_TTFT_MS: ${MOCK_TTFT_MS:-0}
+      MOCK_LISTEN: ${MOCK_LISTEN:-0.0.0.0}
     ports:
       - "4101-4124:4101-4124"
     healthcheck:
@@ -44,16 +47,16 @@ services:
 
   xlite:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     image: xlite:0.1.0
     environment:
       REDIS_URL: redis://redis:6379
-      XLITE_UPSTREAM_H2C: "1"
-      ADMIN_PASSWORD: admin
-      PORT: "8080"
+      XLITE_UPSTREAM_H2C: ${XLITE_UPSTREAM_H2C:-1}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      PORT: ${PORT:-8080}
       LISTEN_HOST: "0.0.0.0"
-      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: "32"
+      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: ${XLITE_UPSTREAM_MAX_CONNS_PER_HOST:-32}
     ports:
       - "8080:8080"
     depends_on:
@@ -67,11 +70,11 @@ services:
     image: xlite:0.1.0
     environment:
       REDIS_URL: redis://redis:6379
-      XLITE_UPSTREAM_H2C: "1"
-      ADMIN_PASSWORD: admin
-      PORT: "8080"
+      XLITE_UPSTREAM_H2C: ${XLITE_UPSTREAM_H2C:-1}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      PORT: ${PORT:-8080}
       LISTEN_HOST: "0.0.0.0"
-      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: "32"
+      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: ${XLITE_UPSTREAM_MAX_CONNS_PER_HOST:-32}
     ports:
       - "8081:8080"
     depends_on:
