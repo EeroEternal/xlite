@@ -116,7 +116,6 @@ async fn run_server() -> Result<()> {
         redis = config.redis_url.is_some(),
         database = %config.database_url,
         max_conns = config.max_conns_per_host,
-        max_in_flight = config.max_in_flight,
         "starting"
     );
     if config.admin_password == "admin" {
@@ -127,15 +126,12 @@ async fn run_server() -> Result<()> {
     let store = Store::new(catalog);
     store.reload().await.context("load routing snapshot")?;
     let upstream = Upstream::new(&config);
-    let in_flight = (config.max_in_flight > 0)
-        .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(config.max_in_flight)));
     let state = AppState {
         store: store.clone(),
         sessions: Sessions::new(&config.admin_password, config.session_secret.as_deref()),
         admin_password: config.admin_password.clone(),
         upstream,
         config: config.clone(),
-        in_flight,
     };
 
     let reload_store = store.clone();

@@ -9,9 +9,6 @@ pub struct Config {
     pub admin_password: String,
     pub session_secret: Option<String>,
     pub max_conns_per_host: usize,
-    /// 0 = unlimited. On a 1 GbE path, cap near ~pipe (e.g. 8000) so
-    /// 31k VUs do not slice the NIC into 30s streams.
-    pub max_in_flight: usize,
 }
 
 impl Config {
@@ -36,10 +33,6 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .filter(|&n: &usize| n > 0)
             .unwrap_or(32);
-        let max_in_flight = std::env::var("XLITE_MAX_IN_FLIGHT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
         Ok(Self {
             database_url,
             redis_url,
@@ -48,7 +41,6 @@ impl Config {
             admin_password,
             session_secret,
             max_conns_per_host,
-            max_in_flight,
         })
     }
 }
