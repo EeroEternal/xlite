@@ -41,7 +41,7 @@ Cleartext HTTP/2 (`XLITE_UPSTREAM_H2C=1` and `http://` base URL) uses `crates/xl
 | Memory | `DATABASE_URL=memory` | process RAM, for load tests |
 | Redis | `REDIS_URL=redis://...` | `xlite:catalog` JSON, shared by every node |
 
-The request path never talks to SQLite or Redis. Admin writes update the catalog, then the snapshot reloads.
+The request path never talks to SQLite or Redis. Admin writes update the catalog, then the snapshot reloads. Load tests may freeze the snapshot (`XLITE_CATALOG_RELOAD_SECS=0`) and probe `/health` instead of `/ready`.
 
 ## YAML catalog
 

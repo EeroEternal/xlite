@@ -64,7 +64,7 @@
 
 ## 六、限流 / 队列
 
-xlite 没有 `src/pool/` 准入队列。不要把 xrouter 的限流默认值或 AIMD 调参带进本仓库。
+xlite 没有 `src/pool/` 准入队列。不要把 xrouter 的限流默认值或 AIMD 调参带进本仓库。压测也不要加 `XLITE_MAX_IN_FLIGHT` 或过载 429。目录可 memory / 冻结 Redis 快照（`XLITE_CATALOG_RELOAD_SECS=0`），HAProxy 探 `/health`；这不是数据面加策略。
 
 ---
 

@@ -13,6 +13,7 @@ Current version is the `version` field in the repo-root `Cargo.toml`, also retur
 | `ADMIN_SESSION_SECRET` | unset | Overrides the key used to sign Admin session cookies; set the same on every node |
 | `XLITE_UPSTREAM_H2C` | off | Plaintext HTTP/2 to `http://` upstreams |
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | h2c pool cap per host |
+| `XLITE_CATALOG_RELOAD_SECS` | `5` | Snapshot reload period; `0` freezes the snapshot (load test) |
 
 Listen backlog is 65535 (kernel-clamped by `net.core.somaxconn`). For 30k concurrent clients set `net.core.somaxconn = 65535` on the gateway host. Do not set `XLITE_MAX_IN_FLIGHT`; that cap was reverted because it queues streams and inflates duration.
 

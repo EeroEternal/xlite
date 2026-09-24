@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **入站 listen backlog 与 TCP_NODELAY**：监听套接字 backlog 65535（内核按 `net.core.somaxconn` 封顶）。Linux 上 libc `SOMAXCONN` 是 128，默认 `TcpListener::bind` 会在 3 万 VU 爬坡时丢 SYN。每条入站连接打开 `TCP_NODELAY`，10ms SSE 不被 Nagle 合并。
 - **h2c 目标预计算**：通道快照带上 `authority` / `path` / `Authorization`，请求路径不再解析上游 URL、不再 `format!("Bearer …")`。
 - **Mock-24 与压测环境手册**：实验室 `117.160.123.99:60000/60001`、客户 22/24/26/29 拓扑、k6 组合与 3 万连接对标，见 `docs/manual/lab-loadtest.md`。
+- **V88 对标 rig**：`KEEP_BODY=true`、无 think-time、1000 VU 起跳；不 cap / 不提前 200 / 超时 600s 的落地方式见 `docs/manual/v88-rig.md`。
+- **压测可冻结目录快照**：`XLITE_CATALOG_RELOAD_SECS=0` 关掉 5 秒 Redis/SQLite 重载；请求路径仍不碰库。HAProxy 探 `/health`。
 
 ## [0.3.0] - 2026-09-24
 

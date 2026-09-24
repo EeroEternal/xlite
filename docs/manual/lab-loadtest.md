@@ -1,6 +1,6 @@
 # Mock-24 与压测环境
 
-24 路上游 mock、实验室两台机、客户现场拓扑。Compose 操作步骤见 [`deploy/README.md`](../../deploy/README.md)。
+24 路上游 mock、实验室两台机、客户现场拓扑。Compose 操作步骤见 [`deploy/README.md`](../../deploy/README.md)。与 New API V88 抄同一套 k6 喂法见 [`v88-rig.md`](v88-rig.md)。
 
 ## 1. 24 mock
 
@@ -106,14 +106,17 @@ xlite 双副本共用同一 Redis（`xlite:catalog` + `xlite:catalog:lock`）。
 
 客户目标：3 万并发连接。New API 现场 Redis `connected_clients` 到过 15596、6 个 key 合计 200MB+。xlite 请求路径不访问 Redis。
 
-B 组、KEEP_BODY=false、双节点时看：
+和 New API 比 TTFT/dur/fail 时，喂法必须抄 V88，见 [`v88-rig.md`](v88-rig.md)。
 
-| 指标 | 线 |
-| --- | --- |
-| 网关 ESTAB | ≥ 30000，fail < 0.5% |
-| duration p50 | ≤ 6.5s（冒烟约 5.5s） |
-| TTFT p50 | ≤ 750ms（mock TTFT 500ms） |
-| Redis `connected_clients` | 始终约 2 |
-| Redis 内存 | < 1MB |
+B 组、双节点时看（两套试验不要混填）：
 
-B 组大约 `30k × 100B × 100 token/s ≈ 2.4 Gbps`。千兆网会先打满网卡，duration 被拉长；那种环境用 E 组证明 3 万连接，B 组放到万兆上比。
+| 指标 | 对标 V88（`KEEP_BODY=true`，活跃流约四五千） | 满负荷（看同时在转的流） |
+| --- | --- | --- |
+| fail | ≤ V88（贴 0%） | < 0.5% |
+| duration p50 | ≤ V88（约 6.5s；冒烟 5.5s） | 千兆上会被网卡拉到 ~30s |
+| TTFT p50 | ≤ V88（mock 500ms + 网关；勿低于 500ms） | 满负荷会高于 750ms |
+| 网关 ESTAB | 与 `qps × dur` 都写进报告 | 若「连接」= 在途 SSE，目标 ≥ 30000 |
+| Redis `connected_clients` | 约 2 | 约 2 |
+| Redis 内存 | < 1MB | < 1MB |
+
+TCP ESTAB 含 keep-alive 空闲时，think-time 下也可以看到近 3 万 ESTAB、只有几千路在转。带宽账 `30k × 100B × 100 token/s ≈ 2.4 Gbps` 用的是**活跃流**。千兆上 B 组满负荷会切片；那种环境用 E 组或万兆打满负荷，对标 V88 用少喂 rig。
