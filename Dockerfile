@@ -3,7 +3,7 @@
 #
 # The binary serves Admin from ./admin/dist relative to the process cwd.
 
-FROM node:22-bookworm-slim AS admin
+FROM node:20-bookworm-slim AS admin
 WORKDIR /admin
 COPY admin/package.json admin/package-lock.json ./
 RUN npm ci

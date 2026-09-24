@@ -1,7 +1,7 @@
 # 24-port SSE mock farm for the mock-24 catalog.
 #   docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
 
-FROM node:22-alpine
+FROM node:20-bookworm-slim
 WORKDIR /app
 COPY scripts/stream_mock_server.mjs ./stream_mock_server.mjs
 COPY scripts/start_mocks.sh ./start_mocks.sh

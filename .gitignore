@@ -1,5 +1,10 @@
 .mimocode/
 /target/
+
+# Local offline/vendored build scaffolding (never committed)
+/.cargo/
+/vendor/
+/Dockerfile.lab
 .redis-sentinel-lab/
 **/node_modules/
 .venv/
