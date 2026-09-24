@@ -187,6 +187,20 @@ impl RedisCatalog {
         Ok(RoutingSnapshot { keys, models })
     }
 
+    pub async fn list_provider_secrets(&self) -> Result<Vec<ProviderSecret>> {
+        let mut dump = self.load().await?;
+        dump.providers.sort_by_key(|p| p.id);
+        Ok(dump.providers)
+    }
+
+    pub async fn wipe(&self) -> Result<()> {
+        self.mutate(|dump| {
+            *dump = Dump::default();
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn list_providers(&self) -> Result<Vec<Provider>> {
         let mut dump = self.load().await?;
         dump.providers.sort_by_key(|p| std::cmp::Reverse(p.id));

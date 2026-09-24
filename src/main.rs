@@ -13,6 +13,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use xlite::admin::{self, AppState};
 use xlite::auth::Sessions;
 use xlite::catalog::Catalog;
+use xlite::catalog::yaml::{self, ImportMode};
 use xlite::config::Config;
 use xlite::proxy;
 use xlite::store::Store;
@@ -25,6 +26,27 @@ static GLOBAL_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("import") => {
+            init_logging();
+            let path = args.next().context("usage: xlite import <file.yaml>")?;
+            cmd_import(&path, args.next().as_deref()).await
+        }
+        Some("export") => {
+            init_logging();
+            cmd_export(args.next().as_deref()).await
+        }
+        Some("-h" | "--help" | "help") => {
+            print_help();
+            Ok(())
+        }
+        Some(other) => anyhow::bail!("unknown command {other}; try xlite --help"),
+        None => run_server().await,
+    }
+}
+
+fn init_logging() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -32,7 +54,59 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
 
+fn print_help() {
+    eprintln!(
+        "xlite — thin OpenAI gateway\n\n\
+         xlite                      start the server\n\
+         xlite import <file.yaml>   merge catalog YAML (add --replace to wipe first)\n\
+         xlite export [file.yaml]   write catalog YAML to a file or stdout"
+    );
+}
+
+async fn cmd_import(path: &str, extra: Option<&str>) -> Result<()> {
+    let replace = extra == Some("--replace") || extra == Some("replace");
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+    let config = Config::from_env()?;
+    let catalog = Catalog::connect(&config).await.context("open catalog")?;
+    let mode = if replace {
+        ImportMode::Replace
+    } else {
+        ImportMode::Merge
+    };
+    let report = yaml::import_yaml(&catalog, &text, mode).await?;
+    println!(
+        "imported providers +{}/~{} models +{}/~{} channels +{}/~{} keys +{}/~{}",
+        report.providers.created,
+        report.providers.updated,
+        report.models.created,
+        report.models.updated,
+        report.channels.created,
+        report.channels.updated,
+        report.api_keys.created,
+        report.api_keys.updated
+    );
+    for secret in report.secrets {
+        println!("api key {}: {}", secret.name, secret.key);
+    }
+    Ok(())
+}
+
+async fn cmd_export(path: Option<&str>) -> Result<()> {
+    let config = Config::from_env()?;
+    let catalog = Catalog::connect(&config).await.context("open catalog")?;
+    let text = yaml::export_yaml(&catalog).await?;
+    if let Some(path) = path {
+        std::fs::write(path, &text).with_context(|| format!("write {path}"))?;
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
+async fn run_server() -> Result<()> {
+    init_logging();
     let config = Config::from_env()?;
     info!(
         gateway = "xlite",

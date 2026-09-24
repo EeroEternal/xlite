@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::{self, Sessions};
+use crate::catalog::yaml::{self, ImportMode};
 use crate::config::Config;
 use crate::hash::{generate_api_key, hash_api_key, key_prefix, mask_api_key};
 use crate::store::Store;
@@ -53,6 +54,8 @@ pub fn router() -> Router<AppState> {
             put(update_api_key).delete(delete_api_key),
         )
         .route("/api/api-keys/{id}/rotate", post(rotate_api_key))
+        .route("/api/catalog/export", get(export_catalog))
+        .route("/api/catalog/import", post(import_catalog))
 }
 
 fn ok<T: Serialize>(data: T) -> Json<Value> {
@@ -117,6 +120,45 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return resp.into_response();
     }
     ok(json!({ "username": "admin", "role_id": 1 })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ImportBody {
+    yaml: String,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn export_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_session(&state, &headers) {
+        return resp.into_response();
+    }
+    match yaml::export_yaml(state.store.catalog()).await {
+        Ok(text) => ok(json!({ "yaml": text })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
+    }
+}
+
+async fn import_catalog(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ImportBody>,
+) -> Response {
+    if let Some(resp) = require_session(&state, &headers) {
+        return resp.into_response();
+    }
+    let mode = if body.replace {
+        ImportMode::Replace
+    } else {
+        ImportMode::Merge
+    };
+    match yaml::import_yaml(state.store.catalog(), &body.yaml, mode).await {
+        Ok(report) => {
+            let _ = state.store.reload().await;
+            ok(report).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
+    }
 }
 
 async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response {

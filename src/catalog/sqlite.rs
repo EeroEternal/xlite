@@ -150,6 +150,33 @@ impl SqliteCatalog {
         .await?)
     }
 
+    pub async fn list_provider_secrets(&self) -> Result<Vec<ProviderSecret>> {
+        Ok(sqlx::query_as::<_, ProviderSecret>(
+            "SELECT id, name, base_url, api_key, enabled, created_at FROM providers ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn wipe(&self) -> Result<()> {
+        sqlx::query("DELETE FROM api_key_models")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM api_keys")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM channels")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM models")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM providers")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_provider(&self, id: i64) -> Result<Option<Provider>> {
         Ok(sqlx::query_as::<_, Provider>(
             "SELECT id, name, base_url, enabled, created_at FROM providers WHERE id = ?",

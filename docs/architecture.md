@@ -41,3 +41,7 @@ Cleartext HTTP/2 (`XLITE_UPSTREAM_H2C=1` and `http://` base URL) uses `crates/xl
 | Redis | `REDIS_URL=redis://...` | `xlite:catalog` JSON, shared by every node |
 
 The request path never talks to SQLite or Redis. Admin writes update the catalog, then the snapshot reloads.
+
+## YAML catalog
+
+`src/catalog/yaml.rs` imports and exports providers, models/channels, and API keys. HTTP: `GET/POST /api/catalog/export|import`. CLI: `xlite import` / `xlite export`. There is no strategy field; channels only have `weight` and `priority`.

@@ -1,6 +1,7 @@
 mod redis;
 mod sqlite;
 pub mod types;
+pub mod yaml;
 
 use anyhow::Result;
 
@@ -72,6 +73,20 @@ impl Catalog {
         match &self.inner {
             Inner::Sqlite(c) => c.list_providers().await,
             Inner::Redis(c) => c.list_providers().await,
+        }
+    }
+
+    pub async fn list_provider_secrets(&self) -> Result<Vec<ProviderSecret>> {
+        match &self.inner {
+            Inner::Sqlite(c) => c.list_provider_secrets().await,
+            Inner::Redis(c) => c.list_provider_secrets().await,
+        }
+    }
+
+    pub async fn wipe(&self) -> Result<()> {
+        match &self.inner {
+            Inner::Sqlite(c) => c.wipe().await,
+            Inner::Redis(c) => c.wipe().await,
         }
     }
 
@@ -342,5 +357,47 @@ mod tests {
         assert_eq!(counts.providers, 1);
         assert_eq!(counts.models, 1);
         assert_eq!(counts.channels, 1);
+    }
+
+    #[tokio::test]
+    async fn yaml_import_one_key_many_providers() {
+        let catalog = Catalog::connect(&test_cfg()).await.expect("connect");
+        let yaml = r#"
+providers:
+  - name: mock-a
+    base_url: http://127.0.0.1:4101
+  - name: mock-b
+    base_url: http://127.0.0.1:4102
+models:
+  - name: mock
+    channels:
+      - provider: mock-a
+        upstream_model: mock
+        weight: 1
+      - provider: mock-b
+        upstream_model: mock
+        weight: 1
+api_keys:
+  - name: loadtest
+    models: []
+"#;
+        let report = yaml::import_yaml(&catalog, yaml, yaml::ImportMode::Replace)
+            .await
+            .expect("import");
+        assert_eq!(report.providers.created, 2);
+        assert_eq!(report.models.created, 1);
+        assert_eq!(report.channels.created, 2);
+        assert_eq!(report.api_keys.created, 1);
+        assert_eq!(report.secrets.len(), 1);
+        let snap = catalog.load_routing().await.expect("routing");
+        assert_eq!(snap.models[0].channels.len(), 2);
+        let exported = yaml::export_yaml(&catalog).await.expect("export");
+        assert!(exported.contains("mock-a"));
+        assert!(exported.contains("mock-b"));
+        let report2 = yaml::import_yaml(&catalog, &exported, yaml::ImportMode::Merge)
+            .await
+            .expect("reimport");
+        assert_eq!(report2.providers.updated, 2);
+        assert_eq!(report2.channels.updated, 2);
     }
 }

@@ -36,6 +36,17 @@ Admin API is under `/api/*`. After `cd admin && npm run build`, the binary serve
 
 Pages: overview, providers, models (channels), API keys, settings.
 
+## Catalog YAML
+
+One public model can bind many providers. Import with merge (update by name) or replace (wipe first):
+
+```bash
+xlite import examples/mock-24.yaml --replace
+xlite export catalog.yaml
+```
+
+Admin → Settings also imports and exports the same file. Schema is in `examples/catalog.yaml`.
+
 ## Gates
 
 ```bash
