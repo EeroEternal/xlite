@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **入站 listen backlog 与 TCP_NODELAY**：监听套接字 backlog 65535（内核按 `net.core.somaxconn` 封顶）。Linux 上 libc `SOMAXCONN` 是 128，默认 `TcpListener::bind` 会在 3 万 VU 爬坡时丢 SYN。每条入站连接打开 `TCP_NODELAY`，10ms SSE 不被 Nagle 合并。
+- **h2c 目标预计算**：通道快照带上 `authority` / `path` / `Authorization`，请求路径不再解析上游 URL、不再 `format!("Bearer …")`。
+- **Mock-24 与压测环境手册**：实验室 `117.160.123.99:60000/60001`、客户 22/24/26/29 拓扑、k6 组合与 3 万连接对标，见 `docs/manual/lab-loadtest.md`。
+
+## [0.3.0] - 2026-09-24
+
 - **热路径零拷贝透传**：`upstream_model` 与请求 `model` 同名（常规情形）时不再 JSON 反序列化/重序列化，原请求字节直接透传（字节透传边界名副其实）；需要改名时才惰性构建 DOM（每请求至多一次）。上游请求体改传 `Bytes`，去掉 h2c `copy_from_slice` 与 reqwest `to_vec` 第三次拷贝。注意：含重复 `model` 键的请求体现在返回 400（原为末键生效）。
 - **快照 Arc 化 + 端点预计算**：路由快照里模型/通道改存 `Arc`，每请求排序只克隆指针不克隆 5 个 `String`；通道的 `chat/completions` URL 在快照构建时算好，不在每请求重拼。5 秒重载在路由未变时跳过写锁交换。
 - **Key 哈希与 failover 细节**：API key 哈希改手写 hex（免 `format!` fmt 机器）；failover 前的错误体排空封顶 64 KiB，坏上游不再能拖住重试。
+
 ## [0.2.0] - 2026-09-24
 
 - **Admin 会话改为无状态签名 Cookie**：`xlite_session` 变为 HMAC-SHA256 签名的 `exp.nonce`（密钥取自 `ADMIN_SESSION_SECRET`，未设则用 `ADMIN_PASSWORD`）。任意网关节点都能独立校验，HAProxy/负载均衡后无需会话粘性，也不再依赖进程内内存；集群各节点设置同一个 `ADMIN_PASSWORD`（或显式 `ADMIN_SESSION_SECRET`）即可共用登录态。
