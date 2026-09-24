@@ -9,35 +9,41 @@ use std::sync::{Arc, RwLock};
 
 use crate::catalog::{Catalog, RoutingChannel, RoutingSnapshot};
 use crate::hash::hash_api_key;
+use crate::upstream::chat_completions_url;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
     pub id: i64,
     pub provider_id: i64,
     pub base_url: String,
+    /// Full chat/completions URL, computed once at snapshot build instead of
+    /// re-formatted on every request.
+    pub endpoint: String,
     pub api_key: String,
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelRoute {
     pub model_id: i64,
     pub name: String,
-    pub channels: Vec<Channel>,
+    /// `Arc` per channel so the per-request ordering clones pointers, not the
+    /// five `String`s inside each channel.
+    pub channels: Vec<Arc<Channel>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRecord {
     pub id: i64,
     pub allowed_model_ids: Option<Vec<i64>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
-    pub keys: HashMap<String, KeyRecord>,
-    pub models: HashMap<String, ModelRoute>,
+    pub keys: HashMap<String, Arc<KeyRecord>>,
+    pub models: HashMap<String, Arc<ModelRoute>>,
 }
 
 #[derive(Clone)]
@@ -60,11 +66,21 @@ impl Store {
 
     pub async fn reload(&self) -> Result<()> {
         let routing = self.catalog.load_routing().await?;
-        *self.inner.write().expect("snapshot lock") = snapshot_from_routing(routing);
+        let next = snapshot_from_routing(routing);
+        // Skip the write-lock swap when nothing changed: the reload loop fires
+        // every few seconds and a writer on this read-hot lock stalls request
+        // tasks momentarily even when the routing is identical.
+        {
+            let current = self.inner.read().expect("snapshot lock");
+            if *current == next {
+                return Ok(());
+            }
+        }
+        *self.inner.write().expect("snapshot lock") = next;
         Ok(())
     }
 
-    pub fn authenticate(&self, bearer: &str) -> Option<KeyRecord> {
+    pub fn authenticate(&self, bearer: &str) -> Option<Arc<KeyRecord>> {
         let hash = hash_api_key(bearer);
         self.inner.read().ok()?.keys.get(&hash).cloned()
     }
@@ -86,7 +102,7 @@ impl Store {
         names
     }
 
-    pub fn channels_for(&self, key: &KeyRecord, model: &str) -> Option<Vec<Channel>> {
+    pub fn channels_for(&self, key: &KeyRecord, model: &str) -> Option<Vec<Arc<Channel>>> {
         let snap = self.inner.read().ok()?;
         let route = snap.models.get(model)?;
         if let Some(allow) = &key.allowed_model_ids
@@ -106,21 +122,26 @@ fn snapshot_from_routing(routing: RoutingSnapshot) -> Snapshot {
     for k in routing.keys {
         keys.insert(
             k.key_hash,
-            KeyRecord {
+            Arc::new(KeyRecord {
                 id: k.id,
                 allowed_model_ids: k.allowed_model_ids,
-            },
+            }),
         );
     }
     let mut models = HashMap::new();
     for m in routing.models {
         models.insert(
             m.name.clone(),
-            ModelRoute {
+            Arc::new(ModelRoute {
                 model_id: m.model_id,
                 name: m.name,
-                channels: m.channels.into_iter().map(to_channel).collect(),
-            },
+                channels: m
+                    .channels
+                    .into_iter()
+                    .map(to_channel)
+                    .map(Arc::new)
+                    .collect(),
+            }),
         );
     }
     Snapshot { keys, models }
@@ -130,6 +151,7 @@ fn to_channel(c: RoutingChannel) -> Channel {
     Channel {
         id: c.id,
         provider_id: c.provider_id,
+        endpoint: chat_completions_url(&c.base_url),
         base_url: c.base_url,
         api_key: c.api_key,
         upstream_model: c.upstream_model,
@@ -138,10 +160,10 @@ fn to_channel(c: RoutingChannel) -> Channel {
     }
 }
 
-pub fn order_channels(channels: &[Channel]) -> Vec<Channel> {
+pub fn order_channels(channels: &[Arc<Channel>]) -> Vec<Arc<Channel>> {
     let min_p = channels.iter().map(|c| c.priority).min().unwrap_or(0);
-    let first: Vec<&Channel> = channels.iter().filter(|c| c.priority == min_p).collect();
-    let rest: Vec<Channel> = channels
+    let first: Vec<&Arc<Channel>> = channels.iter().filter(|c| c.priority == min_p).collect();
+    let rest: Vec<Arc<Channel>> = channels
         .iter()
         .filter(|c| c.priority != min_p)
         .cloned()
@@ -149,10 +171,10 @@ pub fn order_channels(channels: &[Channel]) -> Vec<Channel> {
     let picked = weighted_pick(&first);
     let mut out = Vec::with_capacity(channels.len());
     if let Some(p) = picked {
-        out.push(p.clone());
+        out.push(Arc::clone(p));
         for c in first {
             if c.id != p.id {
-                out.push((*c).clone());
+                out.push(Arc::clone(c));
             }
         }
     }
@@ -160,7 +182,7 @@ pub fn order_channels(channels: &[Channel]) -> Vec<Channel> {
     out
 }
 
-fn weighted_pick<'a>(group: &[&'a Channel]) -> Option<&'a Channel> {
+fn weighted_pick<'a>(group: &[&'a Arc<Channel>]) -> Option<&'a Arc<Channel>> {
     let total: i32 = group.iter().map(|c| c.weight.max(1)).sum();
     if total <= 0 || group.is_empty() {
         return group.first().copied();
@@ -179,16 +201,17 @@ fn weighted_pick<'a>(group: &[&'a Channel]) -> Option<&'a Channel> {
 mod tests {
     use super::*;
 
-    fn ch(id: i64, w: i32, p: i32) -> Channel {
-        Channel {
+    fn ch(id: i64, w: i32, p: i32) -> Arc<Channel> {
+        Arc::new(Channel {
             id,
             provider_id: id,
             base_url: format!("http://p{id}"),
+            endpoint: chat_completions_url(&format!("http://p{id}")),
             api_key: String::new(),
             upstream_model: "m".into(),
             weight: w,
             priority: p,
-        }
+        })
     }
 
     #[test]
@@ -211,5 +234,16 @@ mod tests {
         let ordered = order_channels(&[ch(3, 1, 20), ch(1, 1, 0), ch(2, 1, 0)]);
         assert!(ordered[0].priority == 0);
         assert_eq!(ordered.last().map(|c| c.provider_id), Some(3));
+    }
+
+    #[test]
+    fn ordering_clones_pointers_not_channels() {
+        let group = [ch(1, 1, 0), ch(2, 1, 0)];
+        let ordered = order_channels(&group);
+        assert!(
+            ordered
+                .iter()
+                .any(|c| Arc::ptr_eq(c, &group[0]) || Arc::ptr_eq(c, &group[1]))
+        );
     }
 }

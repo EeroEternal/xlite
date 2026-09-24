@@ -12,9 +12,16 @@ pub fn generate_api_key() -> String {
 }
 
 pub fn hash_api_key(key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    format!("{:x}", hasher.finalize())
+    let digest = Sha256::digest(key.as_bytes());
+    // Hot path (every request): manual hex encode avoids `format!`'s fmt
+    // machinery on the way to the snapshot lookup.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 pub fn mask_api_key(key: &str) -> String {
