@@ -1,0 +1,32 @@
+# xlite architecture
+
+xlite is a thin OpenAI-compatible gateway. It forwards `/v1/chat/completions` as bytes and uses the same simple channel pick as New API.
+
+## Planes
+
+- Data plane: `src/proxy.rs` authenticates an API key, reads `model`, picks channels, copies the upstream stream.
+- Control plane: `src/admin.rs` plus `admin/` for providers, models, channels, and API keys.
+- Snapshot: `src/store.rs` holds the in-memory routing table reloaded from Postgres.
+
+## Routing
+
+There is one scheduling rule:
+
+1. Enabled channels for the requested public model, filtered by the key's model allow-list (empty allow-list means all models).
+2. Take the lowest `priority` group and pick one channel at random by `weight`.
+3. If the chosen channel fails before the first response byte (connect error, 429, or 5xx), try the remaining channels in priority order.
+
+No CostAware, CapabilityAware, session stickiness, or strategy enum.
+
+## Upstream
+
+Cleartext HTTP/2 (`XLITE_UPSTREAM_H2C=1` and `http://` base URL) uses `crates/xlite-h2-pool`: one connection is full at the peer's `SETTINGS_MAX_CONCURRENT_STREAMS`, then the pool dials another (capped by `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`). Other URLs use reqwest.
+
+## Objects
+
+| Object | Role |
+| --- | --- |
+| Provider | Upstream `base_url` + API key |
+| Model | Public name clients send |
+| Channel | Model → provider, with weight and priority |
+| API Key | SHA-256 hash in the database; plaintext shown once on create/rotate |

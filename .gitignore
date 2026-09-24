@@ -1,0 +1,54 @@
+.mimocode/
+/target/
+.redis-sentinel-lab/
+**/node_modules/
+.venv/
+.DS_Store
+.env
+.env.*
+!.env.example
+admin/dist/
+*.log
+xlite.db
+__pycache__/
+data.db
+scripts/loadtest/results/
+.gstack/
+# (removed product tarball)
+# IDE / agent local state — shareable project skills & rules are tracked
+.agents/*
+!.agents/skills/
+!.agents/skills/**
+.vscode/
+.zcode/
+.claude/
+.antigravitycli/
+skills-lock.json
+railway.json
+HOW_TO_DEPLOY.md
+
+# Generated documents and screenshots
+docs/landing/XGateway_产品说明.pdf
+docs/landing/XGateway_产品说明.docx
+docs/landing/screenshots/
+docs/landing/logo.png
+docs/landing/architecture_diagram.png
+
+# Document generation scripts
+scripts/gen_arch_diagram.py
+scripts/gen_ppt.py
+scripts/gen_product_docx.py
+scripts/gen_product_pdf.py
+scripts/screenshot_pages.py
+scripts/seed_test_data.py.zcode/
+test-results/
+
+# Session working notes stay harness-local, not team truth
+docs/sessions/
+
+# Agent/TUI generated artifacts: audit trail stays local, never committed
+artifacts/
+
+# Scratch fixtures created by mechanical-gate negative tests (see the
+# check-design-tokens notes); never commit these.
+*.probe

@@ -1,0 +1,21 @@
+[package]
+name = "xlite-h2-pool"
+version = "0.1.0"
+edition = "2024"
+authors = ["lipicoder@qq.com"]
+description = "Native HTTP/2 upstream connection pool with Go-x/net/http2-equivalent per-connection stream accounting: reads the peer's real SETTINGS_MAX_CONCURRENT_STREAMS and dials a fresh connection instead of queueing inside a full one"
+license = "MIT"
+
+[dependencies]
+h2 = { version = "0.4", features = ["stream"] }
+http = "1"
+bytes = "1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+thiserror = "2"
+tracing = "0.1"
+arc-swap = "1.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time"] }
+futures-util = "0.3"

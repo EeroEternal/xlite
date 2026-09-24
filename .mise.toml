@@ -1,0 +1,6 @@
+# 本地 CI / Admin 前端的 Node 版本锁（与已移除的 .github/workflows/ci.yml 里
+# `node-version: "22"` 保持一致）。Admin 的 vitest/jsdom 测试在 Node 26 下会因
+# sessionStorage/localStorage 全局缺失而失败（nav-sections、help-questions 等 4 个用例），
+# Node 22 全绿。mise 进入本仓库会自动切换到该版本。
+[tools]
+node = "22"
