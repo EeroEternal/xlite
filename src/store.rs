@@ -243,7 +243,8 @@ mod tests {
         assert!(
             ordered
                 .iter()
-                .any(|c| Arc::ptr_eq(c, &group[0]) || Arc::ptr_eq(c, &group[1]))
+                .all(|c| Arc::ptr_eq(c, &group[0]) || Arc::ptr_eq(c, &group[1])),
+            "every ordered channel must be a pointer to an input, never a clone"
         );
     }
 }
