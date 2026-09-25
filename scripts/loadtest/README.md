@@ -64,7 +64,7 @@ k6 run --compatibility-mode=base \
 | 每档指纹 | `checks/http_reqs` = 2.00（±0.01）**且**日志头 `gracefulStop` = 期望值 | 该档标 **`INVALID`**；exit 3 |
 | 链路预算 | 闭式活跃流过 `link_budget.py`，看是否 `LINK-BOUND` | **REFUSED**；exit 2 |
 
-**不过 = REFUSED = 不写 `meta.json`**，只打印带 `INVALID` 标记的诊断表；标了 `INVALID` 的档
+**不过 = REFUSED = 不写 `meta.json`**（并删除同目录遗留的旧 `meta.json`），只打印带 `INVALID` 标记的诊断表；用 `--allow-*` 绕行时仍会写 `meta.json`（报告头标 `🧪 DIAGNOSTIC`）。标了 `INVALID` 的档
 不进对标表、也不参与链路预算闸门。诊断需要时用 `--allow-linkbound` /
 `--allow-fingerprint-mismatch` 显式绕过（报告头会标注）。
 

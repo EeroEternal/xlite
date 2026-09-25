@@ -114,7 +114,11 @@ echo "[e2e] 换快照前"
 check "mock(旧模型)  " "$(code mock)"  200
 check "mock2(新模型) " "$(code mock2)" 404
 
-echo "[e2e] import catalog B（model=mock2）→ 等 $((RELOAD_SECS * 2))s 让 reload 循环跑两轮"
+if [ "$RELOAD_SECS" -gt 0 ]; then
+  echo "[e2e] import catalog B（model=mock2）→ 等 $((RELOAD_SECS * 2))s 让 reload 循环跑两轮"
+else
+  echo "[e2e] import catalog B（model=mock2）→ RELOAD_SECS=0（后台 loop 已关）—— 阴性对照：换代**不该**发生"
+fi
 DATABASE_URL="$DB" "$XLITE_BIN" import "$OUT/catalog-b.yaml" --replace > "$OUT/import-b.log" 2>&1
 sleep $((RELOAD_SECS * 2))
 
@@ -125,7 +129,6 @@ check "mock2(新模型) " "$(code mock2)" 200
 if [ "$VUS" -gt 0 ]; then
   command -v k6 >/dev/null || { echo "✗ VUS>0 但本机没有 k6" >&2; exit 2; }
   echo "[e2e] 并发段：${VUS} VU × ${DURATION}，期间每 2s 交替 import weight=1/7 的目录（**真的在换代**）"
-  churn_pid=""
   (
     i=0
     while :; do
@@ -145,6 +148,17 @@ if [ "$VUS" -gt 0 ]; then
     -e DURATION="${DURATION}" -e STREAM_TIMEOUT=30000 -e KEEP_BODY=true \
     "$REPO_ROOT/scripts/loadtest/k6/k6.js" > "$OUT/k6.log" 2>&1 || true
   kill "$churn_pid" 2>/dev/null || true
+  churn_ok=0
+  for f in "$OUT"/import-churn-*.log; do
+    [ -f "$f" ] || continue
+    grep -q 'channels +0/~1' "$f" && churn_ok=1
+  done
+  if [ "$churn_ok" -eq 1 ]; then
+    echo "  ✓ churn import 确实写入了新路由（channels +0/~1）；网关侧换代由上面同进程的 404→200 断言证明"
+  else
+    echo "  ✗ 并发段期间 churn import 没有写入任何新路由（全失败？）—— 这时的 fail 0% 不成立" >&2
+    fail=1
+  fi
   if ! python3 - "$OUT/k6.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))["metrics"]

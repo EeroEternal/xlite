@@ -99,7 +99,7 @@ k6 run --compatibility-mode=base \
 | 链路预算 | `活跃流 = VUS × dur/iter`（闭式，见 §2），[`link_budget.py`](../../scripts/loadtest/link_budget.py) 判 `LINK-BOUND` | **REFUSED**；exit 2 |
 | accept 队列 | 同机时采样监听套接字 `Recv-Q` 峰值，逼近 `GATEWAY_BACKLOG` 即告警触顶（需要 Linux 的 `ss`；没有则记 `unknown`，**不记 0**） | 告警 |
 
-**闸门不过 = REFUSED = 不写 `meta.json`**（"拒绝出报告"的机械含义），只打印诊断表；标了 `INVALID` 的档不进对标表、也不参与链路预算闸门。诊断需要绕过时用 `--allow-linkbound` / `--allow-fingerprint-mismatch`，报告头会标注。
+**闸门不过 = REFUSED = 不写 `meta.json`**（"拒绝出报告"的机械含义），并**删除同目录遗留的旧 `meta.json`**（下游按目录取数，不能拿到过期报告），只打印诊断表；标了 `INVALID` 的档不进对标表、也不参与链路预算闸门。诊断需要绕过时用 `--allow-linkbound` / `--allow-fingerprint-mismatch`（此时会照写 `meta.json` 并在报告头标注 `🧪 DIAGNOSTIC`）。
 
 每个结果目录必须自带：`env.txt`（网关镜像、k6 镜像 **ID**/digest、`k6` 版本、`k6.js` md5+sha256、`TOKIO_WORKER_THREADS`、`XLITE_CATALOG_RELOAD_SECS`、`GATEWAY_BACKLOG` 及其来源、`somaxconn`、档位）、每档 `<LEVEL>.log` + `<LEVEL>.summary.json`（+ 同机时的 `<LEVEL>.acceptq`）、`meta.json`（含每档活跃流与预算判读）。**没有 `meta.json` 或标了 `INVALID` 的档位不许进对标表。**
 
