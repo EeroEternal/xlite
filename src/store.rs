@@ -5,7 +5,9 @@
 use anyhow::Result;
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use crate::catalog::{Catalog, RoutingChannel, RoutingSnapshot};
 use crate::hash::hash_api_key;
@@ -54,14 +56,22 @@ pub struct Snapshot {
 
 #[derive(Clone)]
 pub struct Store {
-    inner: Arc<RwLock<Snapshot>>,
+    /// Routing snapshot, swapped wholesale by the reload loop.
+    ///
+    /// `ArcSwap` rather than `RwLock`: every request reads this, so with an
+    /// `RwLock` the guard's atomic is a single shared cache line that every
+    /// worker thread bounces off every request. `load()` is a lock-free atomic
+    /// acquire instead, and the writer (`reload`) uses `store`, so readers never
+    /// block a writer or each other. Measured effect and method: see
+    /// `docs/dev/loadtest-newapi-controlled-2026-09.md` §12.6.
+    inner: Arc<ArcSwap<Snapshot>>,
     catalog: Catalog,
 }
 
 impl Store {
     pub fn new(catalog: Catalog) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Snapshot::default())),
+            inner: Arc::new(ArcSwap::from_pointee(Snapshot::default())),
             catalog,
         }
     }
@@ -73,28 +83,24 @@ impl Store {
     pub async fn reload(&self) -> Result<()> {
         let routing = self.catalog.load_routing().await?;
         let next = snapshot_from_routing(routing);
-        // Skip the write-lock swap when nothing changed: the reload loop fires
-        // every few seconds and a writer on this read-hot lock stalls request
-        // tasks momentarily even when the routing is identical.
-        {
-            let current = self.inner.read().expect("snapshot lock");
-            if *current == next {
-                return Ok(());
-            }
+        // Skip the swap when nothing changed. With `ArcSwap` this is not about
+        // avoiding a stall (readers never block) but about not churning the
+        // shared pointer — and it keeps the reload loop from allocating a new
+        // snapshot every few seconds when the routing is identical.
+        if self.inner.load().as_ref() == &next {
+            return Ok(());
         }
-        *self.inner.write().expect("snapshot lock") = next;
+        self.inner.store(Arc::new(next));
         Ok(())
     }
 
     pub fn authenticate(&self, bearer: &str) -> Option<Arc<KeyRecord>> {
         let hash = hash_api_key(bearer);
-        self.inner.read().ok()?.keys.get(&hash).cloned()
+        self.inner.load().keys.get(&hash).cloned()
     }
 
     pub fn model_names_for(&self, key: &KeyRecord) -> Vec<String> {
-        let Ok(snap) = self.inner.read() else {
-            return Vec::new();
-        };
+        let snap = self.inner.load();
         let mut names: Vec<String> = snap
             .models
             .values()
@@ -109,7 +115,7 @@ impl Store {
     }
 
     pub fn channels_for(&self, key: &KeyRecord, model: &str) -> Option<Vec<Arc<Channel>>> {
-        let snap = self.inner.read().ok()?;
+        let snap = self.inner.load();
         let route = snap.models.get(model)?;
         if let Some(allow) = &key.allowed_model_ids
             && !allow.contains(&route.model_id)
