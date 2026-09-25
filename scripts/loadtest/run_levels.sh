@@ -34,6 +34,8 @@
 #   RESULT_DIR=<dir>                 默认 scripts/loadtest/results/<UTC 时间戳>
 #   MOCKS="8081-8104"                可选：跑前给 mock 下发 _config（端口区间或逗号分隔 host:port）
 #   MOCK_TTFT=500 MOCK_INTERVAL=10   可选：_config 参数
+#   MOCK_BATCH=1                     可选：mock 的 chunk 合批数。**对标必须留 1**（客户口径、
+#                                    TTFT 可比）；产能/天花板类实验才用 10（台架 CPU 降约 70%）
 #   LINK_MBPS=1000 | LINK_IFACE=eth0 可选：链路预算（不给就只算活跃流，不判越界）
 #   GATEWAY_IMAGE=xlite:0.3.0        可选：写进 env.txt，报告里可追溯
 #   GATEWAY_BACKLOG=<n>              可选：网关监听套接字的 backlog。**跨机时必填** ——
@@ -67,6 +69,12 @@ RESULT_DIR=${RESULT_DIR:-$REPO_ROOT/scripts/loadtest/results/$(date -u +%Y%m%d-%
 MOCKS=${MOCKS:-}
 MOCK_TTFT=${MOCK_TTFT:-500}
 MOCK_INTERVAL=${MOCK_INTERVAL:-10}
+# mock 的 chunk 合批数。**默认 1 = 客户口径**：对标表要跟客户/New API 比，而 batch>1 会把
+# 首字推迟约 `(batch-1)×21ms`（实测 500→722ms @batch=10），TTFT 就不可比了。
+# 但 batch>1 能把**台架自身 CPU 降约 70%**（4000 VU：农场 22.2→6.8、网关 7.5→2.6、
+# k6 20.0→5.0 核，而字节数与 502 个 chunk 完全不变）⇒ 只有**产能/天花板类实验**才用大值。
+# 与 `KEEP_BODY` 同一套纪律：两套试验分开跑（见 docs/manual/v88-rig.md §4）。
+MOCK_BATCH=${MOCK_BATCH:-1}
 LINK_MBPS=${LINK_MBPS:-}
 LINK_IFACE=${LINK_IFACE:-}
 GATEWAY_IMAGE=${GATEWAY_IMAGE:-unknown}
@@ -174,9 +182,9 @@ if [ -n "$MOCKS" ]; then
     *) hosts=$(printf '%s' "$MOCKS" | tr ',' ' ') ;;
   esac
   for host in $hosts; do
-    curl -s -m 3 -X POST "http://$host/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=1" >/dev/null 2>&1 || true
+    curl -s -m 3 -X POST "http://$host/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true
   done
-  log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS"
+  log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS batch=$MOCK_BATCH"
 fi
 
 # ---------------------------------------------------------------- 网关套接字（同机时才拿得到）

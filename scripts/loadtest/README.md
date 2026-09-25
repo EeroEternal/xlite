@@ -67,6 +67,26 @@ k6 run --compatibility-mode=base \
 `ERR_SAMPLE` 429 归因计数、`x-xlite-upstream-ttft-ms` / `retry-after` 响应头采集、
 `KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）—— **正因为这一处不同，喂法必须显式传**。
 
+## mock 的 chunk 合批（`MOCK_BATCH`）
+
+农场（`mock-llm:h2c`）的 `_config?batch=N` 决定**每 N 个 chunk 一次 flush**。
+它**不改载荷一个字节**（响应 100 734 B、`data:` 行 502 两档完全一致），但改**台架自身**的 CPU：
+
+| | 农场 | 网关 | k6 | qps | 首字（ttft=500 基线） |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `batch=1` | 22.52 | 7.57 | 20.33 | 621.1 | 529 ms |
+| `batch=10` | **6.83** | **2.62** | **5.00** | 630.6 | **722 ms** |
+
+（4000 VU、同机 loopback、单臂 `A2`、120s。）所以它和 `KEEP_BODY` 是**同一条分界线**：
+
+- **对标 / 延迟类** → 保持 `1`（**客户就是 1**，TTFT 是头条指标）；
+- **产能 / 天花板类** → 用 `10`：实测 16000 档从"跑不完"变成 2518.8 qps、
+  **31000 档 4732.1 qps 且 fail 0.00%**。
+
+`run_levels.sh` 的 `MOCK_BATCH` 默认 **1**；`ab_topology.sh` / `ab_configs.sh` 的默认是**留空**
+（= 完全不动农场配置，保持原行为），给值才下发**并回读校验**。数据见
+[`docs/dev/loadtest-newapi-controlled-2026-09.md`](../../docs/dev/loadtest-newapi-controlled-2026-09.md) §14。
+
 ## 报告闸门（`run_levels.sh` + `report.py`）
 
 `run_levels.sh` 跑完调用 `report.py`，三道闸门**机械判定**（契约见

@@ -43,6 +43,11 @@
 #   TWT=8 CONNS=32 RELOAD=0   → TOKIO_WORKER_THREADS / XLITE_UPSTREAM_MAX_CONNS_PER_HOST
 #                             / XLITE_CATALOG_RELOAD_SECS（0=冻结快照，去掉 reload 噪声）
 #   MOCK_PORTS="4101-4124"    MOCK_CONTAINER_PREFIX=mock-h2c-
+#   MOCK_BATCH=<空>           mock 的 chunk 合批数。**留空 = 完全不动农场配置**（默认）。
+#                             给数字才下发并回读校验。`batch=10` 让台架自身 CPU 降约 70%
+#                             （4000 VU 实测：农场 22.2→6.8、网关 7.5→2.6、k6 20.0→5.0 核，
+#                             字节数与 502 个 chunk 都不变），但**首字推迟约 (batch-1)×21ms**
+#                             ⇒ 产能/天花板扫描用它，延迟/TTFT 类必须留 1（客户就是 1）。
 #   K6_DIR=$HOME/labtest/k6dir2  K6_IMAGE=k6-customer:latest  K6_MEM=45g
 #   TOKEN=sk-loadtest  MODEL=mock
 #   OUT=$HOME/labtest/ab-topology
@@ -84,6 +89,16 @@ CONNS=${CONNS:-32}
 RELOAD=${RELOAD:-0}
 MOCK_PORTS=${MOCK_PORTS:-"4101-4124"}
 MOCK_CONTAINER_PREFIX=${MOCK_CONTAINER_PREFIX:-mock-h2c-}
+# mock 的 chunk 合批数。**留空 = 不下发 `_config`、完全不动农场现有配置**（= 本脚本原来的行为）。
+# 设成数字才会把这**一个**参数 POST 给 `MOCK_PORTS` 里的每个口。
+#   - 对**瓶颈归因**这是最要紧的旋钮：4000 VU 同载荷（字节数与 502 个 chunk 都不变）下
+#     `batch=1 → 10` 让农场 22.2→6.8、网关 7.5→2.6、k6 20.0→5.0 核 ⇒ **台架自身 CPU 降约 70%**。
+#     也就是说 §13 那个「61–70 µs/chunk」里约**七成**是每 chunk 一次 wakeup/syscall 的
+#     台架开销，不是流式本身的成本。
+#   - 代价是**首字推迟约 `(batch-1)×21ms`**（实测 500→722ms @batch=10、→937ms @batch=20）。
+#     所以**延迟/TTFT 类实验必须留 1**（客户就是 1），产能类才用 10。与 `KEEP_BODY` 同一套
+#     「两套试验分开跑」纪律（docs/manual/v88-rig.md §4）。
+MOCK_BATCH=${MOCK_BATCH:-}
 K6_DIR=${K6_DIR:-$HOME/labtest/k6dir2}
 K6_IMAGE=${K6_IMAGE:-k6-customer:latest}
 K6_MEM=${K6_MEM:-45g}
@@ -187,6 +202,26 @@ mapfile -t MPIDS < <(for p in $(expand_ports "$MOCK_PORTS"); do
   docker inspect -f '{{.State.Pid}}' "${MOCK_CONTAINER_PREFIX}$p" 2>/dev/null; done)
 [ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（前缀 $MOCK_CONTAINER_PREFIX）"
 log "  mock: ${#MPIDS[@]} 个容器"
+
+# 只在显式给了 `MOCK_BATCH` 时才动农场配置（留空 = 一个字节都不改）。下发后**必须校验回读**：
+# `_config` 是静默的，写错参数名不会报错，只会让"我以为我设了 batch"变成假结论
+# （同类坑见 §13.6 与 `map_cfg_key`）。
+if [ -n "$MOCK_BATCH" ]; then
+  case "$MOCK_BATCH" in
+    ''|*[!0-9]*) die "MOCK_BATCH 必须是十进制整数（拿到 '$MOCK_BATCH'）" ;;
+  esac
+  for p in $(expand_ports "$MOCK_PORTS"); do
+    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1 || true
+  done
+  n_ok=0
+  for p in $(expand_ports "$MOCK_PORTS"); do
+    case "$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null)" in
+      *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
+    esac
+  done
+  log "  mock _config: batch=$MOCK_BATCH（回读生效 $n_ok/${#MPIDS[@]} 口）"
+  [ "$n_ok" -eq "${#MPIDS[@]}" ] || die "batch=$MOCK_BATCH 没有在所有 mock 上生效（$n_ok/${#MPIDS[@]}）—— 静默失效会产出假结论"
+fi
 
 # ---------------------------------------------------------------- CPU 采样器
 # 每秒一行累计 tick（100 Hz）。记下自己的 PID，收尾只 kill 这个 PID
