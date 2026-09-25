@@ -100,6 +100,23 @@ die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
 lab_lock "ab_topology" || exit 1
 
+# ★ 清理必须在**启动任何子进程之前**注册好。返工第一版把 trap 放在启网关之后，
+#   于是 `die`（例如 nofile 太小）会直接 exit、cleanup 从不执行 ⇒ 留下
+#   ① 占着 $PORT 的孤儿网关，② 该网关继承了 fd 9 ⇒ **台架锁被永久持有**。
+#   子进程一律用 `9>&-` 显式关掉锁 fd（不然网关活着就等于替我们攥着锁）。
+SAMPLER_PID=""
+stop_gw() {
+  local p
+  p=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  [ -n "$p" ] && kill "$p" 2>/dev/null
+}
+cleanup() {
+  [ -n "${SAMPLER_PID:-}" ] && kill "$SAMPLER_PID" 2>/dev/null
+  docker rm -f abtop-k6 >/dev/null 2>&1
+  stop_gw
+}
+trap cleanup EXIT
+
 # ---------------------------------------------------------------- 前置自检
 expand_ports() {
   case "$1" in
@@ -135,16 +152,11 @@ rm -f "$GW_DB"
   || die "import 失败：$(tail -1 "$OUT/import.log")"
 log "  catalog: $(tail -1 "$OUT/import.log")"
 
-stop_gw() {
-  local p
-  p=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-  [ -n "$p" ] && kill "$p" 2>/dev/null
-}
-stop_gw; sleep 2
+stop_gw; sleep 2   # 清掉端口上可能残留的旧网关（trap 已注册，die 也会收拾）
 env DATABASE_URL="sqlite:$GW_DB" PORT="$PORT" LISTEN_HOST=127.0.0.1 \
     XLITE_UPSTREAM_H2C=1 XLITE_CATALOG_RELOAD_SECS="$RELOAD" \
     TOKIO_WORKER_THREADS="$TWT" XLITE_UPSTREAM_MAX_CONNS_PER_HOST="$CONNS" \
-  setsid nohup "$GATEWAY_DIR/xlite-$ARM" > "$OUT/gw.log" 2>&1 < /dev/null &
+  setsid nohup "$GATEWAY_DIR/xlite-$ARM" > "$OUT/gw.log" 2>&1 < /dev/null 9>&- &
 for _ in $(seq 1 30); do sleep 1; curl -s -m3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; done
 gwpid=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
 case "$gwpid" in ''|*[!0-9]*) die "网关没起来（看 $OUT/gw.log）";; esac
@@ -185,18 +197,10 @@ while [ -r "/proc/$gw/stat" ]; do
 done
 SAMPLER_BODY
 chmod +x "$SAMPLER"
-SAMPLER_PID=""
 setsid nohup bash "$SAMPLER" "$OUT/cpu.log" "$gwpid" "${MPIDS[@]}" \
-  >/dev/null 2>&1 < /dev/null &
+  >/dev/null 2>&1 < /dev/null 9>&- &
 SAMPLER_PID=$!
 sleep 2
-
-cleanup() {
-  [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null
-  docker rm -f abtop-k6 >/dev/null 2>&1
-  stop_gw
-}
-trap cleanup EXIT
 
 cores_between() {  # $1=log $2=列号 $3=t0 $4=t1
   awk -v f="$2" -v a="$3" -v b="$4" '

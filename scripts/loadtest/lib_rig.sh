@@ -17,6 +17,12 @@
 # 要么遵守约定。⚠️ 约定：**驱动压测固定用同一台机** —— 只在某台机上上锁，
 # 锁不住从别处起的入口。
 #
+# ⚠️⚠️ **调用方必须让所有子进程关掉锁 fd**（`cmd ... 9>&- &`）。锁是挂在 fd 上的：
+# 继承了这个 fd 的**后台子进程会替调用者继续持有锁**，即使调用者已经退出 ——
+# 于是「kill -9 也不留僵尸锁」这句话就不成立了。实测过：父进程死后，继承 fd 的
+# 子进程仍使 `flock -n` 探测 BLOCKED。所以要在**启动任何子进程之前**就注册好
+# `trap ... EXIT`，并给每个后台子进程加 `9>&-`。
+#
 # 锁文件内容只是「方便排查是谁在跑」，真正的互斥靠 fd 上的锁：
 # 文件里有旧内容不代表被占用。
 # =============================================
@@ -26,8 +32,16 @@ lab_lock() {
   local who="${LAB_SESSION:-$(hostname)-$$}"
   LAB_LOCK=${LAB_LOCK:-$HOME/lab.lock}
 
-  # 在当前 shell 打开 fd 9；锁活到 fd 被关闭（即脚本结束）
-  exec 9>"$LAB_LOCK" || return 1
+  # 非 Linux（macOS 开发机）没有 flock。**告警放行**，不要用错误的诊断把人挡在门外
+  # —— run_levels.sh 明确支持 macOS 开发机（ss 缺失记 unknown、K6_RUNNER=local 调试），
+  #    互斥只对压测机有意义。
+  if ! command -v flock >/dev/null 2>&1; then
+    printf '⚠️ 本机没有 flock（非 Linux）：跳过台架互斥。互斥只在压测机上有效。\n' >&2
+    return 0
+  fi
+  # 用 `<>`（读写、**不截断**）。用 `>` 的话，竞争方一进来就把持有者的信息清空，
+  # 紧接着 `cat "$LAB_LOCK"` 只会读到空 —— 诊断信息就丢了。
+  exec 9<>"$LAB_LOCK" || return 1
   if ! flock -n 9; then
     {
       printf '✗ 台架被占用：%s\n' "$(cat "$LAB_LOCK" 2>/dev/null)"
