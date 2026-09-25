@@ -574,12 +574,10 @@ fn spawn_settings_changing_peer(
         // Wait for the test to ask for the second frame instead of racing a wall
         // clock: with a fixed `sleep` here, a slow machine can apply the new cap
         // before the test has even asserted the handshake cap, which is exactly
-        // how this test used to flake. `watch` keeps the current value, so a
-        // signal that arrives before this loop still counts.
-        while !*raise.borrow_and_update() {
-            if raise.changed().await.is_err() {
-                return; // the test dropped the sender; nothing left to serve
-            }
+        // how this test used to flake. `wait_for` tests the current value first,
+        // so a signal that arrived before this point still counts.
+        if raise.wait_for(|raised| *raised).await.is_err() {
+            return; // the test dropped the sender; nothing left to serve
         }
 
         let _ = writer.write_all(&settings_frame(then)).await;
