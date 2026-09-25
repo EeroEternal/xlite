@@ -101,6 +101,20 @@ K6_IMAGE_ID=$(docker image inspect --format '{{index .RepoDigests 0}}' "$K6_IMAG
 K6_GRACEFUL_OK=$(grep -c 'gracefulStop: GRACEFUL_STOP' "$K6_JS" || true)
 [ "$K6_GRACEFUL_OK" -ge 1 ] || { echo "✗ $K6_JS 不是仓库版（gracefulStop 未参数化）" >&2; exit 2; }
 
+# 配置键**开跑前**就校验一遍：拼错一个键就必须在这里死，而不是等 ssh/docker 起来之后
+# 才发现「三臂跑的是同一个默认值」。
+for cfg in $CONFIGS; do
+  [ "$cfg" = "-" ] && continue
+  for kv in $(printf '%s' "$cfg" | tr ',' ' '); do
+    key=${kv%%=*}
+    [ "$key" = "$kv" ] && { echo "✗ 配置 '$kv' 缺少 '=值'（形如 TWT=128）" >&2; exit 2; }
+    map_cfg_key "$key" >/dev/null || {
+      echo "✗ 未知配置键 '$key'（可用：TWT / CONNS / RELOAD）—— 原样传给 env 会静默产出假零效应" >&2
+      exit 2
+    }
+  done
+done
+
 # ---------------------------------------------------------------- 远端助手
 # 装一次，之后用参数调用，避免多层引号转义（这里踩过好几次）。
 $GW "cat > /tmp/ab_gw.sh" <<'REMOTE'
