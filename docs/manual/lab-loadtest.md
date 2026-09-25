@@ -57,7 +57,7 @@ k6 / curl
 - 镜像应打当前 `Cargo.toml` 版本；不要用 `xlite:0.2.0-inflight`，也不要设 `XLITE_MAX_IN_FLIGHT`
 - `network=host`，`ulimit nofile=1048576`
 - `REDIS_URL=redis://127.0.0.1:6379`，`XLITE_UPSTREAM_H2C=1`
-- `XLITE_UPSTREAM_MAX_CONNS_PER_HOST=32`，`TOKIO_WORKER_THREADS=32`
+- `XLITE_UPSTREAM_MAX_CONNS_PER_HOST=32`，`TOKIO_WORKER_THREADS=8`（与 `deploy/env.example` 的默认一致；**别留运行时默认**，那等于按核数起）
 - 目录：24 provider / 1 model `mock` / 24 channel / 1 key `loadtest`
 - 压测前 Redis `connected_clients` 应为 2，`MEMORY USAGE xlite:catalog` 约 7KB
 
