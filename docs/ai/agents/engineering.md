@@ -26,8 +26,10 @@
 
 ## 三、后台任务 / daemon / `tokio::spawn`
 
-本仓库除 `src/main.rs` 外没有常驻后台任务。**若你新增** `tokio::spawn` / daemon，以下五条
-全部适用（不是「下一轮再补」）：
+本仓库现有三处常驻后台任务：`src/main.rs:144`（目录热重载，`loop { sleep; reload }`）、
+`crates/xlite-h2-pool/src/pool.rs:394`（每条连接的 pump/driver）、
+`crates/xlite-h2-pool/src/pool.rs:449`（`start_idle_reaper`，`loop { sleep; reap }`）。
+**若你要新增**第四处 `tokio::spawn` / daemon，以下五条全部适用（不是「下一轮再补」）：
 
 1. **生命周期显式化**：不得在 `impl Default::default()` / `impl X::new()` 里裸写 `tokio::spawn`；必须由显式入口方法（如 `start_background_xxx(&self)`）在 `init()` / `main()` 中调用。
 2. **runtime 守卫**：用 `tokio::runtime::Handle::try_current()` 包一层，或只在已知 runtime 上下文触发，避免同步测试/CLI 场景 panic。

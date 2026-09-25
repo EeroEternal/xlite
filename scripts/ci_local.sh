@@ -26,6 +26,7 @@ Usage: scripts/ci_local.sh [--tier t0|t1|t2] [--all] [--base <ref>] [--full]
   --all       ignore path scoping; run every face
   --only F    force faces (comma-separated: rust,admin,meta); overrides path scoping.
               CI uses this to run one face per job from this same script.
+              Given together with --all, --only wins (a narrower forced set).
   --base REF  base ref for path scoping (default: origin/main; env CI_LOCAL_BASE)
 
 Skipping is only allowed when the changed paths are known: if the base ref cannot
@@ -35,14 +36,21 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tier)    TIER="${2:-}"; shift 2 ;;
+    --tier|--only|--base)
+      # A flag whose value is missing must fail loudly with the script's exit-2
+      # convention, not fall through to `shift` failing with status 1.
+      if [[ $# -lt 2 ]]; then echo "missing value for $1" >&2; exit 2; fi
+      case "$1" in
+        --tier) TIER="$2" ;;
+        --only) ONLY="$2" ;;
+        --base) BASE="$2" ;;
+      esac
+      shift 2 ;;
     --tier=*)  TIER="${1#*=}"; shift ;;
+    --only=*)  ONLY="${1#*=}"; shift ;;
+    --base=*)  BASE="${1#*=}"; shift ;;
     --full)    TIER=t1; shift ;;
     --all)     FORCE_ALL=1; shift ;;
-    --only)    ONLY="${2:-}"; shift 2 ;;
-    --only=*)  ONLY="${1#*=}"; shift ;;
-    --base)    BASE="${2:-}"; shift 2 ;;
-    --base=*)  BASE="${1#*=}"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -60,22 +68,23 @@ warn() { printf '\033[33m! %s\033[0m\n' "$*"; }
 
 # ---- change scope -----------------------------------------------------------
 # Absence of evidence is not evidence of absence: a face is only skipped when we
-# can actually name the paths that changed.
+# can actually name the paths that changed. The set is computed even under --all,
+# because the meta face uses it to pick which scripts and workflows to check.
 paths=""
 scope_known=0
-if [[ "$FORCE_ALL" == "0" ]]; then
-  merge="$(git merge-base "$BASE" HEAD 2>/dev/null || true)"
-  if [[ -n "$merge" ]]; then
-    scope_known=1
-    paths="$(
-      {
-        git diff --name-only "$merge" HEAD
-        git diff --name-only HEAD
-        git diff --name-only --cached
-        git ls-files --others --exclude-standard
-      } 2>/dev/null | sort -u
-    )"
-  fi
+merge="$(git merge-base "$BASE" HEAD 2>/dev/null || true)"
+if [[ -n "$merge" ]]; then
+  scope_known=1
+  # `|| true`: if git fails here we must degrade to "run everything", not abort the
+  # whole gate with git's status (which would contradict the rule above).
+  paths="$(
+    {
+      git diff --name-only "$merge" HEAD
+      git diff --name-only HEAD
+      git diff --name-only --cached
+      git ls-files --others --exclude-standard
+    } 2>/dev/null | sort -u || true
+  )"
 fi
 
 want_rust=0 want_admin=0 want_meta=0

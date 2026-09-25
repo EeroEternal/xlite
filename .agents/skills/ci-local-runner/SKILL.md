@@ -38,8 +38,10 @@ scripts/ci_local.sh --only rust  # 只跑一个面：rust | admin | meta（CI �
 需要 Rust 工具链（`rust-toolchain.toml`，rustup 会按文件自动装，含 clippy + rustfmt）、
 Node 22（`.mise.toml`）、`admin/node_modules`。
 
-`cargo test --lib` 用内存 SQLite，不需要 Postgres；但 `libsqlite3-sys` **未开 `bundled`**，
-所以 Linux 上必须先有 `libsqlite3-dev`（CI 里显式 apt 安装，不依赖镜像预置）。
+`cargo test --lib` 用内存 SQLite，不需要 Postgres。`sqlx` 的 `sqlite` feature 会传递启用
+`libsqlite3-sys/bundled`，SQLite **由源码内联编译**（`cargo tree -e features -i libsqlite3-sys`
+可见 `feature "bundled"`；注意 `-p <包名>` 得到的是非反向树，看不到这个结论），
+因此 Linux 上**不需要**系统 sqlite 开发库 —— CI 里没有 apt 步骤。
 单机启动默认 `sqlite:xlite.db`；压测 `DATABASE_URL=memory`；集群设 `REDIS_URL`。
 
 ## 已知偶发（不是本次改动引入）
@@ -58,5 +60,8 @@ Node 22（`.mise.toml`）、`admin/node_modules`。
 
 静态门禁（fmt/clippy/tsc/lint/vitest）与平台无关，在 macOS 上跳过不会省下任何正确性，
 只会把失败推迟到没有 CI 兜底的地方。真正只能 Linux 做的是产物、集成与部署，那些属于 t2。
-反过来 **macOS 是更严的环境**：shell 脚本要在 bash 3.2 上验（历史事故：`declare -A`
-在 macOS 上打死 `run_levels.sh`）。
+
+**但 shell 脚本要反过来小心**：macOS 自带 bash 3.2，仓内脚本被打死过一次（`declare -A`
+在 3.2 上直接 `invalid option`）。注意 meta 面的 `bash -n` **只验语法**，抓不到这类差异 ——
+实测 `declare -A m=([a]=1)` 在 bash 3.2 下 `bash -n` 仍返回 0。所以改 `scripts/**` 时要在
+本机 macOS 上**实跑**一次，或避开 bash 4+ 构造（`declare -A` / `mapfile` / `${v,,}`）。
