@@ -34,6 +34,8 @@
 #   RESULT_DIR=<dir>                 默认 scripts/loadtest/results/<UTC 时间戳>
 #   MOCKS="8081-8104"                可选：跑前给 mock 下发 _config（端口区间或逗号分隔 host:port）
 #   MOCK_TTFT=500 MOCK_INTERVAL=10   可选：_config 参数
+#   MOCK_BATCH=1                     可选：mock 的 chunk 合批数。**对标必须留 1**（客户口径、
+#                                    TTFT 可比）；产能/天花板类实验才用 10（台架 CPU 降约 70%）
 #   LINK_MBPS=1000 | LINK_IFACE=eth0 可选：链路预算（不给就只算活跃流，不判越界）
 #   GATEWAY_IMAGE=xlite:0.3.0        可选：写进 env.txt，报告里可追溯
 #   GATEWAY_BACKLOG=<n>              可选：网关监听套接字的 backlog。**跨机时必填** ——
@@ -67,6 +69,12 @@ RESULT_DIR=${RESULT_DIR:-$REPO_ROOT/scripts/loadtest/results/$(date -u +%Y%m%d-%
 MOCKS=${MOCKS:-}
 MOCK_TTFT=${MOCK_TTFT:-500}
 MOCK_INTERVAL=${MOCK_INTERVAL:-10}
+# mock 的 chunk 合批数。**默认 1 = 客户口径**：对标表要跟客户/New API 比，而 batch>1 会把
+# 首字推迟约 `(batch-1)×21ms`（实测 500→722ms @batch=10），TTFT 就不可比了。
+# 但 batch>1 能把**台架自身 CPU 降约 70%**（4000 VU：农场 22.2→6.8、网关 7.5→2.6、
+# k6 20.0→5.0 核，而字节数与 502 个 chunk 完全不变）⇒ 只有**产能/天花板类实验**才用大值。
+# 与 `KEEP_BODY` 同一套纪律：两套试验分开跑（见 docs/manual/v88-rig.md §4）。
+MOCK_BATCH=${MOCK_BATCH:-1}
 LINK_MBPS=${LINK_MBPS:-}
 LINK_IFACE=${LINK_IFACE:-}
 GATEWAY_IMAGE=${GATEWAY_IMAGE:-unknown}
@@ -151,6 +159,25 @@ mkdir -p "$RESULT_DIR"
 # 台架互斥 —— 与 ab_configs.sh / ab_topology.sh 共用同一把锁（见 lib_rig.sh）
 lab_lock "run_levels levels=$LEVELS" || exit 1
 
+# ---------------------------------------------------------------- 农场还原
+# 本脚本也会写那 24 个**共享** mock（`MOCKS` + `MOCK_BATCH`），所以和另两个 harness 同一纪律：
+# 逐口记住原值、收尾按口还原。不还原的话，一次 `MOCK_BATCH=10` 的产能跑会把台架永久留在
+# 台架口径上，而下一个"不动农场"的 session 会静默量到相反的口径（§14）。
+# 记在一条 `port=batch` 串里（lib_rig.sh 的 `farm_remember`）—— **不用关联数组**：
+# `declare -A` 是 bash 4+，在 macOS 的 bash 3.2 上配 `set -e` 会直接把脚本打死。
+# 本脚本是 `set -euo pipefail`，trap 里每条都要能失败而不改变退出码。
+FARM_SAVED=""
+restore_farm() {
+  [ -n "$FARM_SAVED" ] || return 0
+  local n=0 h
+  for h in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://${h%%=*}/_config?batch=${h#*=}" >/dev/null 2>&1 || true
+    n=$((n + 1))
+  done
+  printf '[%s] mock _config: 已按口还原 batch（%s 口）\n' "$(date +%H:%M:%S)" "$n"
+}
+trap restore_farm EXIT
+
 # k6 版本**只能这样拿**：`k6 run` 的 banner 不含版本行（不加 --verbose 时），所以从运行日志里
 # grep 永远得到空值。docker 模式直接用镜像自报。
 if [ "$K6_RUNNER" = local ]; then
@@ -169,14 +196,41 @@ log "runner=$K6_RUNNER image=$K6_IMAGE target=$TARGET levels=[$LEVELS] stable=$S
 
 # ---------------------------------------------------------------- mock _config（可选）
 if [ -n "$MOCKS" ]; then
+  # `batch` 也要**校验格式 + 回读**：`_config` 是静默的，写错不会被拒，只会在日志里
+  # 留下一句"我以为我设了"的假声明（同类坑见 docs/dev/loadtest-newapi-controlled-2026-09.md §13.6）。
+  case "${MOCK_BATCH}" in
+    ''|*[!0-9]*) printf '✗ MOCK_BATCH 必须是十进制整数（拿到 %s）\n' "'$MOCK_BATCH'" >&2; exit 2 ;;
+  esac
+  # 端口展开与另两个 harness 共用同一个函数（区间与逗号列表都收）
   case "$MOCKS" in
-    [0-9]*-[0-9]*) hosts=$(seq "${MOCKS%-*}" "${MOCKS#*-}" | sed 's|^|127.0.0.1:|') ;;
+    [0-9]*-[0-9]*) hosts=$(expand_ports "$MOCKS" | sed 's|^|127.0.0.1:|') ;;
     *) hosts=$(printf '%s' "$MOCKS" | tr ',' ' ') ;;
   esac
-  for host in $hosts; do
-    curl -s -m 3 -X POST "http://$host/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=1" >/dev/null 2>&1 || true
+  n_all=0
+  for h in $hosts; do n_all=$((n_all + 1)); done
+  # `MOCKS=','` 之类会展开成空白 ⇒ 循环 0 次 ⇒ 下面 `n_ok -eq n_all` 是 0 == 0 **空转通过**
+  [ "$n_all" -gt 0 ] || { printf '✗ MOCKS=%s 展开后一个口都没有\n' "$MOCKS" >&2; exit 2; }
+  # 先逐口记原值（收尾还原靠它）
+  for h in $hosts; do
+    b=$(curl -s -m 3 -X POST "http://$h/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9' || true)
+    [ -n "$b" ] && FARM_SAVED=$(farm_remember "$FARM_SAVED" "$h" "$b")
   done
-  log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS"
+  # **只写原值已知的口**（"写过 ⇒ 一定能还原"是不变量；读不到的口由下面的守卫 fail-closed）
+  for kv in $FARM_SAVED; do
+    h=${kv%%=*}
+    curl -s -m 3 -X POST "http://$h/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true
+  done
+  n_ok=0
+  for h in $hosts; do
+    case "$(curl -s -m 3 -X POST "http://$h/_config" 2>/dev/null)" in
+      *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
+    esac
+  done
+  log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS batch=${MOCK_BATCH}（回读生效 $n_ok/$n_all 口）"
+  # **有意 fail-closed**（口径已确认）：上一提交已经加了同样的 exit 2 守卫，这里只是把它写成
+  # **明说的决策** —— 任何一个口配不上就**开局即死**，代价一次 ssh，而不是一轮几十分钟、
+  # 口径不明的报告。（写入本身仍然容忍失败：`|| true` 留着，由这道回读守门统一裁决。）
+  [ "$n_ok" -eq "$n_all" ] || { printf '✗ mock 配置未在所有口生效（%s/%s）—— 静默失效会产出假结论\n' "$n_ok" "$n_all" >&2; exit 2; }
 fi
 
 # ---------------------------------------------------------------- 网关套接字（同机时才拿得到）
@@ -281,6 +335,13 @@ done
   echo "LEVELS=$LEVELS"
   echo "STABLE=$STABLE"
   echo "WARMUP=$WARMUP"
+  # 农场口径是**这一轮报告的一部分**：`batch` 直接改变台架自身 CPU（§14），
+  # 不写进 env.txt 的话，下游拿到表也看不出这一轮跑的是什么口径。
+  echo "MOCKS=${MOCKS:-unset}"
+  echo "MOCK_BATCH=${MOCK_BATCH:-unset（不动农场）}"
+  # 用 `host=值` 而不是 `host:值`：host 里本来就有冒号（`127.0.0.1:4101`），
+  # 再拿冒号当分隔符会读不出哪段是哪个。
+  echo "MOCK_BATCH_BEFORE=$(for kv in $FARM_SAVED; do printf '%s ' "$kv"; done | sed 's/ $//')"
 } > "$RESULT_DIR/env.txt"
 
 # ---------------------------------------------------------------- 出报告（含链路预算闸门）

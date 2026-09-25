@@ -43,6 +43,11 @@
 #   TWT=8 CONNS=32 RELOAD=0   → TOKIO_WORKER_THREADS / XLITE_UPSTREAM_MAX_CONNS_PER_HOST
 #                             / XLITE_CATALOG_RELOAD_SECS（0=冻结快照，去掉 reload 噪声）
 #   MOCK_PORTS="4101-4124"    MOCK_CONTAINER_PREFIX=mock-h2c-
+#   MOCK_BATCH=<空>           mock 的 chunk 合批数。**留空 = 完全不动农场配置**（默认）。
+#                             给数字才下发并回读校验。`batch=10` 让台架自身 CPU 降约 70%
+#                             （4000 VU 实测：农场 22.2→6.8、网关 7.5→2.6、k6 20.0→5.0 核，
+#                             字节数与 502 个 chunk 都不变），但**首字推迟约 (batch-1)×21ms**
+#                             ⇒ 产能/天花板扫描用它，延迟/TTFT 类必须留 1（客户就是 1）。
 #   K6_DIR=$HOME/labtest/k6dir2  K6_IMAGE=k6-customer:latest  K6_MEM=45g
 #   TOKEN=sk-loadtest  MODEL=mock
 #   OUT=$HOME/labtest/ab-topology
@@ -84,6 +89,16 @@ CONNS=${CONNS:-32}
 RELOAD=${RELOAD:-0}
 MOCK_PORTS=${MOCK_PORTS:-"4101-4124"}
 MOCK_CONTAINER_PREFIX=${MOCK_CONTAINER_PREFIX:-mock-h2c-}
+# mock 的 chunk 合批数。**留空 = 不下发 `_config`、完全不动农场现有配置**（= 本脚本原来的行为）。
+# 设成数字才会把这**一个**参数 POST 给 `MOCK_PORTS` 里的每个口。
+#   - 对**瓶颈归因**这是最要紧的旋钮：4000 VU 同载荷（字节数与 502 个 chunk 都不变）下
+#     `batch=1 → 10` 让农场 22.2→6.8、网关 7.5→2.6、k6 20.0→5.0 核 ⇒ **台架自身 CPU 降约 70%**。
+#     也就是说 §13 那个「61–70 µs/chunk」里约**七成**是每 chunk 一次 wakeup/syscall 的
+#     台架开销，不是流式本身的成本。
+#   - 代价是**首字推迟约 `(batch-1)×21ms`**（实测 500→722ms @batch=10、→937ms @batch=20）。
+#     所以**延迟/TTFT 类实验必须留 1**（客户就是 1），产能类才用 10。与 `KEEP_BODY` 同一套
+#     「两套试验分开跑」纪律（docs/manual/v88-rig.md §4）。
+MOCK_BATCH=${MOCK_BATCH:-}
 K6_DIR=${K6_DIR:-$HOME/labtest/k6dir2}
 K6_IMAGE=${K6_IMAGE:-k6-customer:latest}
 K6_MEM=${K6_MEM:-45g}
@@ -110,6 +125,10 @@ lab_lock "ab_topology" || exit 1
 #   子进程一律用 `9>&-` 显式关掉锁 fd（不然网关活着就等于替我们攥着锁）。
 SAMPLER_PID=""
 GW_STARTED=0
+# 逐口原值（`port=batch` 串，由 lib_rig.sh 的 `farm_remember` 追加）：**必须在这里就初始化** ——
+# cleanup 在退出时读它，而 `die` 可能在本文件任何一行触发（例如 CATALOG 自检在农场那段之前），
+# `set -u` 下读未初始化的变量会直接把"收尾"变成"再炸一次"。
+FARM_SAVED=""
 stop_gw() {
   # 只在**本次真的起过**网关时才杀。否则前置自检 die（例如 CATALOG 写错）会顺手
   # 杀掉 lab 上别人正监听 $PORT 的网关。
@@ -118,20 +137,27 @@ stop_gw() {
   p=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
   [ -n "$p" ] && kill "$p" 2>/dev/null
 }
+restore_mock_batch() {
+  [ -n "$FARM_SAVED" ] || return 0
+  local n=0 kv
+  for kv in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://127.0.0.1:${kv%%=*}/_config?batch=${kv#*=}" >/dev/null 2>&1
+    n=$((n + 1))
+  done
+  # 走 log()：还原这件事必须落在 progress.log（工件）里，不能只在 stdout
+  log "  mock _config: 已按口还原 batch（$n 口）"
+}
 cleanup() {
   [ -n "${SAMPLER_PID:-}" ] && kill "$SAMPLER_PID" 2>/dev/null
   docker rm -f abtop-k6 >/dev/null 2>&1
   stop_gw
+  restore_mock_batch
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 前置自检
-expand_ports() {
-  case "$1" in
-    [0-9]*-[0-9]*) seq "${1%-*}" "${1#*-}" ;;
-    *) printf '%s' "$1" | tr ',' ' ' ;;
-  esac
-}
+# `expand_ports` 由 lib_rig.sh 提供（三个 harness 共用；只认区间的版本会在逗号列表下
+# **空转通过**守卫，见那里的注释）。
 
 # 目录文件必须存在且指向 127.0.0.1（同机 loopback）。仓库内跑默认取 examples/ 那份；
 # 仓库外跑（脚本被拷到别处）必须显式传 CATALOG —— 报错里列出**试过哪些路径**，
@@ -154,7 +180,13 @@ log "ab_topology: arm=$ARM kb=$KEEP_BODY sample=$KEEP_SAMPLE levels=[$LEVELS] tw
 log "  catalog=$CATALOG  k6=$K6_IMAGE ref=${K6_REF:-n/a}  k6.js sha256=$(sha256sum "$K6_DIR/k6.js" | cut -c1-16)…"
 # 与另外两个 harness 一致：打印**那份 k6.js 自己的** KEEP_SAMPLE 默认值（仓库版 1 / 客户 memopt
 # 副本 0.1）。我们总是显式传 `KEEP_SAMPLE`，所以它不影响本脚本的喂法 —— 打出来只为一眼可见。
-log "  k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_DIR/k6.js" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=$KEEP_SAMPLE）"
+log "  k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_DIR/k6.js" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=${KEEP_SAMPLE}）"
+
+# 端口展开为空要在**这里**（网关启动之前）就死掉：否则先起一个网关再 die（白起白拆），
+# 或者更早撞上"拿不到 mock 容器 PID"那条误导信息（复评第 3 轮 minor：上一版把守卫删掉了）。
+n_mock_ports=0
+for p in $(expand_ports "$MOCK_PORTS"); do n_mock_ports=$((n_mock_ports + 1)); done
+[ "$n_mock_ports" -gt 0 ] || die "MOCK_PORTS='$MOCK_PORTS' 展开后一个端口都没有（支持 \"4101-4124\" 或 \"4101,4102\"）"
 
 # ---------------------------------------------------------------- 网关（本机）
 GW_DB="$GATEWAY_DIR/$ARM-topo.db"
@@ -185,8 +217,66 @@ esac
 # ---------------------------------------------------------------- mock 农场 PID
 mapfile -t MPIDS < <(for p in $(expand_ports "$MOCK_PORTS"); do
   docker inspect -f '{{.State.Pid}}' "${MOCK_CONTAINER_PREFIX}$p" 2>/dev/null; done)
-[ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（前缀 $MOCK_CONTAINER_PREFIX）"
+[ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（前缀 ${MOCK_CONTAINER_PREFIX}）"
 log "  mock: ${#MPIDS[@]} 个容器"
+
+# 农场口径：**无论改不改都先回读并写进日志**。24 个 mock 是**共享**的 —— 上一轮把 `batch=10`
+# 留在那里，这一轮"不动农场"就会静默量到相反的口径（§14：batch 决定台架自身 CPU 的约 70%）。
+# 拿不到读数时明说"unknown"，不要假装是 1。
+MOCK_CLAIM_BEFORE=""
+n_ports=0; n_before=0
+seen_batches=""
+for p in $(expand_ports "$MOCK_PORTS"); do
+  n_ports=$((n_ports + 1))
+  b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
+  if [ -n "$b" ]; then
+    n_before=$((n_before + 1))
+    FARM_SAVED=$(farm_remember "$FARM_SAVED" "$p" "$b")
+    case " $seen_batches " in *" $b "*) ;; *) seen_batches="$seen_batches $b" ;; esac
+  fi
+done
+# ⚠️ 必须**去掉前导空格再比**：`seen_batches` 是拼出来的，初值空、第一次追加就带前导空格，
+# 于是 `" 1" != "1"` 恒真 —— 农场明明在客户基线 1 上也会报警（复评第 3 轮抓到的真缺陷：
+# 一个"没事时反而响"的告警，还写进了 progress.log）。
+seen_batches=${seen_batches# }
+MOCK_CLAIM_BEFORE=${seen_batches%% *}
+# 打印**全部不同的值**（`[1 7]`），不要只印第一个：混口时"第一个"和"整组"是两件事，
+# 下一行的告警用的就是整组，两行不一致会让人以为只读到一个值。
+if [ "$n_before" -eq 0 ]; then
+  log "  农场口径: batch=unknown（$n_ports 个口都没读到）"
+elif [ "$n_before" -eq "$n_ports" ]; then
+  log "  农场口径: batch=[${seen_batches}]（$n_before/$n_ports 口）"
+else
+  log "  农场口径: batch=[${seen_batches}]（只读到 $n_before/$n_ports 口 ⇒ ⚠️ 各口可能不一致，本轮不可比）"
+fi
+# **不要**把告警押在"所有口都读到"上：恰恰是有口读不到时最容易留下脏状态。
+if [ -n "${seen_batches}" ] && [ "${seen_batches}" != "1" ]; then
+  log "  ⚠️ 农场 batch=[${seen_batches}] 不是客户基线 1 —— 本轮是**台架口径**，不能与对标数据混比（§14）"
+fi
+
+# 只在显式给了 `MOCK_BATCH` 时才动农场配置（留空 = 一个字节都不改）。下发后**必须校验回读**：
+# `_config` 是静默的，写错参数名不会报错，只会让"我以为我设了 batch"变成假结论
+# （同类坑见 §13.6 与 `map_cfg_key`）。收尾**按口还原**（见 cleanup）。
+if [ -n "${MOCK_BATCH}" ]; then
+  case "${MOCK_BATCH}" in
+    ''|*[!0-9]*) die "MOCK_BATCH 必须是十进制整数（拿到 '${MOCK_BATCH}'）" ;;
+  esac
+  # **只写原值已知的口**：这样"写过 ⇒ 一定能还原"是**不变量**。否则"预读失败、随后又能写"
+  # 的口会被改掉却没有原值可回（复评第 3 轮 minor 5）。读不到的口由下面 `n_ok -eq n_ports`
+  # 的守卫 fail-closed 兜住。
+  for kv in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://127.0.0.1:${kv%%=*}/_config?batch=${MOCK_BATCH}" >/dev/null 2>&1
+  done
+  n_ok=0
+  for p in $(expand_ports "$MOCK_PORTS"); do
+    case "$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null)" in
+      *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
+    esac
+  done
+  log "  mock _config: batch=${MOCK_BATCH}（回读生效 $n_ok/$n_ports 口）"
+  # 收尾**无条件**按口还原（写已经发生了）；失败时更要还原，所以这条在 die 之前
+  [ "$n_ok" -eq "$n_ports" ] || die "batch=${MOCK_BATCH} 没有在所有 mock 上生效（$n_ok/${n_ports}）—— 静默失效会产出假结论"
+fi
 
 # ---------------------------------------------------------------- CPU 采样器
 # 每秒一行累计 tick（100 Hz）。记下自己的 PID，收尾只 kill 这个 PID
@@ -224,7 +314,7 @@ cores_between() {  # $1=log $2=列号 $3=t0 $4=t1
 FAILED_LEVELS=0
 for L in $LEVELS; do
   t0=$(date +%s)
-  log "level $L 开始（同机 loopback，目标 127.0.0.1:$PORT）"
+  log "level $L 开始（同机 loopback，目标 127.0.0.1:${PORT}）"
   docker rm -f abtop-k6 >/dev/null 2>&1
   docker run -d --name abtop-k6 --network=host -m "$K6_MEM" -v "$K6_DIR:/k6" \
     -e "TARGET_URL=http://127.0.0.1:$PORT/v1/chat/completions" \
