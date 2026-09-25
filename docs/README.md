@@ -9,6 +9,7 @@
 | [manual/xlite.md](manual/xlite.md) | Operator env, YAML, HTTP/2 |
 | [manual/lab-loadtest.md](manual/lab-loadtest.md) | Mock-24、实验室两台机、客户现场拓扑 |
 | [manual/v88-rig.md](manual/v88-rig.md) | 与 New API V88 对标的 k6 喂法 |
+| [dev/loadtest-newapi-controlled-2026-09.md](dev/loadtest-newapi-controlled-2026-09.md) | 受控对照：客户 New API 镜像在实验台的复现与更正 |
 | [../deploy/README.md](../deploy/README.md) | 24 mock + Redis，Docker 镜像启动 |
 
 Agent rules live in the repo-root `AGENTS.md`.
