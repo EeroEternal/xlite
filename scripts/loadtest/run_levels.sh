@@ -45,6 +45,8 @@
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# shellcheck source=lib_rig.sh
+. "$REPO_ROOT/scripts/loadtest/lib_rig.sh"
 K6_SCRIPT=${K6_SCRIPT:-$REPO_ROOT/scripts/loadtest/k6/k6.js}
 K6_RUNNER=${K6_RUNNER:-docker}
 K6_IMAGE=${K6_IMAGE:-grafana/k6:latest}
@@ -129,7 +131,10 @@ start_accept_sampler() {
       esac
       sleep 0.2
     done
-  ) >/dev/null 2>&1 &
+    # `9>&-` 不可少：采样器是**后台子进程**，继承锁 fd 就会替 driver 继续持有台架锁。
+    # 采样窗是 WARMUP+STABLE+60（默认 390s）⇒ driver 被 kill -9 时锁被攥住最长 6.5 分钟，
+    # 与 lib_rig.sh / README / changelog 那句「kill -9 由内核释放、不留僵尸锁」直接矛盾。
+  ) >/dev/null 2>&1 9>&- &
   printf '%s' "$!"
 }
 
@@ -139,6 +144,9 @@ grep -q 'var KEEP_SAMPLE' "$K6_SCRIPT" || { echo "✗ $K6_SCRIPT 不是仓库版
 grep -q 'gracefulStop: GRACEFUL_STOP' "$K6_SCRIPT" || { echo "✗ $K6_SCRIPT 不是仓库版（gracefulStop 未参数化）" >&2; exit 3; }
 K6_SCRIPT_MD5=$(md5_of "$K6_SCRIPT")
 mkdir -p "$RESULT_DIR"
+
+# 台架互斥 —— 与 ab_configs.sh / ab_topology.sh 共用同一把锁（见 lib_rig.sh）
+lab_lock "run_levels levels=$LEVELS" || exit 1
 
 # k6 版本**只能这样拿**：`k6 run` 的 banner 不含版本行（不加 --verbose 时），所以从运行日志里
 # grep 永远得到空值。docker 模式直接用镜像自报。
@@ -220,6 +228,8 @@ for level in $LEVELS; do
   sampler_pid=""
   if [ -n "$GW_PORT" ]; then
     # 采样窗只是上界：k6 一结束就把采样器 kill 掉（采样器每 0.2s 增量落盘，见上）。
+    # `9>&-`：采样器是后台子进程，继承锁 fd 就会替 driver 继续持有台架锁
+    # （采样窗默认 30+300+60=390s ⇒ driver 被 kill -9 后锁被攥住 6.5 分钟）
     sampler_pid=$(start_accept_sampler "$GW_PORT" "$((WARMUP_SECS + STABLE_SECS + 60))" "$RESULT_DIR/$level.acceptq")
   fi
   run_k6 "$level" || log "level $level k6 退出码非 0（保留日志，交由 report.py 判定）"
