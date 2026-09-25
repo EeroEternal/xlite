@@ -27,8 +27,12 @@ released="$(awk '/^## \[Unreleased\]/{skip=1; next} /^## \[[0-9]/{skip=0} !skip'
 # 常设面：元代码（AGENTS.md + skills）。dev/ 中的活跃提案（未提交/本周修改）跳过不报。
 standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 
-# xlite has no retained docs/dev drafts yet.
-keep=" "
+# Retained dev drafts (adjudicated 2026-09-25, v0.4.0 promotion): the controlled
+# A/B record is the full-data appendix referenced by docs/manual/v88-rig.md and
+# docs/manual/xlite.md ("完整数据见…"); its durable conclusions already live in
+# the released changelog, but the measurement detail is not duplicated anywhere
+# and the manuals point readers to it. Delete only after that data is relocated.
+keep=" loadtest-newapi-controlled-2026-09.md "
 
 findings=0
 for f in docs/dev/*; do
