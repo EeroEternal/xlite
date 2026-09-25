@@ -905,8 +905,12 @@ CPU 并不随**并发流数**线性增长：1000 VU（~992 流 / 138.7 req/s）�
 完成换指针**，读者依旧会在那一刻等待 —— 与本节要主张的结构性性质不符。`arc-swap` 本来就是
 传递依赖（`redis` 带进来，见 `Cargo.lock`），新增的只是一条依赖边。
 
-**工件可复跑**：[`scripts/loadtest/ab_configs.sh`](../../scripts/loadtest/ab_configs.sh)（本轮即用它跑出；
-它会打印 k6 镜像 digest 与 `k6.js` md5/sha256，并把生效 env 写进 `progress.log`）
+**工件可复跑**：[`scripts/loadtest/ab_configs.sh`](../../scripts/loadtest/ab_configs.sh)。
+第 2、3 轮由它跑出，**第 1 轮用的是同机 inline 脚本**。并且当时的 `ab_configs.sh` 有一个
+**已修的缺陷**：`CONFIGS` 的短键 `TWT` 被原样当 env 传下去（网关读的是 `TOKIO_WORKER_THREADS`）
+⇒ 那两轮实际用的是**默认线程数**。在 128 核机上默认值恰为 128、与 `TWT=128` 同值，
+所以结论不受影响；但**那条复现命令当时并未真的设置线程数**（同类问题见 §13.6）。
+现在 `map_cfg_key` 会显式映射、未知键非零退出，并把生效 env 写进 `progress.log`。
 
 ```bash
 # 复现 §12.6 的三轮交错（第 3 轮反序）——单轮 A / 单轮 B 分不出与噪声的差别
@@ -1012,7 +1016,13 @@ done
 在这条线上，"10 GbE 之后优化瓶颈在哪"根本测不出来，因为先撞的永远是网卡。
 把三组进程挪到**同机 loopback** 就能把链路从路径上拿掉，然后**分别**采三组进程的 CPU，看谁先饱和。
 
-**harness**：[`scripts/loadtest/ab_topology.sh`](../../scripts/loadtest/ab_topology.sh)（本轮即用它跑出）
+**数据出处（如实标注）**：§13 的 A/B/C 三个拓扑是**手工 inline 脚本**在 lab 上跑出来的
+（`/tmp/ab9/run.sh`、`/tmp/ab9/runc.sh`，产出的原始日志在 lab 的 `~/labtest/ab9/`、`~/labtest/ab9c/`）。
+[`scripts/loadtest/ab_topology.sh`](../../scripts/loadtest/ab_topology.sh) 是**事后固化的版本**，
+**不是**那一轮的产出者 —— 它只固化 `local`（全同机 loopback）这一种拓扑，
+`split` 那条支路按评审意见已删除（它只复现 §13.4 第 5 条，而那条在 §9 已成立，
+却要额外背 4 段高风险代码：coproc 远端锁、远端逐参转发、跨机哈希校验、`hostname -I` 选地址）。
+脚本自身已用 §13 的同档位自检过（见下）。
 
 ### 13.1 三个拓扑
 
@@ -1087,25 +1097,59 @@ C  拆分拓扑  k6 在 101 ──(1 GbE)──▶ 网关 + 24 mock 在 102（�
    qps 1236 → 917。**"把 mock 搬到网关同机"只把链路负载减半，没有消掉它。**
 
 **外推**：网关 ~6.9 核/千请求/秒 ⇒ 128 核大约能撑 **18,000 req/s**；而那时农场需要 **~630 核**。
-**要扩的是农场** —— 它的单位成本高得离谱：502 个 chunk/请求 ⇒ 约 **68 µs/chunk**，
-大头是每次 wakeup 的 syscall + 定时器。一个 batched-write 的 mock（一次 write 发多个 chunk）
-是这台架子上收益最高的一处改动。
+**要扩的是农场** —— 它的单位成本高得离谱：用 B@8000 那一行算
+`72.4 核 ÷ (1236.2 req/s × 502 chunk/请求)` ⇒ 约 **117 µs/chunk**
+（此前误写 68 µs，与本节表格差 1.7×，方向恰好把结论夸大 —— 已更正）。
+大头是每次 chunk 的 wakeup syscall + 定时器。一个 batched-write 的 mock
+（一次 write 发多个 chunk）是这台架子上收益最高的一处改动。
 
 ### 13.5 台架互斥（本轮新增）
 
 两个 agent session 共用同一批 mock 与网关，**同时压测量出来的就是"谁在抢资源"的函数**。
-两个 harness（`ab_configs.sh` / `ab_topology.sh`）现已在开跑前抢 `flock`：
+**三个** harness（`run_levels.sh` / `ab_configs.sh` / `ab_topology.sh`）现已在开跑前抢同一把
+`flock`，由 [`scripts/loadtest/lib_rig.sh`](../../scripts/loadtest/lib_rig.sh) 的 `lab_lock` 统一提供：
 锁绑在 fd 上，进程退出/崩溃/`kill -9` 都由内核自动释放，**不留僵尸锁**。
-`ab_topology.sh` 的 split 拓扑会**同时**在远端抢一把，并前置校验远端确有 k6 镜像与同哈希脚本。
+（首版只锁了两个，而 `run_levels.sh` 才是对标 New API 时最常跑的那个 —— 评审指出后补齐；
+锁文件内容用 `>&9` 写，不再 `> "$LAB_LOCK"` 重开截断。）
 
-### 13.6 本轮踩到并已修的台架坑（都写进 harness 了）
+### 13.6 本轮踩到的台架坑（部分是 inline 脚本踩的，已分别标注是否固化）
+
+**0（本轮最贵的一个）：网关的 fd 上限 `nofile` —— 会被静默卡住吞吐，且所有常规指标都正常。**
+
+  网关由 harness **直接拉起**，因此继承 shell 的 `nofile`，而 ssh 非交互 shell 默认只有 **1024**。
+  表现极具欺骗性：`iteration_duration`、scenario、`vus_max=4000`、`fail=0.00%` **全部正常**，
+  但吞吐只有 1/4 —— 实测 4000 VU：
+
+  | 网关 nofile | 网关 fd 数 | 实际承载流 | qps |
+  | ---: | ---: | ---: | ---: |
+  | **1024**（继承默认） | ~1000（封顶） | ~865 | **147** |
+  | 1048576 | 4039 | ~3640 | **621** |
+
+  定位方式是**决定性 A/B**：拿旧的 inline 脚本（有 `ulimit -n`）重跑同一档，逐位复现出
+  §13.2 的 90,609 req / gw 7.522 / farm 22.111，而新脚本只有 23,594 req —— 差异就此锁定在脚本。
+  ⚠️ **不要再把 `ulimit -n` 当"死行"删掉**：对 k6（在容器里）确实无关，**对网关是要命的**。
+  现在脚本恢复 `ulimit -n 1048576`，并把网关的 `Max open files` 打进 `progress.log`；
+  **低于 65536 直接非零退出**（把静默封顶变成硬失败）。
+
+  ⚠️ **这条也影响到更早的数据**：§12.1 / §12.2 / §12.6 的网关是用 `gwctl*.sh` 起的，
+  而那份脚本**没有** `ulimit -n` ⇒ 那些网关很可能也跑在 1024 下、承载的流数低于标称。
+  **同一次对比里的两臂受同样的封顶**，所以 §12 的**臂间比较**（CPU 单调下降、零效应结论）成立；
+  但**归一的"每千流核数"绝对值需要在把 nofile 提上去之后重测**。§13 的数据不受影响
+  （inline 脚本一直带 `ulimit`）。
 
 1. **`KEEP_BODY` 不能混用**：对标模式（`true`，要 `gw_oh`）会让 k6 先饱和、白丢 4 倍吞吐；
-   找瓶颈必须用 `false`。两件事要分开跑（`v88-rig.md` §4）。
-2. **k6 容器必须验证真的起来了**：脚本一度把 `docker run` 输出丢进 `/dev/null`，
+   找瓶颈必须用 `false`。两件事要分开跑（`v88-rig.md` §4）。**已固化**（`KEEP_BODY` 默认 `false`）。
+2. **k6 容器必须验证真的起来了**：inline 脚本一度把 `docker run` 输出丢进 `/dev/null`，
    而 k6 机上既无镜像也无脚本 ⇒ 每档 42 秒、cores=0、一行指标都没有，整轮静默失败。
-   现在护栏校验 `docker inspect .State.Running`，失败就记日志并跳过该档。
-3. **k6 的 CPU 别用 `/proc` 采样**：两次采到 `0.474` / `0.000` 这种假值（采集竞态）。
-   改用运行中 `docker stats --no-stream` 取真值。
-4. **不要用无条件赋值覆盖环境变量**：harness 里 `OUT=` 无条件赋值，把调用方传的
-   `OUT=ab9b` 覆盖掉，结果两轮数据写进同一个目录。
+   **已固化**（护栏校验 `docker inspect .State.Running`，失败就记日志 + 跳过该档 + 退出码 2）。
+3. **k6 的 CPU 别用 `/proc` 采样**：inline 脚本两次采到 `0.474` / `0.000` 这种假值（采集竞态），
+   修复后仍复现（`k6=0.00`，而 `docker stats` 同时给出 20.09 核）。**已固化**：干脆删掉那列，
+   k6 核数一律用运行中 `docker stats --no-stream`。
+4. **不要用无条件赋值覆盖环境变量**：inline 脚本里 `OUT=` 无条件赋值，把调用方传的
+   `OUT=ab9b` 覆盖掉，结果两轮数据写进同一个目录。**未固化到仓库版**（仓库版从第一版就是
+   `OUT=${OUT:-…}`，这个坑只发生在 lab 的临时脚本里）。
+
+> **脚本自身已按 §13 的同档位自检**（不是"声称能跑"）：修复 `nofile` 后用
+> `CATALOG=$HOME/ab9/mock-24.yaml GATEWAY_DIR=$HOME/ab5 ARM=A2 LEVELS=4000 ab_topology.sh`
+> 跑出 **90,578 req / 620.89 qps / gw 7.47 / farm 21.99**，与 §13.2 的 B@4000
+> （90,622 / 621.3 / 7.472 / 21.811）逐位吻合。
