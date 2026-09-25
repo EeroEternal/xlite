@@ -152,6 +152,9 @@ K6_REF=$(docker image inspect -f '{{index .RepoDigests 0}}' "$K6_IMAGE" 2>/dev/n
 [ -n "$K6_REF" ] || K6_REF=$(docker image inspect -f '{{.Id}}' "$K6_IMAGE" 2>/dev/null)
 log "ab_topology: arm=$ARM kb=$KEEP_BODY sample=$KEEP_SAMPLE levels=[$LEVELS] twt=$TWT conns=$CONNS reload=$RELOAD"
 log "  catalog=$CATALOG  k6=$K6_IMAGE ref=${K6_REF:-n/a}  k6.js sha256=$(sha256sum "$K6_DIR/k6.js" | cut -c1-16)…"
+# 与另外两个 harness 一致：打印**那份 k6.js 自己的** KEEP_SAMPLE 默认值（仓库版 1 / 客户 memopt
+# 副本 0.1）。我们总是显式传 `KEEP_SAMPLE`，所以它不影响本脚本的喂法 —— 打出来只为一眼可见。
+log "  k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_DIR/k6.js" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=$KEEP_SAMPLE）"
 
 # ---------------------------------------------------------------- 网关（本机）
 GW_DB="$GATEWAY_DIR/$ARM-topo.db"

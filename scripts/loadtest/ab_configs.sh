@@ -278,15 +278,29 @@ for arm_spec in $ARMS; do
     qps=$(awk '/^ *http_reqs\./{for(i=1;i<=NF;i++) if($i ~ /\/s$/){gsub(/\/s/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)
     dur=$(awk '/^ *http_req_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); sub(/s$/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)
     it=$(awk '/^ *iteration_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); sub(/s$/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)
-    if [ -n "$qps" ] && [ -n "$dur" ] && awk -v d="$dur" 'BEGIN{exit !(d>0)}'; then
+    # 数值闸门两道：
+    #   (1) `case` 只收十进制数字。k6 提取出来的本来就该是 `<n>`，这一步只挡异常输入。
+    #   (2) `d+0>0` 判正数。**不能写 `d>0`** —— awk 对非数字字符串走**字符串比较**，
+    #       `"abc" > "0"` 为真 ⇒ 闸门**放行**，接着 `VUS/d` 得 inf、比值变成 0，
+    #       凭空报一个「客户端疑似饱和（0%）」。数值判断必须显式 `+0`。
+    case "$dur" in ''|*[!0-9.]*) dur="" ;; esac
+    if [ -n "$qps" ] && [ -n "$dur" ] && awk -v d="$dur" 'BEGIN{exit !(d+0>0)}'; then
+      # `theo` 取整后可能为 0（VUS 小 / dur 极大，例如整轮超时 dur=600s）—— 那一步的
+      # `100*q/t` 会除零并吐一个空 ratio，告警被**静默跳过**。这种情况**明说无法判定**。
       theo=$(awk -v v="$VUS" -v d="$dur" 'BEGIN{printf "%.0f", v/d}')
-      ratio=$(awk -v q="$qps" -v t="$theo" 'BEGIN{printf "%.0f", 100*q/t}')
-      gap=""
-      [ -n "$it" ] && gap="；客户端每迭代空档 $(awk -v i="$it" -v d="$dur" 'BEGIN{printf "%.1f", i-d}')s（iter $(printf %.2f "$it")s vs dur $(printf %.2f "$dur")s）"
-      log "  客户端占用: 实测 $(awk -v q="$qps" 'BEGIN{printf "%.1f", q}')/s ÷ 理论 ${theo}/s = ${ratio}%${gap}"
-      if [ "$ratio" -lt 60 ]; then
-        log "  ⚠️ $label 客户端疑似饱和（${ratio}%）：这一档量到的是 **k6 的墙**，不能用来评判网关。"
-        log "     → 要 gw_oh 又要高载：KEEP_BODY=true KEEP_SAMPLE=0.1（实测 604 qps vs SAMPLE=1 的 315）；纯产能/CPU：KEEP_BODY=false。"
+      if [ "$theo" -le 0 ]; then
+        log "  （客户端饱和无法判定：$VUS ÷ ${dur}s 取整为 ${theo}，跳过本档判定）"
+      else
+        ratio=$(awk -v q="$qps" -v t="$theo" 'BEGIN{printf "%.0f", 100*q/t}')
+        gap=""
+        if [ -n "$it" ]; then
+          gap="；客户端每迭代空档 $(awk -v i="$it" -v d="$dur" 'BEGIN{printf "%.1f", i-d}')s（iter $(printf %.2f "$it")s vs dur $(printf %.2f "$dur")s）"
+        fi
+        log "  客户端占用: 实测 $(awk -v q="$qps" 'BEGIN{printf "%.1f", q}')/s ÷ 理论 ${theo}/s = ${ratio}%${gap}"
+        if [ "$ratio" -lt 60 ]; then
+          log "  ⚠️ $label 客户端疑似饱和（${ratio}%）：这一档量到的是 **k6 的墙**，不能用来评判网关。"
+          log "     → 要 gw_oh 又要高载：KEEP_BODY=true KEEP_SAMPLE=0.1（实测 604 qps vs SAMPLE=1 的 315）；纯产能/CPU：KEEP_BODY=false。"
+        fi
       fi
     fi
 
