@@ -10,8 +10,8 @@
 | `link_budget.py` | 链路预算预检（`--selftest` 自证；退出码 2 = LINK-BOUND） |
 | `ab_configs.sh` | **同一份代码里某个旋钮/改动值不值**的 A/B harness（判决指标含网关 CPU）；`CONFIGS` 的短键 `TWT/CONNS/RELOAD` 会映射成真实 env 名，未知键直接非零退出 |
 | `e2e_reload_swap.sh` | **端到端**验证「reload → 换快照 → 读者看到新快照」（`ab_configs.sh` 在目录冻结时走不到那条路径） |
-| `ab_topology.sh` | 判**瓶颈落在网关 / mock 农场 / k6 哪一组**：三组进程分别采 CPU；把三组放同机 loopback 可把 1 GbE 从路径上拿掉。实测结论见 `../../docs/dev/loadtest-newapi-controlled-2026-09.md` §13（**农场是网关的约 5 倍，瓶颈是农场**） |
-| `lib_rig.sh` | 三个 harness 共用的台架互斥锁（`lab_lock`）：锁绑 fd，进程退出/崩溃/`kill -9` 均由内核释放，不留僵尸锁 |
+| `ab_topology.sh` | 判**瓶颈落在网关 / mock 农场 / k6 哪一组**：三组进程分别采 CPU；把三组放同机 loopback 可把 1 GbE 从路径上拿掉。实测结论见 `../../docs/dev/loadtest-newapi-controlled-2026-09.md` §13（**农场是网关的约 5 倍，瓶颈是农场**）—— ⚠️ 那组数是 **`batch=1` 口径**：§14 实测其中约七成是台架每 chunk 一次 syscall 的开销，换 `batch=10` 后农场降到约 **2.7 倍**、且台架不再是天花板。用 `MOCK_BATCH` 选口径 |
+| `lib_rig.sh` | 三个 harness 共用的台架互斥锁（`lab_lock`）+ mock 端口展开 `expand_ports` + 农场原值记账 `farm_remember`。锁绑 fd，进程退出/崩溃/`kill -9` 均由内核释放，不留僵尸锁 —— **但 `kill -9` 下 `trap ... EXIT` 不会执行**：孤儿网关/k6 容器会留下，**被改过的 mock `batch` 也不会被还原**（实测写完 `batch=7` 后 `kill -9`，农场就停在 7）。所以每轮都**回读并记录农场口径**（`progress.log` / `env.txt`），那才是「上一轮到底跑的是什么口径」的凭据。除 `ab_topology.sh` 外只用 bash 3.2 可用的特性（macOS 自带 `/bin/bash`） |
 
 **对标表只报 `ttft / dur / fail / qps / ESTAB / 活跃流`。**
 活跃流用**闭式** `VUS × dur/iter`（见 [`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) §2）；

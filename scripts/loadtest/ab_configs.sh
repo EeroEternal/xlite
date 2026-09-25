@@ -184,9 +184,11 @@ if [ -n "${MOCK_BATCH}" ]; then
   case "${MOCK_BATCH}" in
     ''|*[!0-9]*) printf '✗ MOCK_BATCH 必须是十进制整数（拿到 %s）\n' "'$MOCK_BATCH'" >&2; exit 2 ;;
   esac
-  # 只还原**我们确实写过**的口（读不到原值的口不碰：写它也没意义，且 restore 无值可回）
-  for p in $MOCK_PORTS_LIST; do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1
+  # **只写原值已知的口**：这样"写过 ⇒ 一定能还原"是不变量（复评第 3 轮 minor 5：
+  # 旧写法写遍所有口，而只有预读成功的口记了原值 ⇒ "预读失败、随后又能写"的口改不掉回）。
+  # 读不到的口由下面 `n_ok -eq n_ports` 的守卫 fail-closed 兜住。
+  for kv in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://127.0.0.1:${kv%%=*}/_config?batch=${MOCK_BATCH}" >/dev/null 2>&1
   done
   n_ok=0
   for p in $MOCK_PORTS_LIST; do

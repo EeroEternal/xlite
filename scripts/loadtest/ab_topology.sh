@@ -182,6 +182,12 @@ log "  catalog=$CATALOG  k6=$K6_IMAGE ref=${K6_REF:-n/a}  k6.js sha256=$(sha256s
 # 副本 0.1）。我们总是显式传 `KEEP_SAMPLE`，所以它不影响本脚本的喂法 —— 打出来只为一眼可见。
 log "  k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_DIR/k6.js" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=${KEEP_SAMPLE}）"
 
+# 端口展开为空要在**这里**（网关启动之前）就死掉：否则先起一个网关再 die（白起白拆），
+# 或者更早撞上"拿不到 mock 容器 PID"那条误导信息（复评第 3 轮 minor：上一版把守卫删掉了）。
+n_mock_ports=0
+for p in $(expand_ports "$MOCK_PORTS"); do n_mock_ports=$((n_mock_ports + 1)); done
+[ "$n_mock_ports" -gt 0 ] || die "MOCK_PORTS='$MOCK_PORTS' 展开后一个端口都没有（支持 \"4101-4124\" 或 \"4101,4102\"）"
+
 # ---------------------------------------------------------------- 网关（本机）
 GW_DB="$GATEWAY_DIR/$ARM-topo.db"
 rm -f "$GW_DB"
@@ -229,7 +235,11 @@ for p in $(expand_ports "$MOCK_PORTS"); do
     case " $seen_batches " in *" $b "*) ;; *) seen_batches="$seen_batches $b" ;; esac
   fi
 done
-MOCK_CLAIM_BEFORE=${seen_batches# }; MOCK_CLAIM_BEFORE=${MOCK_CLAIM_BEFORE%% *}
+# ⚠️ 必须**去掉前导空格再比**：`seen_batches` 是拼出来的，初值空、第一次追加就带前导空格，
+# 于是 `" 1" != "1"` 恒真 —— 农场明明在客户基线 1 上也会报警（复评第 3 轮抓到的真缺陷：
+# 一个"没事时反而响"的告警，还写进了 progress.log）。
+seen_batches=${seen_batches# }
+MOCK_CLAIM_BEFORE=${seen_batches%% *}
 if [ "$n_before" -eq 0 ]; then
   log "  农场口径: batch=unknown（$n_ports 个口都没读到）"
 elif [ "$n_before" -eq "$n_ports" ]; then
@@ -249,8 +259,11 @@ if [ -n "${MOCK_BATCH}" ]; then
   case "${MOCK_BATCH}" in
     ''|*[!0-9]*) die "MOCK_BATCH 必须是十进制整数（拿到 '${MOCK_BATCH}'）" ;;
   esac
-  for p in $(expand_ports "$MOCK_PORTS"); do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=${MOCK_BATCH}" >/dev/null 2>&1
+  # **只写原值已知的口**：这样"写过 ⇒ 一定能还原"是**不变量**。否则"预读失败、随后又能写"
+  # 的口会被改掉却没有原值可回（复评第 3 轮 minor 5）。读不到的口由下面 `n_ok -eq n_ports`
+  # 的守卫 fail-closed 兜住。
+  for kv in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://127.0.0.1:${kv%%=*}/_config?batch=${MOCK_BATCH}" >/dev/null 2>&1
   done
   n_ok=0
   for p in $(expand_ports "$MOCK_PORTS"); do

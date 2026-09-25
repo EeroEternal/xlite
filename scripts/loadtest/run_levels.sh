@@ -215,7 +215,9 @@ if [ -n "$MOCKS" ]; then
     b=$(curl -s -m 3 -X POST "http://$h/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9' || true)
     [ -n "$b" ] && FARM_SAVED=$(farm_remember "$FARM_SAVED" "$h" "$b")
   done
-  for h in $hosts; do
+  # **只写原值已知的口**（"写过 ⇒ 一定能还原"是不变量；读不到的口由下面的守卫 fail-closed）
+  for kv in $FARM_SAVED; do
+    h=${kv%%=*}
     curl -s -m 3 -X POST "http://$h/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true
   done
   n_ok=0
@@ -225,9 +227,9 @@ if [ -n "$MOCKS" ]; then
     esac
   done
   log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS batch=${MOCK_BATCH}（回读生效 $n_ok/$n_all 口）"
-  # **有意 fail-closed**：以前这一整段静默吞掉失败（`|| true`），于是"以为配好了"而实际只配了
-  # 一部分，跑出来的表照样进工件。压测台架宁可**开局就死**，也不要出一份口径不明的报告：
-  # 这里在任何压测开始之前，代价只是一次 ssh，而不是一轮几十分钟的跑数。
+  # **有意 fail-closed**（口径已确认）：上一提交已经加了同样的 exit 2 守卫，这里只是把它写成
+  # **明说的决策** —— 任何一个口配不上就**开局即死**，代价一次 ssh，而不是一轮几十分钟、
+  # 口径不明的报告。（写入本身仍然容忍失败：`|| true` 留着，由这道回读守门统一裁决。）
   [ "$n_ok" -eq "$n_all" ] || { printf '✗ mock 配置未在所有口生效（%s/%s）—— 静默失效会产出假结论\n' "$n_ok" "$n_all" >&2; exit 2; }
 fi
 
@@ -333,6 +335,13 @@ done
   echo "LEVELS=$LEVELS"
   echo "STABLE=$STABLE"
   echo "WARMUP=$WARMUP"
+  # 农场口径是**这一轮报告的一部分**：`batch` 直接改变台架自身 CPU（§14），
+  # 不写进 env.txt 的话，下游拿到表也看不出这一轮跑的是什么口径。
+  echo "MOCKS=${MOCKS:-unset}"
+  echo "MOCK_BATCH=${MOCK_BATCH:-unset（不动农场）}"
+  # 用 `host=值` 而不是 `host:值`：host 里本来就有冒号（`127.0.0.1:4101`），
+  # 再拿冒号当分隔符会读不出哪段是哪个。
+  echo "MOCK_BATCH_BEFORE=$(for kv in $FARM_SAVED; do printf '%s ' "$kv"; done | sed 's/ $//')"
 } > "$RESULT_DIR/env.txt"
 
 # ---------------------------------------------------------------- 出报告（含链路预算闸门）
