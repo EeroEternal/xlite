@@ -62,6 +62,23 @@ K6_MEM=${K6_MEM:-45g}
 TOKEN=${TOKEN:-sk-loadtest}
 MODEL=${MODEL:-mock}
 TARGET_HOST=${TARGET_HOST:-$GATEWAY_HOST}
+# k6 喂法。**默认 KEEP_BODY=true 保持向后兼容**，但它有一个静默陷阱：
+# `gateway_overhead_ms` 只在 KEEP_BODY=true 时注册（k6 要逐字节解析 502 个 chunk），
+# 于是 k6 自己会先饱和 —— 实测 4000 VU 下 KB=true 的 qps 封顶 ~315、而网关与农场 CPU
+# 双双不再增长，**量到的是 k6 的墙而不是网关的**。判据是"实测 qps ÷ (VUS ÷ dur_p50)"
+# （见下面的客户端饱和检测），不是拍脑袋的 VU 阈值。
+#   延迟/对标用途 → KEEP_BODY=true（要有 gw_oh）
+#   产能/CPU 用途 → KEEP_BODY=false（与 run_levels.sh 的"对标模式"分开跑，见 v88-rig §4）
+KEEP_BODY=${KEEP_BODY:-true}
+# KEEP_SAMPLE 只影响**脚本解析**的比例（checks 比 2.00 → 1.10），**不影响 k6 是否读完整个流**
+# （那由全局 `discardResponseBodies: !KEEP_BODY` 决定）—— 所以 dur/TTFT 在任何一档都有效。
+# 三种喂法实测（4000 VU，各 120s）：KB=false → 600.3 qps（无 gw_oh）；
+# KB=true SAMPLE=1 → 315.0 / 320.2 qps（全量 gw_oh，k6 最贵，iter_p50 12.2–12.4s）；
+# KB=true SAMPLE=0.1 → 603.8 / 604.4 qps（gw_oh 取 10% 样本，仍够出分位）。
+# **始终显式传**，不要让 k6.js 的默认值替我们决定喂法：实验室那份 k6.js 默认 0.1，
+# 本仓库默认 1 —— 不传就是「同名不同喂法」。实测过这个坑：脚本日志写着 KEEP_BODY=true
+# （当时还没转发 KEEP_SAMPLE），实际跑的是 0.1，于是拿到 601 qps 且**看起来一切正常**。
+KEEP_SAMPLE=${KEEP_SAMPLE:-1}
 OUT=${OUT:-$HOME/labtest/ab-configs}
 SSH_OPTS=${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no}
 GW="ssh $SSH_OPTS $GATEWAY_HOST"
@@ -83,6 +100,49 @@ md5_of() {
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
   else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+# k6 的耗时是 **Go duration 字面量**，不是"若干秒"：
+#   `37.83µs` / `3.84ms` / `5.89s` / `1m4s` / `1h2m3s`（仓内真实日志里都出现过，
+#   其中 `http_req_duration` 行上的分钟级 p50（`1m4s`…`3m5s`）有 15 处 —— 正是**卡住**的那些轮次）。
+# 所以不能只 `sub(/s$/,"")` 当秒数用：`1m4s` 会变成 `1m4`、`2.29ms` 变成 `2.29m`。
+# 本函数把字面量严格换算成**秒**；**完全消费不掉就返回空**（调用方据此跳过判定），
+# 不要让 awk 把垃圾字符串静默当 0。
+secs_of() {
+  # 微秒号 U+00B5（UTF-8 = C2 B5）先换成 ASCII `u`，**必须在 bash 里换**：
+  # macOS 自带的 BWK awk（`awk version 20200816`）**在 UTF-8 locale 下把多字节字面量
+  # `"µs"` 与 `"s"` 判为相等** —— 实测 `("µs" == "s")` 在 `LC_ALL=en_US.UTF-8` 下是 **1**、
+  # 在 `LC_ALL=C` 下才是 **0**。于是单位判定**两个方向都会错**：
+  #   `unit == "µs"` 对 `"s"` 判真 ⇒ `5.89s` 走微秒那一支，算成 5.89e-06（`1m4s` 同病）；
+  #   `unit == "s"`  对 `"µs"` 判真 ⇒ `37.83µs` 走秒那一支，算成 37.83s（**137 倍**）。
+  # ⚠️ **只有字符串比较有此问题，正则字面量是好的**：`("37.83µs" ~ /µs$/)` 在两种 locale 下
+  # 都正确（所以别把这句读成"正则也会被截断"—— 那是错的，已实测）。
+  # 换成 ASCII 之后 awk 只面对 ASCII，行为与 locale、与 awk 实现（BWK / gawk / mawk）都无关。
+  local t=${1//$'\xc2\xb5'/u}
+  awk -v t="$t" 'BEGIN{
+    if (t ~ /^[0-9]+(\.[0-9]+)?$/) { printf "%.9g", t + 0; exit }   # 裸数字按秒收
+    s = t; total = 0; ok = 0
+    while (s != "" && match(s, /^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h)/)) {
+      tok = substr(s, 1, RLENGTH)
+      unit = tok; sub(/^[0-9.]+/, "", unit)
+      num = tok;  sub(/(ns|us|ms|s|m|h)$/, "", num)
+      if (unit == "ns") mult = 1e-9
+      else if (unit == "us") mult = 1e-6
+      else if (unit == "ms") mult = 1e-3
+      else if (unit == "s") mult = 1
+      else if (unit == "m") mult = 60
+      else mult = 3600
+      total += num * mult; ok = 1
+      s = substr(s, RLENGTH + 1)
+    }
+    if (ok && s == "") printf "%.9g", total
+  }'
+}
+
+# 只接受十进制数字串（至多一个小数点），否则返回空。挡 `abc` / `1.2.3` / `1e3` 这类
+# 会被 awk 的 `+0` 静默吞掉的输入 —— `qps` 与耗时都要过这道闸。
+num_of() {
+  awk -v v="$1" 'BEGIN{ if (v ~ /^[0-9]+(\.[0-9]+)?$/) print v }'
 }
 
 # 配置短键 → 网关**真实** env 名。
@@ -199,11 +259,14 @@ start_arm() {   # $1=arm $2=port $3...=env；成功则打印远端 info，失败
 }
 
 run_k6() {      # $1=port $2=outfile
+  # **永远显式传**：早先"默认 1 时省略"导致日志写 KEEP_SAMPLE=1 而实际跑的是 k6.js
+  # 自己的默认值（实验室那份是 0.1）—— 日志与实际不一致，正是最难查的一类问题。
   docker run --rm -m "$K6_MEM" --network=host -v "$K6_DIR:/k6" \
     -e TARGET_URL="http://$TARGET_HOST:$1/v1/chat/completions" \
     -e TOKEN="$TOKEN" -e MODEL="$MODEL" -e STREAM=true \
     -e IN_TOKENS=100 -e OUT_TOKENS=500 -e VUS="$VUS" -e DURATION="$DURATION" -e MAX_VUS="$VUS" \
-    -e STREAM_TIMEOUT=600000 -e WARMUP="$WARMUP" -e KEEP_BODY=true \
+    -e STREAM_TIMEOUT=600000 -e WARMUP="$WARMUP" -e "KEEP_BODY=$KEEP_BODY" \
+    -e "KEEP_SAMPLE=$KEEP_SAMPLE" \
     -e GRACEFUL_STOP="$GRACEFUL_STOP" \
     "$K6_IMAGE" run --compatibility-mode=base \
     --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js > "$2" 2>&1
@@ -211,7 +274,11 @@ run_k6() {      # $1=port $2=outfile
 
 # ---------------------------------------------------------------- 主循环
 log "ab_configs: arms=[$ARMS] configs=[$CONFIGS] vus=$VUS dur=$DURATION stop=$GRACEFUL_STOP"
+log "喂法: KEEP_BODY=$KEEP_BODY KEEP_SAMPLE=$KEEP_SAMPLE（KB=true 才有 gateway_overhead_ms；KB=false 用于产能/CPU）"
 log "身份: k6.js=$K6_JS md5=$K6_JS_MD5 sha256=$K6_JS_SHA256 | k6 镜像=$K6_IMAGE id=$K6_IMAGE_ID"
+# 打印那份 k6.js **自己的** KEEP_SAMPLE 默认值：实验室目录里可能是客户 memopt 版（0.1），
+# 与仓库版（1）不同 —— 不显式传就会被它悄悄决定喂法。
+log "k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_JS" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')"
 ok_groups=0
 for arm_spec in $ARMS; do
   arm=${arm_spec%%:*}; port=${arm_spec##*:}
@@ -241,10 +308,55 @@ for arm_spec in $ARMS; do
     $GW "bash /tmp/ab_gw.sh stop '$port'" >/dev/null 2>&1
     cores=$(cores_of "$GATEWAY_DIR/cpu-$label.log")
     log "  cores=$cores backlog=${gw_backlog:-unknown} env:[${cfg_env:- 默认}]"
-    grep -E "gateway_overhead_ms|http_reqs\.|http_req_failed" "$OUT/$label.log" | sed "s/^/  $label /" | tee -a "$OUT/progress.log"
+    grep -E "gateway_overhead_ms|http_req_duration\.|iteration_duration\.|http_reqs\.|http_req_failed" "$OUT/$label.log" \
+      | sed "s/^/  $label /" | tee -a "$OUT/progress.log"
+
+    # ---- 客户端饱和检测：**把静默陷阱变成可见** ----
+    # 分母必须是**服务时间**（`http_req_duration` p50），不是迭代周期
+    # （`iteration_duration` p50）—— 后者**已经包含客户端自己的空档**，拿它算比值会恒等于
+    # ~100%，检测器永远不响（我自己踩过：4000 VU 下 dur=5.85s 而 iter=12.23s，
+    # 用 iter 算得 96% 于是漏报，真实比值是 315/(4000/5.85)=46%）。
+    # 理论速率 = VUS ÷ 服务时间（闭式负载的稳态上限）。实测远低于它 ⇒ 流不是被网关/农场
+    # 处理的，而是 **k6 自己推不动** ⇒ 那一档的 CPU 与延迟都不能用来评判网关。
+    # 提取 → 换算 → 闸门。**耗时是 Go duration 字面量**（`5.89s` / `1m4s` / `3.84ms` /
+    # `37.83µs`），必须过 `secs_of` 换算成秒；`qps` 过 `num_of` 收成纯数字。
+    # 两个 helper 都是"严格全消费，否则返回空"，所以：
+    #   - `dur=abc` / `1.2.3` / 空 ⇒ 空 ⇒ **整块跳过**（不会让 awk 把垃圾当 0，
+    #     从而凭空报一个「客户端疑似饱和（0%）」）；
+    #   - `dur=1m4s` ⇒ **64**（此前只 `sub(/s$/,"")` 会得到 `1m4`，再被闸门吞掉 ⇒
+    #     检测器**一声不响地失效**，而分钟级 p50 恰恰就是"卡住"的那一轮）。
+    qps=$(num_of "$(awk '/^ *http_reqs\./{for(i=1;i<=NF;i++) if($i ~ /\/s$/){sub(/\/s$/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)")
+    dur=$(secs_of "$(awk '/^ *http_req_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)")
+    it=$(secs_of "$(awk '/^ *iteration_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)")
+    if [ -n "$qps" ] && [ -n "$dur" ] && awk -v d="$dur" 'BEGIN{exit !(d+0>0)}'; then
+      # `theo` 取整后可能为 0（VUS 小 / dur 极大，例如 `VUS=200` 配 `dur=10m0s`）—— 那一步的
+      # `100*q/t` 会除零并吐一个空 ratio，告警被**静默跳过**。这种情况**明说无法判定**。
+      theo=$(awk -v v="$VUS" -v d="$dur" 'BEGIN{printf "%.0f", v/d}')
+      if [ "$theo" -le 0 ]; then
+        log "  （客户端饱和无法判定：$VUS ÷ ${dur}s 取整为 ${theo}，跳过本档判定）"
+      else
+        ratio=$(awk -v q="$qps" -v t="$theo" 'BEGIN{printf "%.0f", 100*q/t}')
+        # 空档是**附加信息**，不影响判定：`it` 已经过 `secs_of`（单位与 dur 一致），
+        # 所以这里的减法在 `iter=1m4s` 这类分钟级输入上也是对的。
+        gap=""
+        if [ -n "$it" ]; then
+          gap="；客户端每迭代空档 $(awk -v i="$it" -v d="$dur" 'BEGIN{printf "%.1f", i-d}')s（iter ${it}s vs dur ${dur}s）"
+        fi
+        log "  客户端占用: 实测 $(awk -v q="$qps" 'BEGIN{printf "%.1f", q}')/s ÷ 理论 ${theo}/s = ${ratio}%${gap}"
+        if [ "$ratio" -lt 60 ]; then
+          log "  ⚠️ $label 客户端疑似饱和（${ratio}%）：这一档量到的是 **k6 的墙**，不能用来评判网关。"
+          log "     → 要 gw_oh 又要高载：KEEP_BODY=true KEEP_SAMPLE=0.1（实测 604 qps vs SAMPLE=1 的 315）；纯产能/CPU：KEEP_BODY=false。"
+        fi
+      fi
+    fi
+
     # 「成功」必须是**取到指标**，不只是网关起来：docker/k6 全挂时 k6 日志里没有任何指标，
     # 那种组合不能算数（否则会打印「1 个组合成功」并 exit 0）。
-    if grep -q 'gateway_overhead_ms' "$OUT/$label.log" 2>/dev/null && [ -n "$cores" ] && [ "$cores" != "n/a" ]; then
+    # 指标随模式而变：KB=true 出 gw_oh，KB=false 没有它 —— 后者要有 http_reqs 才算数。
+    if [ -n "$cores" ] && [ "$cores" != "n/a" ] && {
+         { [ "$KEEP_BODY" = true ] && grep -q 'gateway_overhead_ms' "$OUT/$label.log" 2>/dev/null; } ||
+         { [ "$KEEP_BODY" != true ] && grep -qE 'http_reqs\.' "$OUT/$label.log" 2>/dev/null; }
+       }; then
       ok_groups=$((ok_groups + 1))
     else
       log "  ✗ $label 未取到有效指标（cores=$cores）—— 不计入成功"

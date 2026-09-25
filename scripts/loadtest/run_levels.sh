@@ -1,9 +1,12 @@
 #!/bin/bash
 # =============================================
-# xlite 定档位压测 — 对标 V88 喂法（KEEP_BODY=true，不传 KEEP_SAMPLE）
+# xlite 定档位压测 — 对标 V88 喂法（**显式**传 KEEP_BODY=true + KEEP_SAMPLE=1）
 #
 # 与客户套件 `run_full_88.sh` 的关系：喂法对齐，默认值对齐；差别只有「一个 driver 打一
 # 串档位」和「压完自动算账」。对标口径与三个指纹见 docs/manual/v88-rig.md §1 / §1.1。
+#
+# 喂法**显式传**（不靠 k6.js 的文件默认）：仓库版默认 KEEP_SAMPLE=1，客户机上那份 memopt
+# 副本默认 0.1 —— 「不传」就是让「跑的是哪份文件」决定 checks 比。见 v88-rig.md §4.1。
 #
 # 这个脚本存在的理由：客户机上那份 `/root/loadtest/k6/k6.js` 在对标当晚被换过至少四次
 # （v88-rig.md §1.1），只认路径必然会拿到别的版本。所以这里做两件事：
@@ -158,6 +161,10 @@ fi
 K6_VERSION=${K6_VERSION:-unknown}
 
 log "preflight ok: $K6_SCRIPT md5=$K6_SCRIPT_MD5 k6=$K6_VERSION graceful_stop=$GRACEFUL_STOP"
+# 打印**那份 k6.js 自己的** KEEP_SAMPLE 默认值：仓库版是 1，客户机上的 memopt 副本是 0.1。
+# 我们总是显式传 `KEEP_SAMPLE=1`（见 run_k6），所以这个值**不影响**本脚本的喂法 —— 打出来
+# 是为了让「文件与喂法不一致」这件事一眼可见，而不是靠默认值悄悄决定 checks 比。
+log "k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_SCRIPT" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=1）"
 log "runner=$K6_RUNNER image=$K6_IMAGE target=$TARGET levels=[$LEVELS] stable=$STABLE out_tokens=$OUT_TOKENS"
 
 # ---------------------------------------------------------------- mock _config（可选）
@@ -207,7 +214,11 @@ run_k6() {
     -e "STREAM=true" -e "IN_TOKENS=$IN_TOKENS" -e "OUT_TOKENS=$OUT_TOKENS"
     -e "VUS=$level" -e "MAX_VUS=$level" -e "DURATION=$STABLE" -e "WARMUP=$WARMUP"
     -e "STREAM_TIMEOUT=600000" -e "KEEP_BODY=true" -e "GRACEFUL_STOP=$GRACEFUL_STOP"
-    # 不传 KEEP_SAMPLE（默认 1 = 每次迭代全量解析 → checks 比 2.00）
+    # KEEP_SAMPLE **显式传 1**（= 每次迭代全量解析 → checks 比 2.00）。不要靠文件默认：
+    # 仓库版 k6.js 默认 1，但客户机上挂的 v3.2-memopt 副本默认 0.1 —— 「不传」等于让
+    # **跑的是哪份文件**决定喂法，日志与实际就会不一致（踩坑记录见
+    # docs/dev/loadtest-newapi-controlled-2026-09.md §13.6 第 1b 条）。
+    -e "KEEP_SAMPLE=1"
     # 不传 PICK_INTERVAL（默认 sleep(0)）、不传 XLITE_MAX_IN_FLIGHT
   )
   if [ "$K6_RUNNER" = local ]; then

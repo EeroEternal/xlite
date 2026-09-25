@@ -25,35 +25,47 @@
 
 | 档 | env | checks 比 | 用途 |
 | --- | --- | --- | --- |
-| 对标 V88 | `KEEP_BODY=true`（**不传** `KEEP_SAMPLE`） | **2.00** | 与客户对标那批数据同喂法：每次迭代全量解析，`chunk_interval_ms` / `gateway_overhead_ms` 出数 |
+| 对标 V88 | `KEEP_BODY=true KEEP_SAMPLE=1` | **2.00** | 与客户对标那批数据同喂法：每次迭代全量解析，`chunk_interval_ms` / `gateway_overhead_ms` 出数 |
 | 省内存 / 客户 memopt | `KEEP_BODY=true KEEP_SAMPLE=0.1` | **1.10** | 客户后来的 v3.2-memopt 版；长流 + 高 VU、k6 内存吃紧时用 |
-| 满负荷 3 万连接 | 不传 `KEEP_BODY` | **1.00** | 不解析 body，只留状态码校验 |
+| 满负荷 3 万连接 | `KEEP_BODY=false` | **1.00** | 不解析 body，只留状态码校验 |
+
+> ⚠️ **`KEEP_SAMPLE` 必须显式传，不要靠文件默认。** 本仓库的 `k6.js` 默认是 **1**，而客户机器上
+> 挂的那份 memopt 副本默认是 **0.1** —— 「不传」等于把喂法交给**跑的是哪份文件**决定，于是同名
+> 不同喂法：`scripts/loadtest/ab_configs.sh` 出过这个坑（日志写着 `KEEP_BODY=true`、实际跑 0.1，
+> 拿到 601 qps 且**看起来一切正常**）。三个 harness（`run_levels.sh` / `ab_configs.sh` /
+> `ab_topology.sh`）现在都**永远显式传**并打印生效值与文件自带默认。
+>
+> ⚠️ **`KEEP_BODY=true` 会让 k6 自己成为瓶颈：全量解析的实测上限约 315 qps**（与该档 VU 数无关，
+> 是客户端 CPU 上限）。所以 **1000 VU（~155 qps）安全，4000 VU（要 ~600 qps）量到的是 k6 的墙**。
+> 要 `gw_oh` 又要高载 ⇒ `KEEP_BODY=true KEEP_SAMPLE=0.1`（实测 604 qps）；纯产能/CPU ⇒ `KEEP_BODY=false`。
+> `ab_configs.sh` 会把这条变成可见：按 `实测 qps ÷ (VUS ÷ dur_p50)` 判定，低于 60% 直接告警
+> （诊断报文与踩坑记录见 [`docs/dev/loadtest-newapi-controlled-2026-09.md`](../../docs/dev/loadtest-newapi-controlled-2026-09.md) §13.6）。
 
 不传 `PICK_INTERVAL` 时走 `sleep(0)`；`PICK_INTERVAL` **不是间隔旋钮** —— 任何 >0 的值都只走
 `sleep(0)`，保留它只为与客户原件逐行同构。`GRACEFUL_STOP` 默认 600s（k6 会打印成 `10m0s`），
 也是与客户原件同构；`run_levels.sh` 会把它透传给 k6 **并**作为 report.py 的指纹期望值。
 
 ```bash
-# 对标 V88：KEEP_BODY=true 且不要传 KEEP_SAMPLE
+# 对标 V88：KEEP_BODY=true 且**显式** KEEP_SAMPLE=1
 k6 run --compatibility-mode=base \
   -e TARGET_URL=http://127.0.0.1:8080/v1/chat/completions -e TOKEN=sk-loadtest \
   -e MODEL=mock -e STREAM=true -e IN_TOKENS=100 -e OUT_TOKENS=500 \
   -e VUS=1000 -e DURATION=300s -e MAX_VUS=1000 -e WARMUP=30 \
-  -e KEEP_BODY=true -e STREAM_TIMEOUT=600000 \
+  -e KEEP_BODY=true -e KEEP_SAMPLE=1 -e STREAM_TIMEOUT=600000 \
   scripts/loadtest/k6/k6.js
 
-# 满负荷 ESTAB：不传 KEEP_BODY（ERR_SAMPLE 默认 1% 仍会给失败响应体采样，供 429 归因）
+# 满负荷 ESTAB：KEEP_BODY=false（ERR_SAMPLE 默认 1% 仍会给失败响应体采样，供 429 归因）
 k6 run --compatibility-mode=base \
   -e TARGET_URL=http://127.0.0.1:8080/v1/chat/completions -e TOKEN=sk-loadtest \
   -e MODEL=mock -e STREAM=true -e IN_TOKENS=100 -e OUT_TOKENS=500 \
   -e VUS=31000 -e DURATION=300s -e MAX_VUS=31000 -e WARMUP=30 \
-  -e STREAM_TIMEOUT=600000 \
+  -e KEEP_BODY=false -e STREAM_TIMEOUT=600000 \
   scripts/loadtest/k6/k6.js
 ```
 
 与客户原件的差异只有三处，都不改 `ttft / dur / fail / qps` 的口径：
 `ERR_SAMPLE` 429 归因计数、`x-xlite-upstream-ttft-ms` / `retry-after` 响应头采集、
-`KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）。
+`KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）—— **正因为这一处不同，喂法必须显式传**。
 
 ## 报告闸门（`run_levels.sh` + `report.py`）
 
