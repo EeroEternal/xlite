@@ -68,6 +68,21 @@ GW="ssh $SSH_OPTS $GATEWAY_HOST"
 
 mkdir -p "$OUT"
 
+# ---------------------------------------------------------------- 台架互斥
+# 两个 agent session 同时往同一批 mock/网关打流，量出来的就是「谁在抢资源」的函数 ——
+# 直接毁掉结论（CPU 争用、链路争用、端口撞车）。所以开跑前先抢锁。
+# 锁绑在 fd 上：脚本退出、崩溃、被 kill -9 都由内核自动释放，**不会留僵尸锁**
+# （这也是不用「写 PID 文件」方案的原因）。
+# ⚠️ 约定：驱动压测固定用同一台机；只在某台上锁，锁不住从别处起的入口。
+LAB_LOCK=${LAB_LOCK:-$HOME/lab.lock}
+exec 9>"$LAB_LOCK"
+if ! flock -n 9; then
+  echo "✗ 台架被占用：$(cat "$LAB_LOCK" 2>/dev/null)" >&2
+  echo "  确认无人使用后再删锁文件：rm $LAB_LOCK" >&2
+  exit 1
+fi
+printf '%s %s ab_configs arms=%s\n' "${LAB_SESSION:-$(hostname)-$$}" "$(date -Is)" "$ARMS" > "$LAB_LOCK"
+
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"; }
 
 md5_of() {
