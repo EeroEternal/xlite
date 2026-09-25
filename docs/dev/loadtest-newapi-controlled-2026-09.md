@@ -45,7 +45,7 @@ mock 自己的 `ttft = 500ms`。**xlite 加 2ms，New API 加 4ms。**
 
 ---
 
-## 3. 结果二：New API 的天花板由 Postgres 层决定（连接数放开后 4000 VU → 0.57%）
+## 3. 结果二：New API 的请求路径每请求打一次 DB（4000 VU 起撞墙，归因待补 ledger）
 
 | 档位 | xlite（TTFT / dur / fail） | New API · **客户配置** | New API · **放开 DB 连接** |
 | --- | --- | --- | --- |
@@ -66,11 +66,17 @@ mock 自己的 `ttft = 500ms`。**xlite 加 2ms，New API 加 4ms。**
 | 10000 VU | ~2900 | 1.3–7.6 核 | **7370%**（74 核） | 99.99% |
 | 31000 VU | ~2600 | 0.2–10.9 核 | 1500–2400% | PG 直接失联 |
 
-1. **4000 VU 那一档缺的就是连接数**：PG `max_connections` 2000 → 4000 → 10000 时，fail **23.33% → 12.39% → 0.57%**。
-   所以此前记的「4000 VU 崩 12.4%」**主要是我这边的配置**，不是 New API 的固有行为 —— **这条更正此前结论**。
-2. **放开之后瓶颈上移到 Postgres 的 CPU**：10000 VU 时 PG 吃满 **74 核**，New API 只剩 1–7 核可干；
+1. **4000 VU 那堵墙与 DB 连接数有关，但「缺的就是连接数」这条因果链尚未成立。**
+   单次观测：PG `max_connections` 2000 → 4000 → 10000 时 fail = 23.33% → 12.39% → 0.57%；
+   但**放开后的同一配置（10000 / 8000）在多次运行里又出现过 12.4% 与 12.98%**（见 §10.4）——
+   波动 20×，与配置差异同量级。**⇒ 这一档不能用来归因，也不能用来推 New API 的容量。**
+   要把它变成结论，先补 **run ledger**：每次运行记 `时间 / PG max_connections /
+   SQL_MAX_OPEN_CONNS / 4000 VU fail% / dur / note`。没有 ledger，本节与 §10.4 互相矛盾，
+   `changelog` 与 `../manual/v88-rig.md` §8 里那句「主要是 DB 连接数配置」也不成立。
+2. **放开连接数之后瓶颈上移到 Postgres 的 CPU**：10000 VU 时 PG 吃满 **74 核**，New API 只剩 1–7 核可干；
    错误分布变成 `failed to connect to postgres` ×**12207**。根因是架构性的：**New API 每个请求的结算
    （billing settlement）都要和 Postgres 往返一次**，所以它的吞吐天花板 = DB 层的吞吐天花板，而不是网关自身的转发能力。
+   这一条（每请求打 DB）由失败签名与 `pg_stat_activity` 直接支持，不依赖第 1 条的因果。
 3. 31000 VU 时 PG 直接不响应（`server closed the connection unexpectedly`），整个栈挂死。
 
 ### 3.2 能说与不能说
@@ -79,6 +85,8 @@ mock 自己的 `ttft = 500ms`。**xlite 加 2ms，New API 加 4ms。**
   xlite 的请求路径完全不碰 DB/Redis。这是架构差异，可现场验证。
 - **不能说**：「New API 在 10k 并发下不行」。本轮 PG 与网关共处一机、被 10000 条并发连接拖垮；
   客户现场 PG 是**独占 host 22**，结论可能完全不同。
+- **不能说**：「放开连接数后 4000 VU 就只剩 0.57%」——同一配置复跑出现过 12.4% / 12.98%（§10.4），
+  波动 20×。要用这个数必须先补 §3.1 的 run ledger。
 - **要验**：客户 New API 的 Postgres 在两轮 v88 压测里的 `pg_stat_activity` 峰值与 CPU。
   若峰值贴着 `max_connections=2000`，他们那套「60000 VU 无失败」也可能同样是在 DB 墙前面停住的
   （客户 rig 的真实活跃流是 3000–4000，见 [`../manual/v88-rig.md`](../manual/v88-rig.md) §2）。
@@ -230,14 +238,15 @@ B 组 @1000 VU 代入本文 §2 的受控数据：
 
 | 链路 | B 组链路容量 | 农场软天花板 | **先绑的是** |
 | --- | ---: | ---: | --- |
-| 1 GbE（客户现在） | ~4500 流 | ~16k–31k 流 | **链路** |
+| 1 GbE（客户现在） | **~5900 流**（算法与实测锚点见 [`../manual/v88-rig.md`](../manual/v88-rig.md) §2） | ~16k–31k 流 | **链路** |
 | 10 GbE（升级后） | ~45000 流 | ~16k–31k 流 | **农场** |
 
 ⇒ **`cap = min(链路, 农场, 网关)`，三个数都必须实测。** 客户的「3 万并发」在 10 GbE 上会先撞**农场**。
 
 ### 9.1 「设一个最高上限」的三条硬约束
 
-1. **值必须实测，不能拍脑袋。** 上一轮 cap=6000 而链路只扛 ~4500 → 根本没起到保护作用
+1. **值必须实测，不能拍脑袋。** 上一轮 cap=6000 而 1 GbE 的 B 组容量约 **5900 流**
+   （[`../manual/v88-rig.md`](../manual/v88-rig.md) §2）→ cap 与容量同量级，根本没起到保护作用
    （实测 TTFT 1.6s → 27.7s，`dur` 未改善）。
 2. **cap 不提高吞吐。** 四臂实测 goodput 恒定 **676–894 req/s**；cap 只决定难看在哪个指标上：
    不设闸 → `dur` 难看；设闸+无限等 → `TTFT` 难看；设闸+有界预算 → `fail%` 难看。
@@ -253,3 +262,94 @@ B 组 @1000 VU 代入本文 §2 的受控数据：
   `docker stats` 逐容器 CPU 有噪声，**绝对值需在 mocks 独占 / k6 `taskset` 隔离后复测**。
 - 直连用的是 HTTP/1.1（每 VU 一条连接），网关到 mock 走 **h2c**（多路复用）。两者的
   **每 chunk 发射成本相同**，但连接管理成本不同，所以这组只能给农场的**量级**，不能当精确容量。
+
+---
+
+## 10. 共享约束下的对标：能分胜负的只有两个指标
+
+对标的前提是**双方共用同一条链路、同一批 mock** —— 所以 `C = min(C_链路, C_农场)` 是**共享的**，
+`VU > C` 的档位对两个网关**没有区分度**（双方一起进入链路受限区）。能分胜负的只剩网关自身两项：
+
+1. **TTFT p50**（首字前）
+2. **`gateway_overhead_ms`**（首字后；用 mock 自己的 `ts` 抵消 mock 定时抖动）
+
+### 10.1 受控对照（同机 / 同 24 mock / 同 k6 镜像 / 同脚本 / 同档）
+
+B 组 @1000 VU，两侧 `checks/请求` 均 **2.00**（同口径），`KEEP_BODY=true` + `KEEP_SAMPLE=1`，
+k6 用**客户自己的镜像 v2.2.0**：
+
+| 指标 | **xlite 0.2.0** | **New API v8-sentinel** | 差 |
+| --- | ---: | ---: | --- |
+| `chunk_interval_ms` p50/p90/p95/p99 | 11/11/11/12 | 11/11/11/12 | 相同 |
+| `chunk_interval_ms` avg | 10.798 | 10.676 | 两侧都是 mock 自身抖动 |
+| **TTFT p50** | **501.77ms** | 504.17ms | **xlite −2.4ms** |
+| TTFT p99 | 510.35ms | 533.84ms | xlite −23ms |
+| **`gateway_overhead_ms` p50** | **0.51ms** | 4.18ms | **xlite −3.7ms（8×）** |
+| `gateway_overhead_ms` p99 | 15.52ms | 44.75ms | **xlite −29ms（2.9×）** |
+| `gateway_overhead_ms` avg | 1.35ms | 5.49ms | xlite −4.1ms |
+| dur p50 | 5.90s | 5.83s | +70ms（**见下**） |
+| fail | 0.00% | 0.00% | 相同 |
+
+**关于那 70ms 的 `dur` 差异**：它来自 **mock 自身的定时抖动**（同一份 mock，两次跑的平均 chunk 间隔
+10.798ms vs 10.676ms，×500 块 = 61ms）。而 `gw_oh`（`receiving − ts 跨度`）**恰好抵消这个抖动**，
+所以在那个指标上 xlite 反而是领先的。**`dur` 不能用来比网关；`gw_oh` 才能。**
+
+### 10.2 客户环境里的 ~205ms 不是 New API 的代码
+
+v88 日志里 New API `TTFT p50 = 708ms`（= mock 500 + **208ms**）且 `gw_oh p50 = −205ms`。
+这两者是**同一个延迟的两面**：网关若把客户端可见的流起点推迟 D，则 TTFT `+D`、`receiving` `−D`。
+
+但**同一镜像、同一 k6、同一 mock 配置**在我的实验台上，New API 只有 `TTFT +4.2ms` / `gw_oh +4.2ms`。
+
+⇒ **那 ~205ms 来自客户现场的路径（HAProxy 跳 / 网络），不是 New API 的转发实现。**
+⇒ **未验证的推论**：若它是路径上的**常量**延迟，则两侧同加、不影响相对比较；若它与「该网关首块的发送方式」
+耦合（HAProxy 缓冲 / 首块 flush 时机），就**不一定**同加。要钉死这一点，只能把 xlite 也放到客户那条路径上测
+`gw_oh`（或在实验台上复现同一条 HAProxy 跳），不能靠推断。
+
+### 10.3 rig 层面的更正：`v88-rig.md` §1.1 的归属要收窄
+
+| 事实 | 证据 |
+| --- | --- |
+| `deploy88/k6.js` 的 `gw_oh` 用 `res.timings.total` | 源码 |
+| **这个字段在当前任何 k6 里都不存在** | 客户自带镜像 **v2.2.0** 与实验室 **v0.57.0**，`Object.keys(res.timings)` 均为 `[duration, blocked, looking_up, connecting, tls_handshaking, sending, waiting, receiving]` → `total=undefined` |
+| 所以 `deploy88/k6.js` **产不出** `gw_oh` | `isFinite(NaN)` 恒假 |
+| 但 v88 日志里 `gw_oh` 有值 ⇒ 那轮跑的是**第三份脚本** | `if (KEEP_BODY)`（全量解析，checks=2.00）**+** `res.timings.receiving`（能出数） |
+| **复现口径** | **`loadtest/k6/k6.js` + `KEEP_BODY=true` + `KEEP_SAMPLE=1`**（同时满足两个特征） |
+
+⇒ 归档的两份副本**都对不上实际跑的那份**。对照协议必须**钉 k6 版本 + preflight 校验脚本哈希**，
+否则连"哪个指标能出数"都不确定。
+
+### 10.4 关于 New API 容量的边界
+
+同配置（PG `max_connections=10000` / `SQL_MAX_OPEN_CONNS=8000`）下，4000 VU 的 fail 在多次运行中
+出现 **0.57% / 12.4% / 12.98%** 的波动。⇒ **不能从实验台推 New API 的容量**；
+只有两侧都 0% fail 的档位（如 B@1000）才是可用对照。
+
+⇒ 这一条同时**推翻 §3 那半个因果**（"4000 VU 缺的就是连接数"）：波动幅度与配置差异同量级，
+不补 §3.1 的 run ledger 就分不清是配置还是抖动。可说的只剩架构那条：
+**New API 每请求打一次 DB**（失败签名 + `pg_stat_activity` 支持），所以它的天花板 = DB 层的天花板。
+
+### 10.5 下一步：0.2.0 vs 0.3.0 的 A/B 口径
+
+先把事实摆正：**零拷贝、入站 `TCP_NODELAY`、listen backlog 65535 三项都已经在 v0.3.0 tag 里**
+（tag = 提交 `4876579` = `origin/main`；`[Unreleased]` 里那条是 changelog 条目的放置门禁处理）。
+所以这里没有"代码要发"，只有**构建并部署 `xlite:0.3.0` 镜像**一件事 —— 实验室现在用的还是
+`xlite:0.2.0-inflight`（§1 网关 A）。
+
+| 项 | 口径 |
+| --- | --- |
+| 对照 | `xlite:0.2.0-inflight`（不设 cap）vs `xlite:0.3.0`，同机 / 同 rig / 同 mock / 同档 |
+| 脚本 | `scripts/loadtest/run_levels.sh`（`KEEP_BODY=true`，`KEEP_SAMPLE` 默认 1 ⇒ checks 比 2.00；自动写 `env.txt` / `meta.json`） |
+| 必须钉住 | k6 镜像 digest、`k6.js` md5、`TOKIO_WORKER_THREADS`（裸 `#[tokio::main]` 默认=核数，`deploy/env.example` 写 32） |
+| 看什么 | **`gw_oh p50/p90/p99/avg`** + `TTFT p50/p99` + **网关 CPU / 每千活跃流**；`dur` 不比（§10.1） |
+| 重复 | A/B 交错 ≥3 轮并报离散度 —— 本文 §10.4 自己就测到过 20× 抖动，单次 A/单次 B 不足以称"领先" |
+
+两条预期要写对：
+
+1. `TCP_NODELAY` 该作用在**尾部**（`p90/p99/avg`，当前 15.5 / 1.35ms），**不是 `p50`**（已经 0.51ms，没有下降空间）。
+2. **loopback / 同机台架会掩盖 Nagle + 延迟 ACK** ⇒ 这一臂可能测出"零效果"，那是假阴性。要么在真实链路
+   （或过一跳 HAProxy）上跑，要么在报告里标注「此臂对 NODELAY 不敏感」。零拷贝的收益本来也不在 `gw_oh`，
+   而在**核数**（每千活跃流），所以核数必须一起报。
+
+> 另外：在 1 GbE 的 C 以内，New API 在 4000 VU 前也不撞共享约束，但它会先撞自己的 DB 层（§3）。
+> 要拿「上 10 GbE 后 xlite 更省」这个结论，仍然必须先有**宽链路台架**（P0-1），A/B 取代不了它。
