@@ -56,6 +56,8 @@ k6 每个 VU 一圈：`http.post` → `check` → `sleep(0)`。`ttft_ms` 是 `re
 → 换 `receiving` 版 gw_oh（= **第三份**，对标那批数据）→ 加 `KEEP_SAMPLE=0.1`
 （= 包里 `loadtest/k6/k6.js`，最后一档）。
 
+> ⚠ **别把「文件身份」和「复现方式」读混**：说「客户跑的是第三份」讲的是**文件身份** —— 当时挂在 `/root/loadtest/k6/k6.js` 的字节既不是包里那份 `deploy88/k6.js`，也不是包里那份 `loadtest/k6/k6.js`（driver 不传 `KEEP_SAMPLE`，而包里那份默认 0.1）。说「`loadtest/k6/k6.js + KEEP_SAMPLE=1` 能复现」讲的是**复现方式** —— `KEEP_SAMPLE=1` 时 `analyze = KEEP_BODY && (rand < 1)` 恒真，与 `if (KEEP_BODY)` 逐分支等价，所以四个可观测特征全中。**不能**因此写成「客户跑的就是包里那份 k6.js」。
+
 三条结论：
 
 1. **对标那批数据（含客户 708ms）出自「第三份」：全量解析 + 600s + `receiving` 版 gw_oh —— 包里没有这个文件。** `deploy88/k6.js` 不是它（硬编码 10s，且因 `timings.total` 不存在而根本出不了 gw_oh）；包里 `loadtest/k6/k6.js` 也不是它（默认 0.1 ⇒ 1.10）。复现：`loadtest/k6/k6.js` 加 `KEEP_SAMPLE=1`，或直接用 [`scripts/loadtest/k6/k6.js`](../../scripts/loadtest/k6/k6.js)（`KEEP_SAMPLE` 默认就是 1）。
