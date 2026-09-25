@@ -453,7 +453,7 @@ listener.tap_io(|stream| { let _ = stream.set_nodelay(true); });
 | ---: | --- | --- | :---: |
 | 1 | `main.rs` | `bind_listener` + `LISTEN_BACKLOG = 65535`（原 libc `SOMAXCONN` **128**） | 建连 |
 | 2 | `main.rs` | 入站 `tap_io(set_nodelay(true))` | ✅ |
-| 3 | `main.rs`/`config.rs` | `XLITE_CATALOG_RELOAD_SECS`（**0 = 关掉后台 reload**） | 周期性 |
+| 3 | `main.rs`/`config.rs` | `XLITE_CATALOG_RELOAD_SECS`（**0 = 关掉后台 reload**） | 每次 reload 检查 |
 | 4 | `proxy.rs` | `ModelRef` —— 读 body 只扫 `model`，不建 `Value` DOM | ✅ |
 | 5 | `proxy.rs` | `outbound_body` —— 上游模型名相同时原字节透传 | ✅ |
 | 6 | `proxy.rs` | `drain_error_body` 加 64 KB 上限 | failover |

@@ -92,12 +92,9 @@ map_cfg_key() {
 }
 
 # 跑数身份：k6.js 与 k6 镜像必须可追溯，否则「工件可复跑」是空话。
-K6_JS=${K6_JS:-$K6_DIR/k6.js}
-[ -f "$K6_JS" ] || { echo "✗ 找不到 K6_JS=${K6_JS}（k6 脚本；它是以 -v ${K6_DIR}:/k6 挂进容器的）" >&2; exit 2; }
-[ "$K6_JS" = "$K6_DIR/k6.js" ] || {
-  echo "✗ K6_JS=${K6_JS} 与容器挂载点 ${K6_DIR}/k6.js 不是同一份 —— 哈希会对不上真正跑的那份脚本" >&2
-  exit 2
-}
+# 容器里跑的就是挂载点 `/k6/k6.js`，所以指纹只能取这一份（不做覆盖，免得多一个能对不上的旋钮）。
+K6_JS="$K6_DIR/k6.js"
+[ -f "$K6_JS" ] || { echo "✗ 找不到 ${K6_JS}（k6 脚本；它是以 -v ${K6_DIR}:/k6 挂进容器的）" >&2; exit 2; }
 K6_JS_MD5=$(md5_of "$K6_JS")
 K6_JS_SHA256=$(sha256_of "$K6_JS")
 # digest 优先，取不到就退回镜像 ID；两种情况都可能只吐一个空行，所以必须显式判空。
@@ -126,6 +123,11 @@ for cfg in $CONFIGS; do
       echo "✗ 配置 '$kv' 的值必须 > 0（0 会被网关当成非法值退回默认；只有 RELOAD=0 有意义 = 冻结快照）" >&2
       exit 2
     fi
+    # 上界也要查：超出网关 `str::parse` 能表示的范围时同样会**静默**退回默认（与非法字符一样致命）。
+    case "$key" in
+      TWT|CONNS) [ "$val" -le 65535 ] || { echo "✗ 配置 '$kv' 非法或超出上界 65535（网关解析失败会静默退回默认）" >&2; exit 2; } ;;
+      RELOAD)    [ "$val" -le 86400 ] || { echo "✗ 配置 '$kv' 超出上界 86400（= 1 天；再大等同于永不重载）" >&2; exit 2; } ;;
+    esac
   done
 done
 
@@ -198,6 +200,8 @@ log "身份: k6.js=$K6_JS md5=$K6_JS_MD5 sha256=$K6_JS_SHA256 | k6 镜像=$K6_IM
 ok_groups=0
 for arm_spec in $ARMS; do
   arm=${arm_spec%%:*}; port=${arm_spec##*:}
+  arm_hash=$($GW "sha256sum '$GATEWAY_DIR/xlite-$arm' 2>/dev/null | awk '{print \$1}'" || true)
+  log "臂 $arm 二进制 sha256=${arm_hash:-unknown}"
   for cfg in $CONFIGS; do
     if [ "$cfg" = "-" ]; then
       cfg_env=""; label="$arm-default"
@@ -217,8 +221,6 @@ for arm_spec in $ARMS; do
     pid=$(printf '%s' "$info" | sed -E 's/.*pid=([0-9]+).*/\1/')
     gw_backlog=$(printf '%s' "$info" | sed -nE 's/.*backlog=([0-9]+).*/\1/p')
     [ -n "$gw_backlog" ] || log "  ⚠️ $label 读不到监听 backlog（远端没有 ss？）—— accept 触顶无法判定"
-    arm_hash=$($GW "sha256sum '$GATEWAY_DIR/xlite-$arm' 2>/dev/null | awk '{print \$1}'" || true)
-    log "  臂 $arm 二进制 sha256=${arm_hash:-unknown}"
     $GW "setsid nohup bash /tmp/ab_gw.sh cpu '$pid' '$GATEWAY_DIR/cpu-$label.log' >/dev/null 2>&1 < /dev/null & sleep 1; echo up" >/dev/null
     run_k6 "$port" "$OUT/$label.log"
     $GW "bash /tmp/ab_gw.sh stop '$port'" >/dev/null 2>&1
