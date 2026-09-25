@@ -127,6 +127,8 @@ k6 的 `VUS=31000` 只是协程数。下面这组数是**客户 88 集群 New AP
 
 协议：对客户端 HTTP/1.1（k6 + HAProxy `mode http`），对 mock `h2c`。xlite 同样。
 
+**1 GbE 上组 B 的容量（本节口径，别处引用它）**：每流 payload ≈ **100.7 KB**（`502` 个 `data:` 行，实测），在 `ts` 跨度 ≈ **5.35s** 内送完 ⇒ 每流 ≈ **18.8 KB/s**；1 GbE 实用 ≈ **112 MB/s**（`0.9 × 1000 Mbps`）⇒ **≈5900 路活跃流**。实测锚点：**4000 路不切片**（过网关 5.86s vs 直连农场 5.81s），**8000 路已切片**（7.12s）。§7、`docs/dev/loadtest-newapi-controlled-2026-09.md` §9 与 `scripts/loadtest/link_budget.py` 都用这个数。
+
 ## 3. 如何做到：不 cap、不 RST、不 429、超时 600s
 
 这些是**配置和「不要加代码」**，不是新功能。0.3.0 已经按这个形态发了。
@@ -233,7 +235,7 @@ k6 环境与 `run_full_88.sh` 对齐即可，核心是：
 - **后进先出**：p50 好看，栈底饿到 600s，fail 约 5%，过不了客户 0.5% 线。
 - **`XLITE_MAX_IN_FLIGHT`**：排队进 TTFT。实验室 31000 VU cap=8000 时 TTFT p50 从 1.4s 到 26s。
 
-热路径不读 Redis。满负荷时 Redis `connected_clients` 应仍约 2。客户 1GbE 预算上组 B 约 5900 路才不切片；对标 rig 的四五千在途正好落在这个区间，所以 duration 能贴近 5.5–7s。
+热路径不读 Redis。满负荷时 Redis `connected_clients` 应仍约 2。客户 1GbE 预算上组 B 约 **5900 路**才不切片（算法与实测锚点见 §2）；对标 rig 的四五千在途正好落在这个区间，所以 duration 能贴近 5.5–7s。
 
 ## 8. 受控对照：把 New API 也搬到实验台（2026-09-25）
 
@@ -250,4 +252,4 @@ mock 自己的 `ttft = 500ms`：xlite 加 **2ms**，New API 加 **4ms**。
 
 **⇒ 因此「xlite 在纯延迟上领先 New API」这个说法不成立**：低载下两者无差别。不要拿延迟优势去对标。
 
-高载段的结论经过一次更正：按客户配置（`SQL_MAX_OPEN_CONNS=2000` / PG `max_connections=2000`）时 4000 VU fail **12.4%**；把两边都放开（8000 / 10000）后 4000 VU 降到 **0.57%** —— 所以那一档的失败**主要是 DB 连接数配置**，不是 New API 的固有行为。放开后瓶颈上移到 **Postgres CPU**（10000 VU 时吃满 74 核，错误变成 `failed to connect to postgres`），根因是 **New API 每个请求的结算都要和 Postgres 往返一次**。本轮 New API 仍是 **1 副本 + 无 HAProxy + PG 与网关同机**，客户现场是 **2 副本 + HAProxy + 独占 PG**，**不可外推**。完整数据、部署配方、边界与复现命令见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md)。
+高载段的结论经过一次更正，又经过一次**降级**：按客户配置（`SQL_MAX_OPEN_CONNS=2000` / PG `max_connections=2000`）时 4000 VU fail **12.4%**；把两边都放开（8000 / 10000）后出现过 **0.57%**，但**同一配置复跑又出现过 12.4% / 12.98%**（波动 20×）—— 所以那一档**不能用来归因**：既不能说"就是 DB 连接数配置"，也不能说"就是 New API 的行为"。要下结论先补 run ledger（每轮记 PG `max_connections` / `SQL_MAX_OPEN_CONNS` / fail%），见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §3.1 / §10.4。可说的只有架构那条：放开连接数后瓶颈上移到 **Postgres CPU**（10000 VU 时吃满 74 核，错误为 `failed to connect to postgres`），根因是 **New API 每个请求的结算都要和 Postgres 往返一次**。本轮 New API 仍是 **1 副本 + 无 HAProxy + PG 与网关同机**，客户现场是 **2 副本 + HAProxy + 独占 PG**，**不可外推**。完整数据、部署配方、边界与复现命令见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md)。
