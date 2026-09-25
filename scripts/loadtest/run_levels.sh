@@ -177,6 +177,11 @@ log "runner=$K6_RUNNER image=$K6_IMAGE target=$TARGET levels=[$LEVELS] stable=$S
 
 # ---------------------------------------------------------------- mock _config（可选）
 if [ -n "$MOCKS" ]; then
+  # `batch` 也要**校验格式 + 回读**：`_config` 是静默的，写错不会被拒，只会在日志里
+  # 留下一句"我以为我设了"的假声明（同类坑见 docs/dev/loadtest-newapi-controlled-2026-09.md §13.6）。
+  case "${MOCK_BATCH}" in
+    ''|*[!0-9]*) printf '✗ MOCK_BATCH 必须是十进制整数（拿到 %s）\n' "'$MOCK_BATCH'" >&2; exit 2 ;;
+  esac
   case "$MOCKS" in
     [0-9]*-[0-9]*) hosts=$(seq "${MOCKS%-*}" "${MOCKS#*-}" | sed 's|^|127.0.0.1:|') ;;
     *) hosts=$(printf '%s' "$MOCKS" | tr ',' ' ') ;;
@@ -184,7 +189,17 @@ if [ -n "$MOCKS" ]; then
   for host in $hosts; do
     curl -s -m 3 -X POST "http://$host/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true
   done
-  log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS batch=$MOCK_BATCH"
+  n_ok=0; n_all=0
+  for host in $hosts; do
+    n_all=$((n_all + 1))
+    case "$(curl -s -m 3 -X POST "http://$host/_config" 2>/dev/null)" in
+      *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
+    esac
+  done
+  log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS batch=${MOCK_BATCH}（回读生效 $n_ok/$n_all 口）"
+  # `n_all` 为 0 说明 MOCKS 展开了但一个口都没有 ⇒ 不能让守卫空转通过
+  { [ "$n_all" -gt 0 ] && [ "$n_ok" -eq "$n_all" ]; } \
+    || { printf '✗ mock 配置未在所有口生效（%s/%s）—— 静默失效会产出假结论\n' "$n_ok" "$n_all" >&2; exit 2; }
 fi
 
 # ---------------------------------------------------------------- 网关套接字（同机时才拿得到）

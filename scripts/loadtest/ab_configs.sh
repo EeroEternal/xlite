@@ -104,27 +104,83 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 . "$SCRIPT_DIR/lib_rig.sh"
 lab_lock "ab_configs arms=$ARMS" || exit 1
 
-# 农场配置要在**拿到锁之后**改（它是台架级共享状态），并且下发后**回读校验**：
-# `_config` 是静默的，参数名写错不报错，只会把「我以为我设了 batch」变成假结论。
-if [ -n "$MOCK_BATCH" ]; then
-  case "$MOCK_BATCH" in
-    ''|*[!0-9]*) echo "✗ MOCK_BATCH 必须是十进制整数（拿到 '$MOCK_BATCH'）" >&2; exit 2 ;;
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"; }
+
+# ---------------------------------------------------------------- 收尾（在**任何子进程之前**注册）
+# ⚠️ 本脚本原来**没有**任何 trap：网关只在正常路径上被 `ab_gw.sh stop` 关掉，所以 Ctrl-C /
+# kill / 中途 `exit` 都会留下**孤儿网关 + k6 容器**，而且**台架锁也释放不掉** ——
+# `docker run` 客户端与 `$GW` 起的 ssh 子进程都**继承了 fd 9**（实测：kill 掉本脚本后
+# `flock -n` 仍然 BLOCKED，得手工找出持锁 PID 才解开）。这与 `ab_topology.sh`
+# §13.6 第 0b 条是同一类问题，当时没修这个脚本。
+#
+# 两条纪律，**第 2 条才是关键**：
+#   1) `trap cleanup EXIT` 必须在启动任何子进程之前注册（否则中途 die 时从不执行）；
+#   2) **前台跑的子进程会把 trap 推迟到它结束之后** —— bash 只在当前前台命令结束后才
+#      处理已到达的信号。所以 `run_k6` 必须**后台跑 + `wait`**（`wait` 可被信号立即打断）。
+#      实测：前台 `docker run` 期间发 TERM，30s 后脚本仍活着、网关仍在、锁仍被占；
+#      改成后台 + `wait` 后 10s 内全部释放。
+#   ⚠️ 顺带纠正一个我先前写错的断言：**只挂 `EXIT` 就已经覆盖 SIGINT/SIGTERM** ——
+#      实测 `trap cleanup EXIT`（不挂 INT/TERM）在 `wait` 期间收 TERM/INT，cleanup 都会跑
+#      （rc 143/129，0.01s），与额外挂 `trap 'exit 130' INT` 的延迟相同。所以**不需要**
+#      那两个 trap；真正的修复是上面第 2 条。
+#   3) 变过农场配置就要**还原**（见下面 `FARM_BATCH_BEFORE`）：24 个 mock 是**共享**的，
+#      把 `batch=10` 留在那里会让下一个"不动农场"的 session 静默量到相反的口径。
+CUR_PORT=""
+K6_PID=""
+FARM_BATCH_BEFORE=""
+cleanup() {
+  trap - EXIT
+  [ -n "$K6_PID" ] && kill "$K6_PID" 2>/dev/null
+  docker rm -f ab_configs_k6 >/dev/null 2>&1
+  [ -n "$CUR_PORT" ] && $GW "bash /tmp/ab_gw.sh stop '$CUR_PORT'" >/dev/null 2>&1
+  # 还原农场：只在**确实改过**时才回写
+  if [ -n "$FARM_BATCH_BEFORE" ]; then
+    for p in $(expand_ports "$MOCK_PORTS"); do
+      curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$FARM_BATCH_BEFORE" >/dev/null 2>&1
+    done
+    printf '  mock _config: 已还原 batch=%s\n' "$FARM_BATCH_BEFORE"
+  fi
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------- 农场配置（拿锁之后）
+# `_config` 是**静默**的：参数名写错不报错，只会把「我以为我设了 batch」变成假结论。
+# 所以：**先回读**当前值（无论改不改，都写进日志 —— 否则工件里看不出这一轮跑的是什么口径），
+# 校验格式，下发，再回读校验，并在收尾时还原。
+MOCK_PORTS_LIST=$(expand_ports "$MOCK_PORTS")
+[ -n "$MOCK_PORTS_LIST" ] || { printf '✗ MOCK_PORTS=%s 展开后为空（支持 "4101-4124" 或 "4101,4102"）\n' "$MOCK_PORTS" >&2; exit 2; }
+
+n_ports=0; n_before=0; batch_before=""
+for p in $MOCK_PORTS_LIST; do
+  n_ports=$((n_ports + 1))
+  b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
+  [ -n "$b" ] && { n_before=$((n_before + 1)); [ -z "$batch_before" ] && batch_before="$b"; }
+done
+log "农场现状: batch=${batch_before}（$n_before/$n_ports 口读到）$([ "$n_before" -eq "$n_ports" ] || echo '  ⚠️ 有口没读到，下面若有写入只按读到的判断')"
+# 没让我们改，但农场不在客户基线 1 上 ⇒ **必须说出来**，否则下一轮会静默量到别的口径
+if [ -z "$MOCK_BATCH" ] && [ "$n_before" -eq "$n_ports" ] && [ "$batch_before" != "1" ]; then
+  log "  ⚠️ 农场 batch=${batch_before}（**不是客户基线 1**）—— 这一轮是台架口径，不能与对标数据混比（见 §14）"
+fi
+
+if [ -n "${MOCK_BATCH}" ]; then
+  case "${MOCK_BATCH}" in
+    ''|*[!0-9]*) printf '✗ MOCK_BATCH 必须是十进制整数（拿到 %s）\n' "'$MOCK_BATCH'" >&2; exit 2 ;;
   esac
-  for p in $(seq "${MOCK_PORTS%-*}" "${MOCK_PORTS#*-}"); do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1 || true
+  for p in $MOCK_PORTS_LIST; do
+    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1
   done
-  n_ok=0; n_all=0
-  for p in $(seq "${MOCK_PORTS%-*}" "${MOCK_PORTS#*-}"); do
-    n_all=$((n_all + 1))
+  n_ok=0
+  for p in $MOCK_PORTS_LIST; do
     case "$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null)" in
       *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
     esac
   done
-  echo "  mock _config: batch=$MOCK_BATCH（回读生效 $n_ok/$n_all 口）"
-  [ "$n_ok" -eq "$n_all" ] || { echo "✗ batch=$MOCK_BATCH 未在所有 mock 上生效（$n_ok/$n_all）—— 静默失效会产出假结论" >&2; exit 2; }
+  log "  mock _config: batch=${MOCK_BATCH}（回读生效 $n_ok/$n_ports 口）"
+  # ⚠️ 守卫不能写成 `[ "$n_ok" -eq "$n_ports" ]` 就完事：端口展开为空时那是 **0 == 0 空转通过**。
+  # `n_ports` 上面已判过非空，这里再显式要求「全部生效」。
+  [ "$n_ok" -eq "$n_ports" ] || { log "  ✗ batch=$MOCK_BATCH 未在所有 mock 上生效（$n_ok/${n_ports}）—— 静默失效会产出假结论"; exit 2; }
+  [ "$n_before" -eq "$n_ports" ] && FARM_BATCH_BEFORE="$batch_before"
 fi
-
-log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"; }
 
 md5_of() {
   if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | awk '{print $1}';
@@ -300,48 +356,26 @@ run_k6() {      # $1=port $2=outfile
   # 信号，所以前台 `docker run` 期间收到 TERM，trap 会一直拖到 k6 跑完（实测 300s 档被 TERM
   # 后 30s：脚本仍活着、网关仍在、**台架锁仍被占**）。而 `wait` 可被信号立即打断 —— trap
   # 随即执行，cleanup 就能**当场**删容器、关网关、把锁放掉。
-  K6_PID=""
-docker run --rm --name ab_configs_k6 -m "$K6_MEM" --network=host -v "$K6_DIR:/k6" \
-  -e TARGET_URL="http://$TARGET_HOST:$1/v1/chat/completions" \
-  -e TOKEN="$TOKEN" -e MODEL="$MODEL" -e STREAM=true \
-  -e IN_TOKENS=100 -e OUT_TOKENS=500 -e VUS="$VUS" -e DURATION="$DURATION" -e MAX_VUS="$VUS" \
-  -e STREAM_TIMEOUT=600000 -e WARMUP="$WARMUP" -e "KEEP_BODY=$KEEP_BODY" \
-  -e "KEEP_SAMPLE=$KEEP_SAMPLE" \
-  -e GRACEFUL_STOP="$GRACEFUL_STOP" \
-  "$K6_IMAGE" run --compatibility-mode=base \
-  --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js > "$2" 2>&1 &
-K6_PID=$!
-wait "$K6_PID" || true
-K6_PID=""
-}
-
-# ---------------------------------------------------------------- 收尾（必须注册在任何子进程之前）
-# ⚠️ 本脚本原来**没有**任何 trap：网关只在正常路径上被 `ab_gw.sh stop` 关掉，所以 Ctrl-C /
-# kill / 中途 `exit` 都会留下**孤儿网关**（占着端口）—— 更要命的是它同时留下台架锁：
-# `docker run` 客户端与 `$GW` 起的 ssh 子进程都**继承了 fd 9**，它们活着锁就释放不掉
-# （实测：kill 掉本脚本后 `flock -n` 仍然 BLOCKED，得手工找出持锁 PID 才解开）。
-# 这与 `ab_topology.sh` §13.6 第 0b 条是同一类问题，只是当时没修这个脚本。
-# 两条纪律：
-#   1) `trap cleanup EXIT` 必须在**启动任何子进程之前**注册（否则中途 die 时从不执行）；
-#   2) 光 `EXIT` 不够 —— bash 对**未捕获**的 SIGINT/SIGTERM 直接终止、**不跑 EXIT trap**，
-#      所以还要显式把 INT/TERM 转成 `exit`，让 EXIT trap 跑起来。
-CUR_PORT=""
-K6_PID=""
-cleanup() {
-  local rc=$?
-  trap - EXIT INT TERM
-  [ -n "$CUR_PORT" ] && $GW "bash /tmp/ab_gw.sh stop '$CUR_PORT'" >/dev/null 2>&1
-  [ -n "$K6_PID" ] && kill "$K6_PID" 2>/dev/null
+  # `9>&-`：**后台子进程绝不能继承锁 fd**（lib_rig.sh 的约定），否则它替脚本继续持锁。
+  # 先删同名残留：上一轮被 `kill -9` 时留下的容器会让 `docker run` 直接拒绝（名字冲突）。
   docker rm -f ab_configs_k6 >/dev/null 2>&1
-  return "$rc"
+  docker run --rm --name ab_configs_k6 -m "$K6_MEM" --network=host -v "$K6_DIR:/k6" \
+    -e TARGET_URL="http://$TARGET_HOST:$1/v1/chat/completions" \
+    -e TOKEN="$TOKEN" -e MODEL="$MODEL" -e STREAM=true \
+    -e IN_TOKENS=100 -e OUT_TOKENS=500 -e VUS="$VUS" -e DURATION="$DURATION" -e MAX_VUS="$VUS" \
+    -e STREAM_TIMEOUT=600000 -e WARMUP="$WARMUP" -e "KEEP_BODY=$KEEP_BODY" \
+    -e "KEEP_SAMPLE=$KEEP_SAMPLE" \
+    -e GRACEFUL_STOP="$GRACEFUL_STOP" \
+    "$K6_IMAGE" run --compatibility-mode=base \
+    --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js > "$2" 2>&1 9>&- &
+  K6_PID=$!
+  wait "$K6_PID"
+  K6_PID=""
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
 # ---------------------------------------------------------------- 主循环
 log "ab_configs: arms=[$ARMS] configs=[$CONFIGS] vus=$VUS dur=$DURATION stop=$GRACEFUL_STOP"
-log "喂法: KEEP_BODY=$KEEP_BODY KEEP_SAMPLE=$KEEP_SAMPLE（KB=true 才有 gateway_overhead_ms；KB=false 用于产能/CPU）"
+log "喂法: KEEP_BODY=$KEEP_BODY KEEP_SAMPLE=${KEEP_SAMPLE}（KB=true 才有 gateway_overhead_ms；KB=false 用于产能/CPU）"
 log "身份: k6.js=$K6_JS md5=$K6_JS_MD5 sha256=$K6_JS_SHA256 | k6 镜像=$K6_IMAGE id=$K6_IMAGE_ID"
 # 打印那份 k6.js **自己的** KEEP_SAMPLE 默认值：实验室目录里可能是客户 memopt 版（0.1），
 # 与仓库版（1）不同 —— 不显式传就会被它悄悄决定喂法。
@@ -367,7 +401,10 @@ for arm_spec in $ARMS; do
     # 记下**正在跑的口**：cleanup 只关这一个，不去碰别人 session 的网关
     CUR_PORT="$port"
     info=$(start_arm "$arm" "$port" $cfg_env)
-    if [ "$info" = "START_FAILED" ]; then log "  $label 网关启动失败，跳过"; CUR_PORT=""; continue; fi
+    # ⚠️ START_FAILED **不能**清 CUR_PORT：`ab_gw.sh start` 会**先起进程**再判 nofile
+    # （§13.6 0a 那条硬断言），所以这条路径上可能已经留下一个占着端口的网关 ——
+    # 清了 CUR_PORT 就等于放弃清理它。让它留着，交给 cleanup 去 stop。
+    if [ "$info" = "START_FAILED" ]; then log "  $label 网关启动失败，跳过（交给 cleanup 收口）"; continue; fi
     log "  gw: $info"
     pid=$(printf '%s' "$info" | sed -E 's/.*pid=([0-9]+).*/\1/')
     gw_backlog=$(printf '%s' "$info" | sed -nE 's/.*backlog=([0-9]+).*/\1/p')
@@ -429,7 +466,7 @@ for arm_spec in $ARMS; do
        }; then
       ok_groups=$((ok_groups + 1))
     else
-      log "  ✗ $label 未取到有效指标（cores=$cores）—— 不计入成功"
+      log "  ✗ $label 未取到有效指标（cores=${cores}）—— 不计入成功"
     fi
   done
 done

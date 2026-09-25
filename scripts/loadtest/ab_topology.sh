@@ -125,6 +125,8 @@ lab_lock "ab_topology" || exit 1
 #   子进程一律用 `9>&-` 显式关掉锁 fd（不然网关活着就等于替我们攥着锁）。
 SAMPLER_PID=""
 GW_STARTED=0
+# 改了农场 batch 就在这里记下原值，收尾还原（24 个 mock 是**共享**的）
+MOCK_BATCH_RESTORE=""
 stop_gw() {
   # 只在**本次真的起过**网关时才杀。否则前置自检 die（例如 CATALOG 写错）会顺手
   # 杀掉 lab 上别人正监听 $PORT 的网关。
@@ -133,20 +135,25 @@ stop_gw() {
   p=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
   [ -n "$p" ] && kill "$p" 2>/dev/null
 }
+restore_mock_batch() {
+  [ -n "$MOCK_BATCH_RESTORE" ] || return 0
+  local p
+  for p in $(expand_ports "$MOCK_PORTS"); do
+    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH_RESTORE" >/dev/null 2>&1
+  done
+  printf '[%s] mock _config: 已还原 batch=%s\n' "$(date +%H:%M:%S)" "$MOCK_BATCH_RESTORE"
+}
 cleanup() {
   [ -n "${SAMPLER_PID:-}" ] && kill "$SAMPLER_PID" 2>/dev/null
   docker rm -f abtop-k6 >/dev/null 2>&1
   stop_gw
+  restore_mock_batch
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 前置自检
-expand_ports() {
-  case "$1" in
-    [0-9]*-[0-9]*) seq "${1%-*}" "${1#*-}" ;;
-    *) printf '%s' "$1" | tr ',' ' ' ;;
-  esac
-}
+# `expand_ports` 由 lib_rig.sh 提供（三个 harness 共用；只认区间的版本会在逗号列表下
+# **空转通过**守卫，见那里的注释）。
 
 # 目录文件必须存在且指向 127.0.0.1（同机 loopback）。仓库内跑默认取 examples/ 那份；
 # 仓库外跑（脚本被拷到别处）必须显式传 CATALOG —— 报错里列出**试过哪些路径**，
@@ -169,7 +176,7 @@ log "ab_topology: arm=$ARM kb=$KEEP_BODY sample=$KEEP_SAMPLE levels=[$LEVELS] tw
 log "  catalog=$CATALOG  k6=$K6_IMAGE ref=${K6_REF:-n/a}  k6.js sha256=$(sha256sum "$K6_DIR/k6.js" | cut -c1-16)…"
 # 与另外两个 harness 一致：打印**那份 k6.js 自己的** KEEP_SAMPLE 默认值（仓库版 1 / 客户 memopt
 # 副本 0.1）。我们总是显式传 `KEEP_SAMPLE`，所以它不影响本脚本的喂法 —— 打出来只为一眼可见。
-log "  k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_DIR/k6.js" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=$KEEP_SAMPLE）"
+log "  k6.js 自带默认: $(grep -m1 -o 'var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || .[0-9.]*.)' "$K6_DIR/k6.js" 2>/dev/null || echo '(未找到 var KEEP_SAMPLE)')（本脚本显式传 KEEP_SAMPLE=${KEEP_SAMPLE}）"
 
 # ---------------------------------------------------------------- 网关（本机）
 GW_DB="$GATEWAY_DIR/$ARM-topo.db"
@@ -200,18 +207,38 @@ esac
 # ---------------------------------------------------------------- mock 农场 PID
 mapfile -t MPIDS < <(for p in $(expand_ports "$MOCK_PORTS"); do
   docker inspect -f '{{.State.Pid}}' "${MOCK_CONTAINER_PREFIX}$p" 2>/dev/null; done)
-[ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（前缀 $MOCK_CONTAINER_PREFIX）"
+[ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（前缀 ${MOCK_CONTAINER_PREFIX}）"
 log "  mock: ${#MPIDS[@]} 个容器"
+
+# 农场口径：**无论改不改都先回读并写进日志**。24 个 mock 是**共享**的 —— 上一轮把 `batch=10`
+# 留在那里，这一轮"不动农场"就会静默量到相反的口径（§14：batch 决定台架自身 CPU 的约 70%）。
+# 拿不到读数时明说"unknown"，不要假装是 1。
+MOCK_CLAIM_BEFORE=""
+n_ports=0; n_before=0
+for p in $(expand_ports "$MOCK_PORTS"); do
+  n_ports=$((n_ports + 1))
+  b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
+  [ -n "$b" ] && { n_before=$((n_before + 1)); [ -z "$MOCK_CLAIM_BEFORE" ] && MOCK_CLAIM_BEFORE="$b"; }
+done
+if [ "$n_before" -eq 0 ]; then
+  log "  农场口径: batch=unknown（$n_ports 个口都没读到）"
+elif [ "$n_before" -eq "$n_ports" ]; then
+  log "  农场口径: batch=${MOCK_CLAIM_BEFORE}（$n_before/$n_ports 口）"
+  [ "$MOCK_CLAIM_BEFORE" = "1" ] || log "  ⚠️ 这不是客户基线 1 —— 本轮是**台架口径**，不能与对标数据混比（§14）"
+else
+  log "  农场口径: batch=${MOCK_CLAIM_BEFORE}（只读到 $n_before/$n_ports 口 ⇒ ⚠️ 各口可能不一致，本轮不可比）"
+fi
 
 # 只在显式给了 `MOCK_BATCH` 时才动农场配置（留空 = 一个字节都不改）。下发后**必须校验回读**：
 # `_config` 是静默的，写错参数名不会报错，只会让"我以为我设了 batch"变成假结论
-# （同类坑见 §13.6 与 `map_cfg_key`）。
-if [ -n "$MOCK_BATCH" ]; then
-  case "$MOCK_BATCH" in
-    ''|*[!0-9]*) die "MOCK_BATCH 必须是十进制整数（拿到 '$MOCK_BATCH'）" ;;
+# （同类坑见 §13.6 与 `map_cfg_key`）。收尾时**还原**（见 cleanup）。
+if [ -n "${MOCK_BATCH}" ]; then
+  case "${MOCK_BATCH}" in
+    ''|*[!0-9]*) die "MOCK_BATCH 必须是十进制整数（拿到 '${MOCK_BATCH}'）" ;;
   esac
+  [ "$n_ports" -gt 0 ] || die "MOCK_PORTS='$MOCK_PORTS' 展开后为空"
   for p in $(expand_ports "$MOCK_PORTS"); do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1 || true
+    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1
   done
   n_ok=0
   for p in $(expand_ports "$MOCK_PORTS"); do
@@ -219,8 +246,9 @@ if [ -n "$MOCK_BATCH" ]; then
       *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
     esac
   done
-  log "  mock _config: batch=$MOCK_BATCH（回读生效 $n_ok/${#MPIDS[@]} 口）"
-  [ "$n_ok" -eq "${#MPIDS[@]}" ] || die "batch=$MOCK_BATCH 没有在所有 mock 上生效（$n_ok/${#MPIDS[@]}）—— 静默失效会产出假结论"
+  log "  mock _config: batch=${MOCK_BATCH}（回读生效 $n_ok/$n_ports 口）"
+  [ "$n_ok" -eq "$n_ports" ] || die "batch=${MOCK_BATCH} 没有在所有 mock 上生效（$n_ok/${n_ports}）—— 静默失效会产出假结论"
+  [ "$n_before" -eq "$n_ports" ] && MOCK_BATCH_RESTORE="$MOCK_CLAIM_BEFORE"
 fi
 
 # ---------------------------------------------------------------- CPU 采样器
@@ -259,7 +287,7 @@ cores_between() {  # $1=log $2=列号 $3=t0 $4=t1
 FAILED_LEVELS=0
 for L in $LEVELS; do
   t0=$(date +%s)
-  log "level $L 开始（同机 loopback，目标 127.0.0.1:$PORT）"
+  log "level $L 开始（同机 loopback，目标 127.0.0.1:${PORT}）"
   docker rm -f abtop-k6 >/dev/null 2>&1
   docker run -d --name abtop-k6 --network=host -m "$K6_MEM" -v "$K6_DIR:/k6" \
     -e "TARGET_URL=http://127.0.0.1:$PORT/v1/chat/completions" \
