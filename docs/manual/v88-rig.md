@@ -73,19 +73,19 @@ k6 每个 VU 一圈：`http.post` → `check` → `sleep(0)`。`ttft_ms` 是 `re
 | | 值 | 与客户原件的差异 |
 | --- | --- | --- |
 | `KEEP_BODY=true`（driver 写死） | 每次迭代全量解析 → checks 比 **2.00** | 同对标那版 |
-| `KEEP_SAMPLE` | 默认 **1**（全量） | 客户 memopt 版默认 0.1；显式传 `KEEP_SAMPLE=0.1` 即复刻 memopt（1.10），只在内存吃紧时用 |
+| `KEEP_SAMPLE` | 默认 **1**（全量） | 客户 memopt 版默认 0.1；显式传 `KEEP_SAMPLE=0.1` 即复刻 memopt（1.10），只在内存吃紧时用。**任何 harness 都必须显式传** —— 「不传」等于让「跑的是哪份文件」决定喂法（仓库版 1 / 客户挂载的 memopt 副本 0.1），见 §4.1 |
 | `KEEP_BODY=false` | 1.00，且不注册 chunk/gw_oh 指标 | 同客户原件（满负荷「3 万连接」那一臂） |
 | `GRACEFUL_STOP` | 默认 **600s** | 同对标那版 |
 | 额外诊断 | `ERR_SAMPLE`（429 原因计数）+ `x-xlite-*` 头采集 | 客户原件没有；不参与 `ttft / dur / fail / qps` 计算 |
 
-复现对标喂法（**不要传 `KEEP_SAMPLE`**）：
+复现对标喂法（**显式传 `KEEP_SAMPLE=1`**）：
 
 ```bash
 k6 run --compatibility-mode=base \
-  -e KEEP_BODY=true -e STREAM=true -e WARMUP=30 -e STREAM_TIMEOUT=600000 \
+  -e KEEP_BODY=true -e KEEP_SAMPLE=1 -e STREAM=true -e WARMUP=30 -e STREAM_TIMEOUT=600000 \
   -e TARGET_URL=… -e TOKEN=… -e MODEL=mock-model -e VUS=1000 … \
   scripts/loadtest/k6/k6.js
-# 不传 PICK_INTERVAL、不传 XLITE_MAX_IN_FLIGHT、不传 KEEP_SAMPLE
+# 不传 PICK_INTERVAL、不传 XLITE_MAX_IN_FLIGHT；KEEP_SAMPLE **要传**
 ```
 
 ### 1.3 报告契约：三道机械闸门
@@ -222,6 +222,30 @@ k6 TTFT 是 `timings.waiting`（第一个字节）。空头会把排队从 waiti
 臂 C 的 iteration − http ≈ 30s，等于人为睡眠，用来**解释** V88 的圈间空档；对标交付仍用原脚本的 `KEEP_BODY=true` + `sleep(0)`，不要改成 30s sleep。臂 B 说明限流只把难看从 dur 搬到 TTFT，不要恢复 `XLITE_MAX_IN_FLIGHT`。
 
 「3 万连接」要问清是 **TCP ESTAB**（含 keep-alive 空闲）还是 **同时在转的 SSE**。`KEEP_BODY` 自锁 / think-time 下 ESTAB 可以仍高、活跃流只有几千。带宽账（`30k × token 率`）用的是活跃流。对标表填 TTFT/dur/fail；ESTAB 与**活跃流**（闭式 `VUS × dur/iter`；拿不到 `iteration_duration` 时才写 `qps × dur` 并标为下界，见 §2）两列都写。
+
+### 4.1 喂法必须**显式传**：`KEEP_SAMPLE` 的静默陷阱
+
+`KEEP_SAMPLE` 只决定脚本解析 body 的比例（`checks/http_reqs`：2.00 / 1.10 / 1.00），
+但**同一份脚本的默认值不同**：仓库版 `scripts/loadtest/k6/k6.js` 默认 **1**，
+客户机上挂的那份 v3.2-memopt 副本默认 **0.1**。所以「不传」= 让**跑的是哪份文件**替你决定喂法。
+
+代价（实测，4000 VU 平推 120s，同一网关、同一臂）：
+
+| 实际喂法 | checks 比 | qps | 现象 |
+| --- | ---: | ---: | --- |
+| `KEEP_BODY=true KEEP_SAMPLE=1` | 2.00 | **315.0 / 320.2** | k6 全量解析先饱和 ⇒ 量到的是 **k6 的墙** |
+| `KEEP_BODY=true KEEP_SAMPLE=0.1` | 1.10 | **603.8 / 604.4** | 同一网关，吞吐翻倍 |
+| `KEEP_BODY=false` | 1.00 | **600.3** | 产能/CPU 模式，无 `gw_oh` |
+
+[`scripts/loadtest/ab_configs.sh`](../../scripts/loadtest/ab_configs.sh) 出过这个坑：日志头写着
+`KEEP_BODY=true`（当时还没转发 `KEEP_SAMPLE`），实际跑的是那份副本的 0.1 ⇒ 拿到 **601 qps**
+且**所有常规指标都正常**。定则两条：
+
+1. **harness 永远显式传 `KEEP_BODY` 与 `KEEP_SAMPLE`**，并打印生效值**和**那份文件的默认值
+   （两边不一致要能一眼看出）。
+2. **全量解析的约 315 qps 上限与 VU 数无关**（是客户端 CPU 上限）⇒ **1000 VU（~155 qps）安全**，
+   4000 VU（要 ~600 qps）必然撞墙。判定用 `实测 qps ÷ (VUS ÷ dur_p50)`（分母必须是**服务时间**
+   `http_req_duration`；用 `iteration_duration` 会恒等于 ~100%，检测器永不触发）。
 
 ## 5. 压测时库与控制面（可调）
 

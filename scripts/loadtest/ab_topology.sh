@@ -75,6 +75,10 @@ DURATION=${DURATION:-120s}
 WARMUP=${WARMUP:-20}
 GRACEFUL_STOP=${GRACEFUL_STOP:-20s}
 KEEP_BODY=${KEEP_BODY:-false}
+# 只在 KEEP_BODY=true（对标模式）时有意义：决定脚本解析 body 的比例（checks 比 2.00 / 1.10）。
+# **显式传**，不靠 k6.js 的文件默认 —— 仓库版默认 1，客户机上的 memopt 副本默认 0.1，
+# 「不传」等于让「跑的是哪份文件」决定喂法（见 docs/dev/loadtest-newapi-controlled-2026-09.md §13.6 第 1b 条）。
+KEEP_SAMPLE=${KEEP_SAMPLE:-1}
 TWT=${TWT:-8}
 CONNS=${CONNS:-32}
 RELOAD=${RELOAD:-0}
@@ -146,7 +150,7 @@ grep -q '127\.0\.0\.1' "$CATALOG" || die "$CATALOG 不是指向 127.0.0.1 的版
 
 K6_REF=$(docker image inspect -f '{{index .RepoDigests 0}}' "$K6_IMAGE" 2>/dev/null)
 [ -n "$K6_REF" ] || K6_REF=$(docker image inspect -f '{{.Id}}' "$K6_IMAGE" 2>/dev/null)
-log "ab_topology: arm=$ARM kb=$KEEP_BODY levels=[$LEVELS] twt=$TWT conns=$CONNS reload=$RELOAD"
+log "ab_topology: arm=$ARM kb=$KEEP_BODY sample=$KEEP_SAMPLE levels=[$LEVELS] twt=$TWT conns=$CONNS reload=$RELOAD"
 log "  catalog=$CATALOG  k6=$K6_IMAGE ref=${K6_REF:-n/a}  k6.js sha256=$(sha256sum "$K6_DIR/k6.js" | cut -c1-16)…"
 
 # ---------------------------------------------------------------- 网关（本机）
@@ -224,6 +228,7 @@ for L in $LEVELS; do
     -e "TOKEN=$TOKEN" -e "MODEL=$MODEL" -e STREAM=true \
     -e IN_TOKENS=100 -e OUT_TOKENS=500 -e "VUS=$L" -e "DURATION=$DURATION" -e "MAX_VUS=$L" \
     -e STREAM_TIMEOUT=600000 -e "WARMUP=$WARMUP" -e "KEEP_BODY=$KEEP_BODY" \
+    -e "KEEP_SAMPLE=$KEEP_SAMPLE" \
     -e "GRACEFUL_STOP=$GRACEFUL_STOP" \
     "$K6_IMAGE" run --compatibility-mode=base \
     --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js >/dev/null 2>&1
