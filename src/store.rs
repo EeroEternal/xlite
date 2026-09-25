@@ -5,7 +5,9 @@
 use anyhow::Result;
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use crate::catalog::{Catalog, RoutingChannel, RoutingSnapshot};
 use crate::hash::hash_api_key;
@@ -54,14 +56,30 @@ pub struct Snapshot {
 
 #[derive(Clone)]
 pub struct Store {
-    inner: Arc<RwLock<Snapshot>>,
+    /// Routing snapshot, swapped wholesale by the reload loop.
+    ///
+    /// `ArcSwap` rather than `RwLock`, for a **structural** reason: with an
+    /// `RwLock`, a `reload()` writer holds the lock while it swaps the snapshot
+    /// (and, before this change, while it dropped the old one), so concurrent
+    /// readers wait on it; with `ArcSwap` readers keep serving the old `Arc` and
+    /// never wait. `load()` is a lock-free acquire.
+    ///
+    /// Not `mem::replace` under the same `RwLock`: that would move the old
+    /// snapshot's drop outside the critical section, but the writer would still
+    /// hold the lock while swapping, so readers would still wait at that moment.
+    ///
+    /// The CPU rationale ("the lock's cache line bounces between workers") is a
+    /// **falsified hypothesis, not a claim**: measured at +0.15% (inside noise).
+    /// Method, negative result and its limits: see
+    /// `docs/dev/loadtest-newapi-controlled-2026-09.md` §12.6.
+    inner: Arc<ArcSwap<Snapshot>>,
     catalog: Catalog,
 }
 
 impl Store {
     pub fn new(catalog: Catalog) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Snapshot::default())),
+            inner: Arc::new(ArcSwap::from_pointee(Snapshot::default())),
             catalog,
         }
     }
@@ -73,28 +91,26 @@ impl Store {
     pub async fn reload(&self) -> Result<()> {
         let routing = self.catalog.load_routing().await?;
         let next = snapshot_from_routing(routing);
-        // Skip the write-lock swap when nothing changed: the reload loop fires
-        // every few seconds and a writer on this read-hot lock stalls request
-        // tasks momentarily even when the routing is identical.
-        {
-            let current = self.inner.read().expect("snapshot lock");
-            if *current == next {
-                return Ok(());
-            }
+        // Skip the swap when nothing changed. The snapshot is rebuilt above on every
+        // reload anyway, so this is not about allocation: `ArcSwap`'s pointer store is
+        // O(1), while this `==` is a deep compare. What it buys is that a genuine
+        // swap happens *only* on real change — so the previous snapshot is not handed
+        // to the reclaimer (it is dropped by whichever thread releases the last
+        // `Guard`, see §12.6) every few seconds for nothing.
+        if self.inner.load().as_ref() == &next {
+            return Ok(());
         }
-        *self.inner.write().expect("snapshot lock") = next;
+        self.inner.store(Arc::new(next));
         Ok(())
     }
 
     pub fn authenticate(&self, bearer: &str) -> Option<Arc<KeyRecord>> {
         let hash = hash_api_key(bearer);
-        self.inner.read().ok()?.keys.get(&hash).cloned()
+        self.inner.load().keys.get(&hash).cloned()
     }
 
     pub fn model_names_for(&self, key: &KeyRecord) -> Vec<String> {
-        let Ok(snap) = self.inner.read() else {
-            return Vec::new();
-        };
+        let snap = self.inner.load();
         let mut names: Vec<String> = snap
             .models
             .values()
@@ -109,7 +125,7 @@ impl Store {
     }
 
     pub fn channels_for(&self, key: &KeyRecord, model: &str) -> Option<Vec<Arc<Channel>>> {
-        let snap = self.inner.read().ok()?;
+        let snap = self.inner.load();
         let route = snap.models.get(model)?;
         if let Some(allow) = &key.allowed_model_ids
             && !allow.contains(&route.model_id)
@@ -264,6 +280,80 @@ mod tests {
                 .iter()
                 .all(|c| Arc::ptr_eq(c, &group[0]) || Arc::ptr_eq(c, &group[1])),
             "every ordered channel must be a pointer to an input, never a clone"
+        );
+    }
+
+    /// 回归：`reload()` 换快照后，**已经拿到的 key 句柄**必须看到新路由、且旧路由消失。
+    /// 这是 `RwLock` → `ArcSwap` 这次改动唯一的行为契约（读者不再被写者阻塞，但换代必须可见）。
+    fn catalog_yaml(model: &str) -> String {
+        format!(
+            r#"providers:
+  - name: p
+    base_url: http://127.0.0.1:1
+    api_key: ""
+    enabled: true
+models:
+  - name: {model}
+    enabled: true
+    channels:
+      - provider: p
+        upstream_model: m
+        weight: 1
+        priority: 0
+        enabled: true
+api_keys:
+  - name: k
+    key: sk-test
+    models: []
+    enabled: true
+"#
+        )
+    }
+
+    #[tokio::test]
+    async fn reload_swaps_the_snapshot_so_readers_see_the_new_routing() {
+        use crate::catalog::{Catalog, yaml};
+        use crate::config::Config;
+
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: false,
+            admin_password: "admin".into(),
+            session_secret: None,
+            max_conns_per_host: 8,
+            catalog_reload_secs: 0,
+            upstream_ttft_header: false,
+        };
+        let catalog = Catalog::connect(&cfg).await.expect("connect");
+        yaml::import_yaml(&catalog, &catalog_yaml("alpha"), yaml::ImportMode::Replace)
+            .await
+            .expect("import alpha");
+        let store = Store::new(catalog.clone());
+        store.reload().await.expect("reload alpha");
+
+        let key = store.authenticate("sk-test").expect("key survives reload");
+        assert_eq!(
+            store.channels_for(&key, "alpha").map(|c| c.len()),
+            Some(1),
+            "alpha must route after the first reload"
+        );
+        assert!(store.channels_for(&key, "beta").is_none());
+
+        yaml::import_yaml(&catalog, &catalog_yaml("beta"), yaml::ImportMode::Replace)
+            .await
+            .expect("import beta");
+        store.reload().await.expect("reload beta");
+
+        assert!(
+            store.channels_for(&key, "alpha").is_none(),
+            "the old route must be gone after the swap"
+        );
+        assert_eq!(
+            store.channels_for(&key, "beta").map(|c| c.len()),
+            Some(1),
+            "the same key handle must observe the new snapshot"
         );
     }
 }
