@@ -206,14 +206,15 @@ def main(argv: list[str] | None = None) -> int:
     for stem in stems:
         row = load_level(args.result_dir, stem, args.expect_checks_ratio, args.expect_graceful_stop)
         target_secs = (row["dur_ms"] or 0) / 1000
+        diluted = row["qps"] * target_secs
         # 闭式（首选）：VUS × dur/iter。缺 iteration_duration 时退化为稀释式下界。
         if row["vus_actual"] and row["iter_ms"]:
             row["active_streams"] = row["vus_actual"] * target_secs / (row["iter_ms"] / 1000)
             row["active_streams_source"] = "closed-form"
         else:
-            row["active_streams"] = row["qps"] * target_secs
+            row["active_streams"] = diluted
             row["active_streams_source"] = "diluted-lower-bound"
-        row["active_streams_diluted"] = row["qps"] * target_secs
+        row["active_streams_diluted"] = diluted
         # 一个 VU 每 iter 秒发一个请求 → 稳态 qps。与实测 qps 的比值就是排空段的稀释程度。
         row["qps_steady"] = (row["vus_actual"] / (row["iter_ms"] / 1000)) if (row["vus_actual"] and row["iter_ms"]) else None
 
@@ -237,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     env = read_env_txt(args.result_dir)
+    meta_path = os.path.join(args.result_dir, "meta.json")
     if not refused:
         meta = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -257,14 +259,24 @@ def main(argv: list[str] | None = None) -> int:
             },
             "levels": levels,
         }
-        with open(os.path.join(args.result_dir, "meta.json"), "w", encoding="utf-8") as handle:
+        with open(meta_path, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
+    elif os.path.isfile(meta_path):
+        # 同一目录先前跑成功过就会留下一个「有效」的 meta.json —— 被拒时必须清掉，
+        # 否则下游按目录取数会拿到过期报告。
+        os.remove(meta_path)
 
     print(f"# {os.path.basename(os.path.abspath(args.result_dir))}")
     if refused:
         print("")
-        print("> ⛔ **REFUSED**：闸门未过 → 不写 `meta.json`，本表**不可进对标表**。")
-        print("> 诊断需要时用 `--allow-linkbound` / `--allow-fingerprint-mismatch` 显式绕过。")
+        print("> ⛔ **REFUSED**：闸门未过 → 不写 `meta.json`（同目录遗留的旧 `meta.json` 已删除），")
+        print("> 本表**不可进对标表**。诊断需要时用 `--allow-linkbound` / `--allow-fingerprint-mismatch` 显式绕过。")
+    elif args.allow_linkbound or args.allow_fingerprint_mismatch:
+        print("")
+        print("> 🧪 **DIAGNOSTIC**：本次显式绕过了闸门（"
+              + ", ".join(name for name, on in (("--allow-linkbound", args.allow_linkbound),
+                                                ("--allow-fingerprint-mismatch", args.allow_fingerprint_mismatch)) if on)
+              + "）→ 结果可用于诊断，**不可进对标表**。")
     if env:
         print("")
         for key in ("GATEWAY_IMAGE", "K6_IMAGE", "K6_IMAGE_ID", "K6_VERSION", "K6_SCRIPT_MD5",
@@ -295,6 +307,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # backlog 触顶的直接证据：accept 队列峰值逼近监听 backlog。
     backlog_raw = env.get("GATEWAY_BACKLOG", "")
+    missing_acceptq = [row for row in levels
+                       if row["acceptq_max"] is None or row["acceptq_max"] == "unknown"]
     if backlog_raw.isdigit():
         backlog = int(backlog_raw)
         hot = [row for row in levels
@@ -303,17 +317,21 @@ def main(argv: list[str] | None = None) -> int:
             names = ", ".join(f"{row['level']}(峰值{row['acceptq_max']})" for row in hot)
             print(f"\n⚠️ accept 队列触顶（backlog={backlog}）：{names}", file=sys.stderr)
             print("  → 这一档量到了连接建立排队，不是网关处理能力。加大 backlog 或降低建连突发。", file=sys.stderr)
-    elif any(row["acceptq_max"] == "unknown" for row in levels):
-        print("\n⚠️ 本机没有 `ss`（非 Linux？）→ accept 队列记 unknown，backlog 触顶无法判定。", file=sys.stderr)
+    # 这条**独立**告警：backlog 已知但 accept 证据缺失/unknown 时也必须说 —— 否则闸门空转。
+    if missing_acceptq:
+        names = ", ".join(row["level"] for row in missing_acceptq)
+        print(f"\n⚠️ accept 队列证据缺失/不可判（{names}）："
+              f"{'本机没有 `ss`（非 Linux？）' if any(row['acceptq_max'] == 'unknown' for row in missing_acceptq) else '未采样/跨机'}"
+              " → backlog 触顶无法判定。", file=sys.stderr)
 
-    if refused:
-        if bad:
-            names = ", ".join(row["level"] for row in bad)
-            print(f"\n✗ 指纹不符（checks 比 ≠ {args.expect_checks_ratio:.2f} 或 "
-                  f"gracefulStop ≠ {args.expect_graceful_stop}）：{names}", file=sys.stderr)
-            print("  → 这批数不是期望的对标喂法。换回仓库版 k6.js、或把 GRACEFUL_STOP 与 "
-                  "--expect-graceful-stop 对齐；见 v88-rig.md §1.1/§1.3。", file=sys.stderr)
-            return 3
+    if bad and not args.allow_fingerprint_mismatch:
+        names = ", ".join(row["level"] for row in bad)
+        print(f"\n✗ 指纹不符（checks 比 ≠ {args.expect_checks_ratio:.2f} 或 "
+              f"gracefulStop ≠ {args.expect_graceful_stop}）：{names}", file=sys.stderr)
+        print("  → 这批数不是期望的对标喂法。换回仓库版 k6.js、或把 GRACEFUL_STOP 与 "
+              "--expect-graceful-stop 对齐；见 v88-rig.md §1.1/§1.3。", file=sys.stderr)
+        return 3
+    if bound and not args.allow_linkbound:
         print(f"\n✗ 有 {len(bound)} 档 LINK-BOUND：这台台架量的是网线，不是网关 → 拒绝出报告。", file=sys.stderr)
         print("  → 换 10G/25G，或把 k6 与网关/mock 同机（loopback）后重测。", file=sys.stderr)
         return 2

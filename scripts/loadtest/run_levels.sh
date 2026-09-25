@@ -8,8 +8,8 @@
 # 这个脚本存在的理由：客户机上那份 `/root/loadtest/k6/k6.js` 在对标当晚被换过至少四次
 # （v88-rig.md §1.1），只认路径必然会拿到别的版本。所以这里做两件事：
 #   [1] preflight：打印 k6.js 的 md5 + 校验仓库版特征（KEEP_SAMPLE / GRACEFUL_STOP）
-#   [2] 每档跑完由 report.py 断言 checks 比 2.00 与 gracefulStop 10m0s，不符的档标
-#       INVALID 且拒绝出报告
+#   [2] 每档跑完由 report.py 断言 checks 比 2.00 与**期望的** gracefulStop（默认 10m0s，
+#       随 GRACEFUL_STOP 一起透传），不符的档标 INVALID 且拒绝出报告
 # 另外每档算 活跃流 = VUS × dur/iter（闭式；`qps × dur` 会被排空段稀释，只作对照列）
 # 并过一遍链路预算；越界就退出码 2、拒绝出报告。
 # 同机跑时还会采样网关 accept 队列峰值（ss 的 Recv-Q），逼近 backlog 即判触顶。
@@ -112,13 +112,17 @@ start_accept_sampler() {
   fi
   n=$(( secs * 5 ))
   # ⚠️ 后台子 shell **必须重定向 stdout**：否则它继承 `$( )` 的管道，命令替换要等整个
-  # 采样窗结束才返回 —— k6 会在采样跑完之后才开打，`.acceptq` 记的是空载网关，每档白等
+  # 采样窗结束才返回 —— k6 会在采样跑完之后才开打、`.acceptq` 记的是空载网关、每档白等
   # 一个采样窗（实测最小复现 2.17s vs 重定向后 0.01s）。
+  # ⚠️ 而且**必须增量写盘**：driver 在 k6 结束时就把采样器 kill 掉（采样窗只是上界），
+  # 只在循环结束后写一次的话，正常路径下文件永远不会生成 —— 证据静默消失。
   (
     max=0
+    printf '0\n' > "$out"
     for _ in $(seq 1 "$n"); do
       v=$(ss -lnt "sport = :$port" 2>/dev/null | awk 'NR>1{print $2; exit}')
       case "${v:-}" in ''|*[!0-9]*) ;; *) [ "$v" -gt "$max" ] && max="$v" ;; esac
+      printf '%s\n' "$max" > "$out"
       sleep 0.2
     done
     printf '%s\n' "$max" > "$out"
@@ -164,10 +168,13 @@ GW_BACKLOG_SRC=""
 if [ -n "$GW_PORT" ]; then
   DETECTED_BACKLOG=$(listen_backlog_of "$GW_PORT" || true)
   if [ -n "${GATEWAY_BACKLOG:-}" ]; then
-    GW_BACKLOG_SRC="explicit（同机实测=${DETECTED_BACKLOG}）"
-  else
+    GW_BACKLOG_SRC="explicit（同机实测=${DETECTED_BACKLOG:-读不到}）"
+  elif [ -n "$DETECTED_BACKLOG" ]; then
     GATEWAY_BACKLOG="$DETECTED_BACKLOG"
     GW_BACKLOG_SRC="ss -lnt Send-Q（同机自动探测）"
+  else
+    GATEWAY_BACKLOG="unknown"
+    GW_BACKLOG_SRC="unknown（本机没有 ss/读不到 Send-Q）"
   fi
   log "网关 $GW_HP 本机可观测：backlog=$GATEWAY_BACKLOG 来源=$GW_BACKLOG_SRC"
 else
@@ -209,12 +216,18 @@ for level in $LEVELS; do
   log "level $level VU 开始"
   sampler_pid=""
   if [ -n "$GW_PORT" ]; then
+    # 采样窗只是上界：k6 一结束就把采样器 kill 掉（采样器每 0.2s 增量落盘，见上）。
     sampler_pid=$(start_accept_sampler "$GW_PORT" "$((WARMUP_SECS + STABLE_SECS + 60))" "$RESULT_DIR/$level.acceptq")
   fi
   run_k6 "$level" || log "level $level k6 退出码非 0（保留日志，交由 report.py 判定）"
-  if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; fi
+  if [ -n "$sampler_pid" ]; then
+    kill "$sampler_pid" 2>/dev/null || true
+    wait "$sampler_pid" 2>/dev/null || true
+  fi
   if [ -s "$RESULT_DIR/$level.acceptq" ]; then
     log "level $level accept 队列峰值 Recv-Q=$(cat "$RESULT_DIR/$level.acceptq") / backlog=$GATEWAY_BACKLOG"
+  else
+    log "⚠️ level $level 没有 .acceptq（采样器未落盘）—— accept 触顶无法判定"
   fi
   log "level $level VU 结束（$RESULT_DIR/$level.log）"
 done
