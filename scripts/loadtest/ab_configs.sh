@@ -102,6 +102,46 @@ sha256_of() {
   else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
+# k6 的耗时是 **Go duration 字面量**，不是"若干秒"：
+#   `37.83µs` / `3.84ms` / `5.89s` / `1m4s` / `1h2m3s`（仓内真实日志里都出现过，
+#   其中 `http_req_duration p(50)=1m0s…1m42s` 有 15 处 —— 正是**卡住**的那些轮次）。
+# 所以不能只 `sub(/s$/,"")` 当秒数用：`1m4s` 会变成 `1m4`、`2.29ms` 变成 `2.29m`。
+# 本函数把字面量严格换算成**秒**；**完全消费不掉就返回空**（调用方据此跳过判定），
+# 不要让 awk 把垃圾字符串静默当 0。
+secs_of() {
+  # 微秒号 U+00B5（UTF-8 = C2 B5）先换成 ASCII `u`，**必须在 bash 里换**：
+  # macOS 自带的 BWK awk（`awk version 20200816`）不是 UTF-8 感知的，源码里的多字节字面量
+  # `"µs"` 会被截断成 `"s"` —— 无论放在**比较**还是**正则**里都会出错，实测两种症状：
+  #   `unit == "µs"` 对 `"s"` 判真 ⇒ `5.89s` 算成 5.89e-06、`1m4s` 算成 60.000004；
+  #   正则 `(…|µs|…)` 里的 `µs` 同样退化成 `s` ⇒ `37.83µs` 被当成 `37.83s`。
+  # 换成 ASCII 之后 awk 只面对 ASCII，行为与 locale 无关。
+  local t=${1//$'\xc2\xb5'/u}
+  awk -v t="$t" 'BEGIN{
+    if (t ~ /^[0-9]+(\.[0-9]+)?$/) { printf "%.9g", t + 0; exit }   # 裸数字按秒收
+    s = t; total = 0; ok = 0
+    while (s != "" && match(s, /^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h)/)) {
+      tok = substr(s, 1, RLENGTH)
+      unit = tok; sub(/^[0-9.]+/, "", unit)
+      num = tok;  sub(/(ns|us|ms|s|m|h)$/, "", num)
+      if (unit == "ns") mult = 1e-9
+      else if (unit == "us") mult = 1e-6
+      else if (unit == "ms") mult = 1e-3
+      else if (unit == "s") mult = 1
+      else if (unit == "m") mult = 60
+      else mult = 3600
+      total += num * mult; ok = 1
+      s = substr(s, RLENGTH + 1)
+    }
+    if (ok && s == "") printf "%.9g", total
+  }'
+}
+
+# 只接受十进制数字串（至多一个小数点），否则返回空。挡 `abc` / `1.2.3` / `1e3` 这类
+# 会被 awk 的 `+0` 静默吞掉的输入 —— `qps` 与耗时都要过这道闸。
+num_of() {
+  awk -v v="$1" 'BEGIN{ if (v ~ /^[0-9]+(\.[0-9]+)?$/) print v }'
+}
+
 # 配置短键 → 网关**真实** env 名。
 # 不映射就会把 `TWT=128` 原样丢给 `env`，而网关只读 TOKIO_WORKER_THREADS —— 那会静默
 # 产出「三臂完全相同 = 零效应」的假结论（这条正是评审抓到的 blocker）。
@@ -275,26 +315,29 @@ for arm_spec in $ARMS; do
     # 用 iter 算得 96% 于是漏报，真实比值是 315/(4000/5.85)=46%）。
     # 理论速率 = VUS ÷ 服务时间（闭式负载的稳态上限）。实测远低于它 ⇒ 流不是被网关/农场
     # 处理的，而是 **k6 自己推不动** ⇒ 那一档的 CPU 与延迟都不能用来评判网关。
-    qps=$(awk '/^ *http_reqs\./{for(i=1;i<=NF;i++) if($i ~ /\/s$/){gsub(/\/s/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)
-    dur=$(awk '/^ *http_req_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); sub(/s$/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)
-    it=$(awk '/^ *iteration_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); sub(/s$/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)
-    # 数值闸门两道：
-    #   (1) `case` 只收十进制数字。k6 提取出来的本来就该是 `<n>`，这一步只挡异常输入。
-    #   (2) `d+0>0` 判正数。**不能写 `d>0`** —— awk 对非数字字符串走**字符串比较**，
-    #       `"abc" > "0"` 为真 ⇒ 闸门**放行**，接着 `VUS/d` 得 inf、比值变成 0，
-    #       凭空报一个「客户端疑似饱和（0%）」。数值判断必须显式 `+0`。
-    case "$dur" in ''|*[!0-9.]*) dur="" ;; esac
+    # 提取 → 换算 → 闸门。**耗时是 Go duration 字面量**（`5.89s` / `1m4s` / `3.84ms` /
+    # `37.83µs`），必须过 `secs_of` 换算成秒；`qps` 过 `num_of` 收成纯数字。
+    # 两个 helper 都是"严格全消费，否则返回空"，所以：
+    #   - `dur=abc` / `1.2.3` / 空 ⇒ 空 ⇒ **整块跳过**（不会让 awk 把垃圾当 0，
+    #     从而凭空报一个「客户端疑似饱和（0%）」）；
+    #   - `dur=1m4s` ⇒ **64**（此前只 `sub(/s$/,"")` 会得到 `1m4`，再被闸门吞掉 ⇒
+    #     检测器**一声不响地失效**，而分钟级 p50 恰恰就是"卡住"的那一轮）。
+    qps=$(num_of "$(awk '/^ *http_reqs\./{for(i=1;i<=NF;i++) if($i ~ /\/s$/){sub(/\/s$/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)")
+    dur=$(secs_of "$(awk '/^ *http_req_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)")
+    it=$(secs_of "$(awk '/^ *iteration_duration\./{for(i=1;i<=NF;i++) if($i ~ /^p\(50\)=/){sub(/p\(50\)=/,"",$i); print $i}}' "$OUT/$label.log" | tail -1)")
     if [ -n "$qps" ] && [ -n "$dur" ] && awk -v d="$dur" 'BEGIN{exit !(d+0>0)}'; then
-      # `theo` 取整后可能为 0（VUS 小 / dur 极大，例如整轮超时 dur=600s）—— 那一步的
+      # `theo` 取整后可能为 0（VUS 小 / dur 极大，例如 `VUS=200` 配 `dur=10m0s`）—— 那一步的
       # `100*q/t` 会除零并吐一个空 ratio，告警被**静默跳过**。这种情况**明说无法判定**。
       theo=$(awk -v v="$VUS" -v d="$dur" 'BEGIN{printf "%.0f", v/d}')
       if [ "$theo" -le 0 ]; then
         log "  （客户端饱和无法判定：$VUS ÷ ${dur}s 取整为 ${theo}，跳过本档判定）"
       else
         ratio=$(awk -v q="$qps" -v t="$theo" 'BEGIN{printf "%.0f", 100*q/t}')
+        # 空档是**附加信息**，不影响判定：`it` 已经过 `secs_of`（单位与 dur 一致），
+        # 所以这里的减法在 `iter=1m4s` 这类分钟级输入上也是对的。
         gap=""
         if [ -n "$it" ]; then
-          gap="；客户端每迭代空档 $(awk -v i="$it" -v d="$dur" 'BEGIN{printf "%.1f", i-d}')s（iter $(printf %.2f "$it")s vs dur $(printf %.2f "$dur")s）"
+          gap="；客户端每迭代空档 $(awk -v i="$it" -v d="$dur" 'BEGIN{printf "%.1f", i-d}')s（iter ${it}s vs dur ${dur}s）"
         fi
         log "  客户端占用: 实测 $(awk -v q="$qps" 'BEGIN{printf "%.1f", q}')/s ÷ 理论 ${theo}/s = ${ratio}%${gap}"
         if [ "$ratio" -lt 60 ]; then
