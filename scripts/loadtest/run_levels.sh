@@ -118,14 +118,17 @@ start_accept_sampler() {
   # 只在循环结束后写一次的话，正常路径下文件永远不会生成 —— 证据静默消失。
   (
     max=0
-    printf '0\n' > "$out"
+    # 首个**有效**读数之前记 `unknown`：`0` 会被 report.py 当成「队列从未触顶」的真证据，
+    # 而「采样器还没来得及读到就被 kill」或「ss 读不到行（端口未监听/无权限）」都会造成这种局面。
+    printf 'unknown\n' > "$out"
     for _ in $(seq 1 "$n"); do
       v=$(ss -lnt "sport = :$port" 2>/dev/null | awk 'NR>1{print $2; exit}')
-      case "${v:-}" in ''|*[!0-9]*) ;; *) [ "$v" -gt "$max" ] && max="$v" ;; esac
-      printf '%s\n' "$max" > "$out"
+      case "${v:-}" in
+        ''|*[!0-9]*) ;;                                   # 保持 unknown
+        *) [ "$v" -gt "$max" ] && max="$v"; printf '%s\n' "$max" > "$out" ;;
+      esac
       sleep 0.2
     done
-    printf '%s\n' "$max" > "$out"
   ) >/dev/null 2>&1 &
   printf '%s' "$!"
 }
@@ -221,8 +224,9 @@ for level in $LEVELS; do
   fi
   run_k6 "$level" || log "level $level k6 退出码非 0（保留日志，交由 report.py 判定）"
   if [ -n "$sampler_pid" ]; then
+    # 采样器是 `$( )` 里的子进程，主 shell 的 `wait` 拿不到它（实测恒返 127），所以只 kill；
+    # 万一 kill 没命中，它也会在自己那个有界采样窗结束时自然退出，不会泄漏到下一档。
     kill "$sampler_pid" 2>/dev/null || true
-    wait "$sampler_pid" 2>/dev/null || true
   fi
   if [ -s "$RESULT_DIR/$level.acceptq" ]; then
     log "level $level accept 队列峰值 Recv-Q=$(cat "$RESULT_DIR/$level.acceptq") / backlog=$GATEWAY_BACKLOG"

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **压测 rig 的闸门改成「不过就不出报告」，并修掉三处会让它说谎的缺陷**：`report.py` 在闸门不过时**不再写 `meta.json`**（此前是先出表、写文件，只改退出码），指纹不符的档在表里标 **`INVALID`** 且不进对标表、不参与链路预算闸门；`run_levels.sh` 把 `GRACEFUL_STOP` 透传给 k6 **并**作为 `--expect-graceful-stop` 的期望值（此前硬编码 `10m0s`，按文档用 `GRACEFUL_STOP=30s` 跑 A/B 会被误判成「脚本被换过」）；accept 队列采样器不再阻塞命令替换（后台子 shell 未重定向 stdout，会让 k6 在采样窗结束后才开打、`.acceptq` 记的是空载网关、每档白等一个采样窗），没有 `ss` 时记 `unknown` 而**不是 0**；`k6` 版本改为 `k6 version` / 镜像自报（此前从运行日志 grep，永远为空）；删掉 xlite 从不发送的 `queue_wait_ms` 死列与不可达的字节回退分支。
+- **压测 rig 的闸门改成「不过就不出报告」，并修掉三处会让它说谎的缺陷**：`report.py` 在闸门不过时**不再写 `meta.json`**（此前是先出表、写文件，只改退出码），指纹不符的档在表里标 **`INVALID`** 且不进对标表、不参与链路预算闸门；`run_levels.sh` 把 `GRACEFUL_STOP` 透传给 k6 **并**作为 `--expect-graceful-stop` 的期望值（此前硬编码 `10m0s`，按文档用 `GRACEFUL_STOP=30s` 跑 A/B 会被误判成「脚本被换过」）；accept 队列采样器不再阻塞命令替换（后台子 shell 未重定向 stdout，会让 k6 在采样窗结束后才开打、`.acceptq` 记的是空载网关、每档白等一个采样窗），没有 `ss` 时记 `unknown` 而**不是 0**（采样器首个有效读数之前也记 `unknown`）；被拒时**删除同目录遗留的旧 `meta.json`**，且删除失败只告警、不改变 0/2/3 退出码契约；`k6` 版本改为 `k6 version` / 镜像自报（此前从运行日志 grep，永远为空）；删掉 xlite 从不发送的 `queue_wait_ms` 死列与不可达的字节回退分支。
 
 - **`GET /health` 带上 `version`**：免鉴权的探活响应从 `{"status":"ok","gateway":"xlite"}` 变为再带一个 `version`（`CARGO_PKG_VERSION`）字段。此前只有要登录的 `GET /api/overview` 才给版本，启动日志之外**无法用一个 curl 确认现场跑的是哪一版**；对标时反复强调要钉 k6 镜像 digest 与脚本 sha256，网关自己却没有可远程核对的指纹。HAProxy `httpchk` 只判状态码，加字段不影响探活。回归：`health_reports_gateway_and_version`。
 

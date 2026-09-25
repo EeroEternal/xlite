@@ -115,6 +115,23 @@ def read_acceptq(result_dir: str, stem: str) -> int | str | None:
     return int(raw) if raw.isdigit() else (raw or None)
 
 
+def drop_stale_meta(result_dir: str) -> bool:
+    """清掉同目录遗留的旧 `meta.json`（下游按目录取数，不能让过期报告留下）。
+
+    返回是否**真的**删掉了一个文件 —— 调用方只能在这个前提下宣称「已删除」。
+    目录不可写等 IO 失败不算致命：打印告警并继续，退出码契约仍由闸门决定。
+    """
+    path = os.path.join(result_dir, "meta.json")
+    if not os.path.isfile(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError as exc:
+        print(f"⚠️ 未能删除遗留的 {path}：{exc}", file=sys.stderr)
+        return False
+
+
 def load_level(result_dir: str, stem: str, expect_ratio: float, expect_graceful: str) -> dict:
     """解析一档的 summary + 日志指纹。"""
     with open(os.path.join(result_dir, f"{stem}.summary.json"), encoding="utf-8") as handle:
@@ -195,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not stems:
         print(f"✗ {args.result_dir} 里没有 *.summary.json", file=sys.stderr)
+        drop_stale_meta(args.result_dir)
         return 3
 
     link_mbps = args.link_mbps
@@ -261,15 +279,17 @@ def main(argv: list[str] | None = None) -> int:
         }
         with open(meta_path, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
-    elif os.path.isfile(meta_path):
+        stale_removed = False
+    else:
         # 同一目录先前跑成功过就会留下一个「有效」的 meta.json —— 被拒时必须清掉，
-        # 否则下游按目录取数会拿到过期报告。
-        os.remove(meta_path)
+        # 否则下游按目录取数会拿到过期报告。删不掉也不掩盖闸门结论，只如实说明。
+        stale_removed = drop_stale_meta(args.result_dir)
 
     print(f"# {os.path.basename(os.path.abspath(args.result_dir))}")
     if refused:
         print("")
-        print("> ⛔ **REFUSED**：闸门未过 → 不写 `meta.json`（同目录遗留的旧 `meta.json` 已删除），")
+        suffix = "（同目录遗留的旧 `meta.json` 已删除）" if stale_removed else ""
+        print(f"> ⛔ **REFUSED**：闸门未过 → 不写 `meta.json`{suffix}，")
         print("> 本表**不可进对标表**。诊断需要时用 `--allow-linkbound` / `--allow-fingerprint-mismatch` 显式绕过。")
     elif args.allow_linkbound or args.allow_fingerprint_mismatch:
         print("")
