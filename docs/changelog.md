@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **路由快照改 `ArcSwap`，去掉异步热路径上会阻塞请求的写锁**：`Store` 的快照由 `Arc<std::sync::RwLock<Snapshot>>` 换成 `Arc<ArcSwap<Snapshot>>`，三个读点（`authenticate`/`model_names_for`/`channels_for`）改无锁 `load()`。**立项理由是结构性缺陷修复，不是性能**：`RwLock` 下 `reload()` 的写锁在析构旧快照期间会挡住所有读锁请求，这是每 5s 一次、落在异步热路径上的阻塞点（读代码即可确认）；`ArcSwap` 的读不被写者阻塞，这类停顿从结构上不可能发生。**实测不支持任何性能主张**：CPU 零收益（3 轮同窗口交错范围完全重叠，均值差 0.15%），原先"锁争用是 128 线程 CPU 浪费主因"的假设被**证伪**；p99 测得 −7.7% 但只有单窗口、未达 `v88-rig.md` §9.1"换窗口复现"的门槛，只能算暗示；`max` 的差异不可用作证据（单点极值 + 该指标极端值有 ±250ms 伪影 + 与 ab4 窗口不一致）。代价：新增直接依赖 `arc-swap`（原为传递依赖），旧快照释放时机由"持写锁内析构"变为"最后一个 guard 释放时 drop"。数据见 `docs/dev/loadtest-newapi-controlled-2026-09.md` §12.6，可复跑 harness 见 `scripts/loadtest/ab_configs.sh`。
+
 - **`GET /health` 带上 `version`**：免鉴权的探活响应从 `{"status":"ok","gateway":"xlite"}` 变为再带一个 `version`（`CARGO_PKG_VERSION`）字段。此前只有要登录的 `GET /api/overview` 才给版本，启动日志之外**无法用一个 curl 确认现场跑的是哪一版**；对标时反复强调要钉 k6 镜像 digest 与脚本 sha256，网关自己却没有可远程核对的指纹。HAProxy `httpchk` 只判状态码，加字段不影响探活。回归：`health_reports_gateway_and_version`。
 
 - **运维：`TOKIO_WORKER_THREADS` 不要留默认**（实测，见 `docs/dev/loadtest-newapi-controlled-2026-09.md` §12）：裸 `#[tokio::main]` 默认按 `nproc` 起 worker。在 128 核的网关机上实测默认值 **白烧约 40% CPU 且尾部更差** —— 1000 VU（约 2.2 核工作量）下 128 → 2 线程为 `2.400 → 1.430` 核，同时 `p90 −28%`、`p95 −60%`、`p99 −23%`、吞吐与失败率不变（代价仅 `p50 +16%`）。**按负载定，别抄常数**：4000 VU 下 128 → 8 线程省 9%（幅度随载荷变小）。同轮实测另两条：`XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 32/64/128 **零效应**（不用调）；**listen backlog 65535 不是延迟优化而是并发上限保障** —— ≤1000 VU 无延迟差别（accept 队列峰值 17/128），但 **4000 VU 下 backlog 128 直接 34.6% 失败、65535 为 0.00%**。
