@@ -119,6 +119,7 @@ async fn run_server() -> Result<()> {
         redis = config.redis_url.is_some(),
         database = %config.database_url,
         max_conns = config.max_conns_per_host,
+        upstream_ttft_header = config.upstream_ttft_header,
         "starting"
     );
     if config.admin_password == "admin" {
@@ -137,15 +138,20 @@ async fn run_server() -> Result<()> {
         config: config.clone(),
     };
 
-    let reload_store = store.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Err(err) = reload_store.reload().await {
-                tracing::warn!("snapshot reload failed: {err}");
+    if config.catalog_reload_secs > 0 {
+        let reload_store = store.clone();
+        let period = Duration::from_secs(config.catalog_reload_secs);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(period).await;
+                if let Err(err) = reload_store.reload().await {
+                    tracing::warn!("snapshot reload failed: {err}");
+                }
             }
-        }
-    });
+        });
+    } else {
+        info!("catalog snapshot reload disabled");
+    }
 
     let mut app = Router::new()
         .route("/health", get(proxy::health))

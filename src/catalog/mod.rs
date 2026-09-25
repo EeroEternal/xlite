@@ -333,6 +333,8 @@ mod tests {
             admin_password: "admin".into(),
             session_secret: None,
             max_conns_per_host: 8,
+            catalog_reload_secs: 5,
+            upstream_ttft_header: false,
         }
     }
 
