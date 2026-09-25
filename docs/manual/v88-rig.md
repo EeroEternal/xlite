@@ -37,23 +37,28 @@ k6 每个 VU 一圈：`http.post` → `check` → `sleep(0)`。`ttft_ms` 是 `re
 | --- | --- | --- |
 | `checks_total / http_reqs` | k6 汇总 | **2.00** = 每次迭代全量解析；**1.10** = 采样 0.1；**1.00** = 完全不解析 |
 | `gracefulStop` | 日志头部 scenario 行 | **`10s`** = 硬编码那一族；**`10m0s`** = `GRACEFUL_STOP` 默认 600s 那一族 |
-| `gateway_overhead_ms` | k6 汇总 CUSTOM | 有出数 = 该版已加 gw_oh（`receiving` 口径） |
+| `gateway_overhead_ms` | k6 汇总 CUSTOM | **有出数** = 该版用 `res.timings.receiving`（`loadtest` 族）；**没有** = 该版用的是 `res.timings.total` —— 而 k6 v2.x 的 `timings` **根本没有 `total` 字段**（客户离线包 k6 v2.2.0，本地实测 `Object.keys(res.timings)` = `duration, blocked, looking_up, connecting, tls_handshaking, sending, waiting, receiving`），`isFinite(NaN)` 恒假 ⇒ `deploy88/k6.js` **永远出不了 gw_oh** |
 
 对 `deploy_origin/loadtest/results` 全部日志实测（客户机同一晚，09-17 15:30 → 09-18 08:41）：
 
 | 时间 | 结果集 | gs | checks 比 | gw_oh | 判定 |
 | --- | --- | --- | --- | --- | --- |
-| 15:30 / 15:58 | `v4-run1-mock12`、`v4-run2-mock18-dual` | 10s | 1.00 | 无 | driver 不传 `KEEP_BODY` ⇒ 只留状态码校验；gs=10s 指向硬编码那一族 |
-| 16:18–16:36 | `v4-levels-partial/D_1000`、`D_4000` | 10s | 2.00 | **无** | 全量解析 + 硬编码 10s、**还没有 gw_oh** ⇒ 既不是 `loadtest/k6/k6.js`，也不是包里的 `deploy88/k6.js`（那份有 gw_oh） |
-| 16:36:51 | `v4-levels-partial/D_21000` | — | 报错 | — | `ReferenceError: GRACEFUL_STOP is not defined at /k6/k6.js:133:21` —— 把 `'10s'` 改成 `GRACEFUL_STOP` 却忘了 `var` |
-| 16:56 / 17:06 | `v4-levels-partial/D_5000`、`D_6000` | 10m0s | 2.00 | 无 | 修好 `GRACEFUL_STOP`（默认 600s），仍无 gw_oh |
-| 17:29–08:33 | `v88-single` B 组 58 档 + D 组 6 档 + E@1000…20000（共 **84 档，含 708ms**） | 10m0s | 2.00 | **有** | **对标那版**：全量解析 + 600s + gw_oh |
-| 08:34–08:40 | `v88-single/E_21000` | 10m0s | **1.10** | 有 | 与包里 `loadtest/k6/k6.js`（v3.2-memopt）逐项吻合 ⇒ 那晚最后一次换版 |
+| 15:30 / 15:58 | `v4-run1-mock12`、`v4-run2-mock18-dual` | 10s | 1.00 | 无 | driver 不传 `KEEP_BODY` ⇒ 只留状态码校验；gs=10s ⇒ 硬编码族 |
+| 16:18–16:36 | `v4-levels-partial/D_1000`、`D_4000` | 10s | 2.00 | 无 | 全量解析 + 硬编码 10s + `timings.total` 版 gw_oh ⇒ **就是包里 `deploy88/k6.js`** |
+| 16:36:51 | `v4-levels-partial/D_21000` | — | 报错 | — | `ReferenceError: GRACEFUL_STOP is not defined at /k6/k6.js:133:21` —— 现场把 `'10s'` 改成 `GRACEFUL_STOP` 却忘了 `var`（列 21 正是 deploy88 那版 133 行的取值位置） |
+| 16:56 / 17:06 | `v4-levels-partial/D_5000`、`D_6000` | 10m0s | 2.00 | 无 | 同一份文件补回 `var GRACEFUL_STOP`（默认 600s），gw_oh 仍缺 ⇒ **还是 `deploy88/k6.js` 那一族** |
+| 17:29–08:33 | `v88-single` B 组 58 档 + D 组 6 档 + E@1000…20000（共 **84 档，含 708ms**） | 10m0s | 2.00 | **有** | **第三份**：全量解析 + 600s + `receiving` 版 gw_oh。包里没有这一版；用 `loadtest/k6/k6.js + KEEP_SAMPLE=1` 逐项复现（本机实测 2.000 / 10m0s / chunk+gw_oh 全中） |
+| 08:34–08:40 | `v88-single/E_21000` | 10m0s | **1.10** | 有 | 与包里 `loadtest/k6/k6.js`（v3.2-memopt，默认 `KEEP_SAMPLE=0.1`）逐项吻合 ⇒ 那晚最后一次换版 |
 | 08:41 | `v88-single/E_22000` | — | 空指标 | — | 停测 |
+
+一条演化线（同一份 `/root/loadtest/k6/k6.js` 被手改四次）：
+`deploy88/k6.js`（全量 + 硬编码 10s + `timings.total`）→ 补 `GRACEFUL_STOP`（600s）
+→ 换 `receiving` 版 gw_oh（= **第三份**，对标那批数据）→ 加 `KEEP_SAMPLE=0.1`
+（= 包里 `loadtest/k6/k6.js`，最后一档）。
 
 三条结论：
 
-1. **对标那批数据（含客户 708ms）出自「全量解析 + 600s + gw_oh」那一版，客户包里没有留下**；`deploy88/k6.js`（硬编码 10s）**不是**它。
+1. **对标那批数据（含客户 708ms）出自「第三份」：全量解析 + 600s + `receiving` 版 gw_oh —— 包里没有这个文件。** `deploy88/k6.js` 不是它（硬编码 10s，且因 `timings.total` 不存在而根本出不了 gw_oh）；包里 `loadtest/k6/k6.js` 也不是它（默认 0.1 ⇒ 1.10）。复现：`loadtest/k6/k6.js` 加 `KEEP_SAMPLE=1`，或直接用 [`scripts/loadtest/k6/k6.js`](../../scripts/loadtest/k6/k6.js)（`KEEP_SAMPLE` 默认就是 1）。
 2. 包里 `loadtest/k6/k6.js` 只对上最后一档 E@21000 的 1.10 —— 它反证了同一份 driver 在 B/D 上会给出 1.10，而实测是 2.00，即中间确实换过文件。
 3. 换版发生在 E@20000（08:33）与 E@21000（08:34）之间；那次换版让 qps 从 1033 涨到 1912、TTFT p50 从 714ms 升到 **1747ms** —— 是喂得更满，**不是刷分**（`ttft_ms` 取首字节，也不受 body 解析影响）。
 
