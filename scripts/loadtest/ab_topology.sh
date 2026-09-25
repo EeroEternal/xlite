@@ -1,67 +1,83 @@
 #!/bin/bash
 # =============================================
-# ab_topology.sh —— 用「同机 loopback / 拆分拓扑」找**瓶颈落在哪一组进程**。
+# ab_topology.sh —— 把链路从路径上拿掉，找**瓶颈落在哪一组进程**。
 #
-# 与另外两个脚本的分工：
-#   run_levels.sh  = 对标 New API 的定档位压测（要 gw_oh，带报告闸门）
-#   ab_configs.sh  = 判某个**旋钮/改动**值不值（判决指标含网关 CPU）
-#   ab_topology.sh = 判**瓶颈在谁身上**：网关 / mock 农场 / k6 各吃多少核
+# 三个 harness 的分工：
+#   run_levels.sh      对标 New API 的定档位压测（要 gateway_overhead_ms，带报告闸门）
+#   ab_configs.sh      判某个**旋钮/改动**值不值（判决指标含网关 CPU）
+#   ab_topology.sh     判**瓶颈在谁身上**：网关 / mock 农场 / k6 各吃多少核
 #
-# 为什么需要它：链路受限的台架上，1 GbE 先撞顶（实测拐点 ≈990 req/s ≈100 MB/s），
-# 什么都测不出。把三组进程挪到同机 loopback 就能把链路从路径上拿掉，
+# ## 为什么需要它
+#
+# 链路受限的台架上先撞顶的永远是网卡 —— 实测 1 GbE 拐点在 **≈990 req/s ≈100 MB/s**
+# （1 GbE 实用带宽的 ~90%，见 docs/manual/v88-rig.md §2），什么都测不出来。
+# 把 k6 / 网关 / 24 mock **全放到同一台机**（loopback）就能把链路从路径上拿掉，
 # 然后**分别**采三组进程的 CPU，看谁先饱和。
 #
-# 已测结论（1000→16000 VU，见 docs/dev/loadtest-newapi-controlled-2026-09.md §13）：
-#   **农场才是瓶颈，不是网关。** 农场 ≈34–38 核/千请求/秒，网关 ≈7，k6 ≈12。
-#   16000 VU 同机时：农场 72 核 / 网关 9.5 核 / k6 16–18 核（全机 128 核）。
+# ## 它测出来的结论（docs/dev/loadtest-newapi-controlled-2026-09.md §13）
 #
-# 用法:
-#   ARM=A2 TOPOLOGY=local KEEP_BODY=false LEVELS="1000 4000 8000" scripts/loadtest/ab_topology.sh
-#   ARM=A2 TOPOLOGY=split REMOTE_HOST=10.99.255.101 LEVELS="4000 8000" scripts/loadtest/ab_topology.sh
+#   **瓶颈是 mock 农场，不是网关。** 归一成「每千请求/秒消耗的核数」：
+#     农场 34–38、k6 12–13、网关 6–7（农场是网关的约 5 倍）；
+#     16000 VU 同机时农场独吃 72 核、网关 9.45 核，且 **fail 始终 0.00%**
+#     （网关只是在排队，从不拒连）。⇒ **要扩的是农场。**
 #
-# 环境变量（都有默认）:
-#   ARM=A2                    用 GATEWAY_DIR/xlite-<ARM> 这个二进制
+# ## 用法
+#
+#   # 仓库内跑（默认目录文件取 examples/mock-24.yaml，它就是 127.0.0.1 版）
+#   ARM=A2 LEVELS="1000 4000 8000" scripts/loadtest/ab_topology.sh
+#
+#   # 仓库外跑（例如把脚本拷到 lab 的 /tmp）：**必须显式传 CATALOG**
+#   CATALOG=$HOME/ab9/mock-24.yaml ARM=A2 LEVELS="4000" /tmp/ab_topology.sh
+#
+# ## 环境变量
+#
+#   CATALOG=<path>            指向 127.0.0.1 的 24-mock 目录 YAML。仓库外跑必须传。
+#   GATEWAY_DIR=$HOME/ab6     网关机上的目录：要有 xlite-<ARM>
+#   ARM=A2                    用哪个二进制（A0/A1/D/A2/L/S…）
 #   PORT=18120
-#   TOPOLOGY=local            见下
-#   REMOTE_HOST=10.99.255.101 TOPOLOGY=split 时 k6 跑在这台（跨链路）
-#   KEEP_BODY=false           ★压瓶颈模式用 false：true 是对标模式，k6 自己会先饱和
-#                             （实测 true 时 qps 在 4000 VU 就封顶 ~313，白丢 4 倍吞吐）
+#   LEVELS="1000 4000 8000 16000 31000"
+#   DURATION=120s  WARMUP=20  GRACEFUL_STOP=20s
+#   KEEP_BODY=false           ★压瓶颈模式用 false。true 是对标模式：k6 要逐字节解析
+#                             502 个 chunk，会**先于网关饱和** —— 实测 qps 在 4000 VU
+#                             就封顶 ~313，白丢约 4 倍吞吐（见 §13.1）。两件事要分开跑。
 #   TWT=8 CONNS=32 RELOAD=0   → TOKIO_WORKER_THREADS / XLITE_UPSTREAM_MAX_CONNS_PER_HOST
 #                             / XLITE_CATALOG_RELOAD_SECS（0=冻结快照，去掉 reload 噪声）
-#   LEVELS="1000 4000 8000 16000 31000"  DURATION=120s WARMUP=20 GRACEFUL_STOP=20s
-#   MOCK_PORTS="4101-4124"    农场端口区间
-#   LAB_LOCK=$HOME/lab.lock   台架互斥锁（见下）
+#   MOCK_PORTS="4101-4124"    MOCK_CONTAINER_PREFIX=mock-h2c-
+#   K6_DIR=$HOME/labtest/k6dir2  K6_IMAGE=k6-customer:latest  K6_MEM=45g
+#   TOKEN=sk-loadtest  MODEL=mock
+#   OUT=$HOME/labtest/ab-topology
 #
-# 两种拓扑:
-#   local  k6 ─┐
-#              ├─ 全部在本机（loopback，链路不在路径上）
-#   网关 ─ mock ┘
+# ## 产物（即一轮评测的工件）
 #
-#   split  k6 在 REMOTE_HOST ──(1 GbE)──▶ 网关 ─ mock（后两者在本机 loopback）
-#          链路只承担「网关→k6」一程，容量口径上比原台架翻倍
+#   progress.log   每档：三组进程的核数 + qps/dur/fail
+#   <LEVEL>.log    k6 原始输出
+#   cpu.log        每秒一行 `<epoch> <网关tick> <农场tick和>`（/proc/<pid>/stat）；k6 核数走 `docker stats`
 #
-# ★ 台架互斥（必须）: 两个 session 同时压测，量出来的是「谁在抢资源」的函数。
-#   脚本开头抢锁，抢不到直接退出。锁绑在 fd 上，进程一死内核自动释放 ⇒ 无僵尸锁。
-#   split 拓扑会**同时**在 REMOTE_HOST 上抢一把，避免只锁住本机。
-#   驱动压测请固定用一台机（本约定：用网关+mock 所在的那台）。
+# ## 判读纪律（v88-rig.md §9.1）
 #
+#   CPU 采样抖动约 1% ⇒ 差异要 > ~2% 才算数；延迟的窗口漂移可达 −3% ~ −9.8%
+#   ⇒ 延迟差异必须**同窗口交错 ≥3 轮**才能认。本脚本给的是 CPU 归因，不是延迟判决。
 # =============================================
 
 set -uo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib_rig.sh
+. "$SCRIPT_DIR/lib_rig.sh"
+
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+CATALOG=${CATALOG:-}
 GATEWAY_DIR=${GATEWAY_DIR:-$HOME/ab6}
 ARM=${ARM:-A2}
 PORT=${PORT:-18120}
-TOPOLOGY=${TOPOLOGY:-local}
-REMOTE_HOST=${REMOTE_HOST:-10.99.255.101}
-KEEP_BODY=${KEEP_BODY:-false}
-TWT=${TWT:-8}
-CONNS=${CONNS:-32}
-RELOAD=${RELOAD:-0}
 LEVELS=${LEVELS:-"1000 4000 8000 16000 31000"}
 DURATION=${DURATION:-120s}
 WARMUP=${WARMUP:-20}
 GRACEFUL_STOP=${GRACEFUL_STOP:-20s}
+KEEP_BODY=${KEEP_BODY:-false}
+TWT=${TWT:-8}
+CONNS=${CONNS:-32}
+RELOAD=${RELOAD:-0}
 MOCK_PORTS=${MOCK_PORTS:-"4101-4124"}
 MOCK_CONTAINER_PREFIX=${MOCK_CONTAINER_PREFIX:-mock-h2c-}
 K6_DIR=${K6_DIR:-$HOME/labtest/k6dir2}
@@ -69,50 +85,22 @@ K6_IMAGE=${K6_IMAGE:-k6-customer:latest}
 K6_MEM=${K6_MEM:-45g}
 TOKEN=${TOKEN:-sk-loadtest}
 MODEL=${MODEL:-mock}
-REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-# 目录文件必须指向 127.0.0.1（同机 loopback）。仓库里的 examples/mock-24.yaml 就是这份；
-# 台架上没有 checkout 时退回 $HOME/labtest/mock-24.yaml。
-CATALOG=${CATALOG:-}
-if [ -z "$CATALOG" ]; then
-  for c in "$REPO_ROOT/examples/mock-24.yaml" "$HOME/labtest/mock-24.yaml"; do
-    [ -s "$c" ] && { CATALOG=$c; break; }
-  done
-fi
 OUT=${OUT:-$HOME/labtest/ab-topology}
-LAB_LOCK=${LAB_LOCK:-$HOME/lab.lock}
-LAB_SESSION=${LAB_SESSION:-"$(hostname)-$$"}
-SSH_OPTS=${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no}
 
 mkdir -p "$OUT"
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"; }
-die() { echo "✗ $*" >&2; exit 1; }
 
-# ---------------------------------------------------------------- 台架互斥
-# 锁绑 fd 9，脚本退出/被杀都由内核释放 —— 不会留僵尸锁。
-take_local_lock() {
-  exec 9>"$LAB_LOCK"
-  if ! flock -n 9; then
-    echo "✗ 台架被占用：$(cat "$LAB_LOCK" 2>/dev/null)" >&2
-    echo "  确认无人使用后再删锁文件：rm $LAB_LOCK" >&2
-    exit 1
-  fi
-  echo "$LAB_SESSION $(date -Is) $*" > "$LAB_LOCK"
-}
+# ★ 网关的 fd 上限**不是**无关紧要的：网关由本脚本直接拉起，会继承 shell 的 `nofile`，
+#   而 ssh 非交互 shell 默认只有 **1024**。被静默卡住的表现是「迭代时长、scenario、
+#   fail% 全都正常，但吞吐只有 1/4」—— 实测 4000 VU 时只跑出 865 流、qps 147（应为 621）。
+#   注意：这条**不是**「k6 在容器里所以无关」—— 对 k6 无关，对网关要命。
+ulimit -n 1048576 2>/dev/null || true
+log "  shell nofile=$(ulimit -n)"
+die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 
-REMOTE_LOCK_PID=""
-take_remote_lock() {
-  [ "$TOPOLOGY" = split ] || return 0
-  local first
-  # 远端持锁 + 长睡，直到我们 kill 这个 ssh（fd 关闭 ⇒ 远端锁释放）
-  coproc RLOCK { ssh $SSH_OPTS "$REMOTE_HOST" \
-    "exec 9>~/.lab.lock; flock -n 9 || { echo BUSY; exit 1; }; echo OK; sleep 86400"; }
-  REMOTE_LOCK_PID=$RLOCK_PID
-  read -r -t 20 first <&"${RLOCK[0]}" || true
-  [ "$first" = "OK" ] || die "远端 $REMOTE_HOST 台架被占用（$first）"
-  ssh $SSH_OPTS "$REMOTE_HOST" "echo '$LAB_SESSION $(date -Is) topology-split' > ~/.lab.lock" 2>/dev/null || true
-}
+lab_lock "ab_topology" || exit 1
 
-# 端口区间 → 空格分隔
+# ---------------------------------------------------------------- 前置自检
 expand_ports() {
   case "$1" in
     [0-9]*-[0-9]*) seq "${1%-*}" "${1#*-}" ;;
@@ -120,86 +108,95 @@ expand_ports() {
   esac
 }
 
-cleanup() {
-  local pid
-  pid=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-  [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  pkill -f "ab_topology.*sampler" 2>/dev/null
-  docker rm -f "abtop-k6-$PORT" >/dev/null 2>&1
-  [ "$TOPOLOGY" = split ] && ssh $SSH_OPTS "$REMOTE_HOST" "docker rm -f abtop-k6 >/dev/null 2>&1" 2>/dev/null
-  [ -n "$REMOTE_LOCK_PID" ] && kill "$REMOTE_LOCK_PID" 2>/dev/null
-}
-trap cleanup EXIT
-
-take_local_lock "$TOPOLOGY"
-take_remote_lock
-
-if [ "$TOPOLOGY" = split ]; then
-  ssh $SSH_OPTS "$REMOTE_HOST" "docker image inspect '$K6_IMAGE' >/dev/null 2>&1" \
-    || die "$REMOTE_HOST 上没有 k6 镜像 $K6_IMAGE（先 docker save | ssh docker load）"
-  local_sum=$(sha256sum "$K6_DIR/k6.js" 2>/dev/null | awk '{print $1}')
-  remote_sum=$(ssh $SSH_OPTS "$REMOTE_HOST" "sha256sum '$K6_DIR/k6.js' 2>/dev/null | awk '{print \$1}'")
-  [ -n "$local_sum" ] && [ "$local_sum" = "$remote_sum" ] \
-    || die "k6.js 两端哈希不一致（本机 ${local_sum:-无} / $REMOTE_HOST ${remote_sum:-无}）"
-  log "  split 前置通过：远端镜像与 k6.js 哈希一致"
+# 目录文件必须存在且指向 127.0.0.1（同机 loopback）。仓库内跑默认取 examples/ 那份；
+# 仓库外跑（脚本被拷到别处）必须显式传 CATALOG —— 报错里列出**试过哪些路径**，
+# 免得下次又要在 lab 上猜（真实踩过：以为默认能找到，实际死在开跑前）。
+if [ -z "$CATALOG" ]; then
+  for c in "$REPO_ROOT/examples/mock-24.yaml" "$PWD/mock-24.yaml"; do
+    [ -s "$c" ] && { CATALOG=$c; break; }
+  done
 fi
+{ [ -n "$CATALOG" ] && [ -s "$CATALOG" ]; } || die "找不到目录文件。试过：
+     CATALOG='${CATALOG:-未设置}'、$REPO_ROOT/examples/mock-24.yaml、$PWD/mock-24.yaml
+   → 仓库外跑请显式传 CATALOG=<指向 127.0.0.1 的 mock-24.yaml>"
+grep -q '127\.0\.0\.1' "$CATALOG" || die "$CATALOG 不是指向 127.0.0.1 的版本（同机 loopback 需要它）"
+[ -x "$GATEWAY_DIR/xlite-$ARM" ] || die "找不到可执行 $GATEWAY_DIR/xlite-$ARM"
+[ -s "$K6_DIR/k6.js" ] || die "找不到 $K6_DIR/k6.js"
 
-# ---------------------------------------------------------------- 前置自检
-[ -x "$GATEWAY_DIR/xlite-$ARM" ] || die "找不到 $GATEWAY_DIR/xlite-$ARM"
-[ -s "$CATALOG" ] || die "找不到目录文件 $CATALOG（要指向 127.0.0.1 的那份）"
-grep -q '127\.0\.0\.1' "$CATALOG" || die "$CATALOG 不是指向 127.0.0.1 的版本"
-log "ab_topology: arm=$ARM topo=$TOPOLOGY kb=$KEEP_BODY levels=[$LEVELS] twt=$TWT conns=$CONNS reload=$RELOAD"
 K6_REF=$(docker image inspect -f '{{index .RepoDigests 0}}' "$K6_IMAGE" 2>/dev/null)
 [ -n "$K6_REF" ] || K6_REF=$(docker image inspect -f '{{.Id}}' "$K6_IMAGE" 2>/dev/null)
-log "  k6 镜像=$K6_IMAGE ref=${K6_REF:-n/a}"
-log "  k6.js sha256=$(sha256sum "$K6_DIR/k6.js" 2>/dev/null | cut -c1-16)…"
+log "ab_topology: arm=$ARM kb=$KEEP_BODY levels=[$LEVELS] twt=$TWT conns=$CONNS reload=$RELOAD"
+log "  catalog=$CATALOG  k6=$K6_IMAGE ref=${K6_REF:-n/a}  k6.js sha256=$(sha256sum "$K6_DIR/k6.js" | cut -c1-16)…"
 
-# ---------------------------------------------------------------- 网关
-GW_PORT_DB="$GATEWAY_DIR/$ARM-topo.db"
-rm -f "$GW_PORT_DB"
-( cd /tmp && DATABASE_URL="sqlite:$GW_PORT_DB" "$GATEWAY_DIR/xlite-$ARM" import "$CATALOG" --replace > "$OUT/import.log" 2>&1 ) \
+# ---------------------------------------------------------------- 网关（本机）
+GW_DB="$GATEWAY_DIR/$ARM-topo.db"
+rm -f "$GW_DB"
+( cd /tmp && DATABASE_URL="sqlite:$GW_DB" "$GATEWAY_DIR/xlite-$ARM" import "$CATALOG" --replace > "$OUT/import.log" 2>&1 ) \
   || die "import 失败：$(tail -1 "$OUT/import.log")"
 log "  catalog: $(tail -1 "$OUT/import.log")"
 
-pid=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-[ -n "$pid" ] && { kill "$pid" 2>/dev/null; sleep 2; }
-env DATABASE_URL="sqlite:$GW_PORT_DB" PORT="$PORT" LISTEN_HOST=0.0.0.0 \
+stop_gw() {
+  local p
+  p=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  [ -n "$p" ] && kill "$p" 2>/dev/null
+}
+stop_gw; sleep 2
+env DATABASE_URL="sqlite:$GW_DB" PORT="$PORT" LISTEN_HOST=127.0.0.1 \
     XLITE_UPSTREAM_H2C=1 XLITE_CATALOG_RELOAD_SECS="$RELOAD" \
     TOKIO_WORKER_THREADS="$TWT" XLITE_UPSTREAM_MAX_CONNS_PER_HOST="$CONNS" \
   setsid nohup "$GATEWAY_DIR/xlite-$ARM" > "$OUT/gw.log" 2>&1 < /dev/null &
 for _ in $(seq 1 30); do sleep 1; curl -s -m3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; done
 gwpid=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-case "$gwpid" in ''|*[!0-9]*) die "网关没起来";; esac
-log "  gw: pid=$gwpid backlog=$(ss -lnt "sport = :$PORT" 2>/dev/null | awk 'NR>1{print $3; exit}') health=$(curl -s -m3 "http://127.0.0.1:$PORT/health")"
+case "$gwpid" in ''|*[!0-9]*) die "网关没起来（看 $OUT/gw.log）";; esac
+gw_nofile=$(awk '/Max open files/{print $4}' "/proc/$gwpid/limits" 2>/dev/null)
+log "  gw: pid=$gwpid backlog=$(ss -lnt "sport = :$PORT" 2>/dev/null | awk 'NR>1{print $3; exit}') nofile=$gw_nofile health=$(curl -s -m3 "http://127.0.0.1:$PORT/health")"
+# 让静默封顶变成硬失败：nofile 低于 65536 时，高 VU 档的连接会被悄悄挡住
+case "$gw_nofile" in
+  ''|*[!0-9]*) log "  ⚠️ 读不到网关 nofile，无法确认没有被卡住";;
+  *) [ "$gw_nofile" -lt 65536 ] && die "网关 nofile=$gw_nofile 太小 —— 连接数会被**静默**卡住
+     （实测 nofile=1024 时 4000 VU 只跑出 865 流、qps 掉到 1/4，而 scenario/fail% 全正常）。
+     先 `ulimit -n 1048576` 再起网关。";;
+esac
 
 # ---------------------------------------------------------------- mock 农场 PID
 mapfile -t MPIDS < <(for p in $(expand_ports "$MOCK_PORTS"); do
   docker inspect -f '{{.State.Pid}}' "${MOCK_CONTAINER_PREFIX}$p" 2>/dev/null; done)
-[ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（容器名前缀 $MOCK_CONTAINER_PREFIX）"
+[ "${#MPIDS[@]}" -gt 0 ] || die "拿不到任何 mock 容器 PID（前缀 $MOCK_CONTAINER_PREFIX）"
 log "  mock: ${#MPIDS[@]} 个容器"
 
 # ---------------------------------------------------------------- CPU 采样器
-# 每秒记一次「累计 CPU tick（100 Hz）」：本机网关 + 本机农场（求和）[+ 本机 k6]
-cat > /tmp/ab_topology_sampler.sh <<'SAMPLER'
+# 每秒一行累计 tick（100 Hz）。记下自己的 PID，收尾只 kill 这个 PID
+# （此前用 `pkill -f "ab_topology.*sampler"`，匹配面太宽，会误杀别人 session 的同名采样器）
+# **只采本机的网关与农场**（两列）。k6 不在这里采：它在容器里，`/proc` 采样实测会采到
+# `0.474` / `0.000` 这种假值（采集竞态），所以 k6 的核数一律用运行中 `docker stats`。
+SAMPLER=/tmp/ab_topology_sampler.sh
+cat > "$SAMPLER" <<'SAMPLER_BODY'
 #!/bin/bash
-out="$1"; gw="$2"; k6f="$3"; shift 3
+# $1=out $2=gw_pid ; 其余 = mock 宿主 PID
+out="$1"; gw="$2"; shift 2
 : > "$out"
 while [ -r "/proc/$gw/stat" ]; do
   t=$(date +%s)
   g=$(awk '{print $14+$15}' "/proc/$gw/stat" 2>/dev/null || echo 0)
-  k=0; kp=$(cat "$k6f" 2>/dev/null || echo 0)
-  [ -n "$kp" ] && [ "$kp" != 0 ] && k=$(awk '{print $14+$15}' "/proc/$kp/stat" 2>/dev/null || echo 0)
   f=0
   for p in "$@"; do v=$(awk '{print $14+$15}' "/proc/$p/stat" 2>/dev/null) && f=$((f+v)); done
-  echo "$t $g ${f:-0} ${k:-0}" >> "$out"
+  echo "$t $g ${f:-0}" >> "$out"
   sleep 1
 done
-SAMPLER
-chmod +x /tmp/ab_topology_sampler.sh
-echo 0 > /tmp/ab_topology_k6pid
-setsid nohup bash /tmp/ab_topology_sampler.sh "$OUT/cpu.log" "$gwpid" /tmp/ab_topology_k6pid "${MPIDS[@]}" \
+SAMPLER_BODY
+chmod +x "$SAMPLER"
+SAMPLER_PID=""
+setsid nohup bash "$SAMPLER" "$OUT/cpu.log" "$gwpid" "${MPIDS[@]}" \
   >/dev/null 2>&1 < /dev/null &
+SAMPLER_PID=$!
 sleep 2
+
+cleanup() {
+  [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null
+  docker rm -f abtop-k6 >/dev/null 2>&1
+  stop_gw
+}
+trap cleanup EXIT
 
 cores_between() {  # $1=log $2=列号 $3=t0 $4=t1
   awk -v f="$2" -v a="$3" -v b="$4" '
@@ -207,55 +204,55 @@ cores_between() {  # $1=log $2=列号 $3=t0 $4=t1
     END { if (n>1 && t1>t0) printf "%.2f", (v1-v0)/100/(t1-t0); else print "-" }' "$1"
 }
 
-# ---------------------------------------------------------------- 跑各档
-if [ "$TOPOLOGY" = local ]; then TARGET_HOST=127.0.0.1; else TARGET_HOST=$(hostname -I | awk '{print $1}'); fi
+# ---------------------------------------------------------------- 各档
+FAILED_LEVELS=0
 for L in $LEVELS; do
   t0=$(date +%s)
-  log "level $L 开始（$TOPOLOGY，目标 $TARGET_HOST:$PORT）"
+  log "level $L 开始（同机 loopback，目标 127.0.0.1:$PORT）"
   docker rm -f abtop-k6 >/dev/null 2>&1
-  [ "$TOPOLOGY" = split ] && ssh $SSH_OPTS "$REMOTE_HOST" "docker rm -f abtop-k6 >/dev/null 2>&1" 2>/dev/null
-  K6ARGS=(-d --name abtop-k6 --network=host -m "$K6_MEM" -v "$K6_DIR:/k6"
-    -e "TARGET_URL=http://$TARGET_HOST:$PORT/v1/chat/completions" -e "TOKEN=$TOKEN" -e "MODEL=$MODEL"
-    -e STREAM=true -e IN_TOKENS=100 -e OUT_TOKENS=500 -e "VUS=$L" -e "DURATION=$DURATION" -e "MAX_VUS=$L"
-    -e STREAM_TIMEOUT=600000 -e "WARMUP=$WARMUP" -e "KEEP_BODY=$KEEP_BODY" -e "GRACEFUL_STOP=$GRACEFUL_STOP"
-    "$K6_IMAGE" run --compatibility-mode=base
-    --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js)
-  if [ "$TOPOLOGY" = local ]; then
-    docker run "${K6ARGS[@]}" >/dev/null 2>&1
-    K6HOST=$(hostname); K6NAME=abtop-k6
-  else
-    printf '%q ' "${K6ARGS[@]}" | ssh $SSH_OPTS "$REMOTE_HOST" 'bash -s' >/dev/null 2>&1
-    K6HOST=$REMOTE_HOST; K6NAME=abtop-k6
-  fi
-  if [ "$K6HOST" = "$(hostname)" ]; then
-    k6run() { docker "$@"; }          # 本机
-  else
-    k6run() { ssh $SSH_OPTS "$REMOTE_HOST" "docker $(printf '%q ' "$@")"; }   # 远端
-  fi
-  # ★ 护栏：容器必须真的起来了（否则整轮会静默失败，产出一行假数据）
+  docker run -d --name abtop-k6 --network=host -m "$K6_MEM" -v "$K6_DIR:/k6" \
+    -e "TARGET_URL=http://127.0.0.1:$PORT/v1/chat/completions" \
+    -e "TOKEN=$TOKEN" -e "MODEL=$MODEL" -e STREAM=true \
+    -e IN_TOKENS=100 -e OUT_TOKENS=500 -e "VUS=$L" -e "DURATION=$DURATION" -e "MAX_VUS=$L" \
+    -e STREAM_TIMEOUT=600000 -e "WARMUP=$WARMUP" -e "KEEP_BODY=$KEEP_BODY" \
+    -e "GRACEFUL_STOP=$GRACEFUL_STOP" \
+    "$K6_IMAGE" run --compatibility-mode=base \
+    --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js >/dev/null 2>&1
+
+  # ★ 护栏：容器必须真的起来了。此前把 docker run 的输出丢进 /dev/null，
+  #   而 k6 机上既无镜像也无脚本 ⇒ 每档 42 秒、cores=0、一行指标都没有，**整轮静默失败**。
   ok=0
   for _ in $(seq 1 25); do
-    [ "$(k6run inspect -f '{{.State.Running}}' "$K6NAME" 2>/dev/null)" = "true" ] && { ok=1; break; }
+    [ "$(docker inspect -f '{{.State.Running}}' abtop-k6 2>/dev/null)" = "true" ] && { ok=1; break; }
     sleep 1
   done
   if [ "$ok" != 1 ]; then
+    FAILED_LEVELS=$((FAILED_LEVELS + 1))
     log "  !! level $L 的 k6 容器没起来，记录后跳过"
-    k6run logs "$K6NAME" 2>&1 | tail -6 | sed 's/^/    /' | tee -a "$OUT/progress.log"
-    k6run rm -f "$K6NAME" >/dev/null 2>&1
+    docker logs abtop-k6 2>&1 | tail -6 | sed 's/^/    /' | tee -a "$OUT/progress.log"
+    docker rm -f abtop-k6 >/dev/null 2>&1
     continue
   fi
-  s=$(k6run inspect -f '{{.State.Pid}}' "$K6NAME" 2>/dev/null || echo 0)
-  [ "$TOPOLOGY" = local ] && echo "$s" > /tmp/ab_topology_k6pid
   sleep 20
-  # k6 真值：docker stats 比 /proc 采样稳（/proc 采过假 0）
-  k6cpu=$(k6run stats --no-stream --format '{{.CPUPerc}}' "$K6NAME" 2>/dev/null)
-  k6run wait "$K6NAME" >/dev/null 2>&1
+  # k6 的 CPU 真值：运行中 `docker stats --no-stream`。**不要用 /proc 采样** ——
+  # 在 k6 上采过 0.474 / 0.000 这种假值（采集竞态）。
+  k6cpu=$(docker stats --no-stream --format '{{.CPUPerc}}' abtop-k6 2>/dev/null)
+  docker wait abtop-k6 >/dev/null 2>&1
   t1=$(date +%s)
-  k6run logs "$K6NAME" > "$OUT/$L.log" 2>&1
-  k6run rm -f "$K6NAME" >/dev/null 2>&1
-  echo 0 > /tmp/ab_topology_k6pid
-  log "  $L 结束 dur=$((t1-t0))s  cores: gw=$(cores_between "$OUT/cpu.log" 2 "$t0" "$t1") farm=$(cores_between "$OUT/cpu.log" 3 "$t0" "$t1") k6(本机采样)=$(cores_between "$OUT/cpu.log" 4 "$t0" "$t1") k6(docker stats@运行中)=$k6cpu"
+  docker logs abtop-k6 > "$OUT/$L.log" 2>&1
+  docker rm -f abtop-k6 >/dev/null 2>&1
+  if ! grep -qE "http_reqs\.|iteration_duration\." "$OUT/$L.log" 2>/dev/null; then
+    FAILED_LEVELS=$((FAILED_LEVELS + 1))
+    log "  !! level $L 没有产出指标（k6 异常退出？），跳过"
+    continue
+  fi
+  log "  $L 结束 dur=$((t1-t0))s  cores: gw=$(cores_between "$OUT/cpu.log" 2 "$t0" "$t1") farm=$(cores_between "$OUT/cpu.log" 3 "$t0" "$t1") k6(docker stats@运行中)=$k6cpu"
   grep -E "gateway_overhead_ms|http_req_duration\.|iteration_duration\.|http_reqs\.|http_req_failed" "$OUT/$L.log" \
     | sed "s/^/  $L /" | tee -a "$OUT/progress.log"
 done
+
+if [ "$FAILED_LEVELS" -gt 0 ]; then
+  log "ab_topology 结束：$FAILED_LEVELS 档失败 ⇒ 退出码 2（别让下游把缺档当跑完）"
+  exit 2
+fi
 log "ab_topology 完成"

@@ -10,6 +10,8 @@
 | `link_budget.py` | 链路预算预检（`--selftest` 自证；退出码 2 = LINK-BOUND） |
 | `ab_configs.sh` | **同一份代码里某个旋钮/改动值不值**的 A/B harness（判决指标含网关 CPU）；`CONFIGS` 的短键 `TWT/CONNS/RELOAD` 会映射成真实 env 名，未知键直接非零退出 |
 | `e2e_reload_swap.sh` | **端到端**验证「reload → 换快照 → 读者看到新快照」（`ab_configs.sh` 在目录冻结时走不到那条路径） |
+| `ab_topology.sh` | 判**瓶颈落在网关 / mock 农场 / k6 哪一组**：三组进程分别采 CPU；把三组放同机 loopback 可把 1 GbE 从路径上拿掉。实测结论见 `../../docs/dev/loadtest-newapi-controlled-2026-09.md` §13（**农场是网关的约 5 倍，瓶颈是农场**） |
+| `lib_rig.sh` | 三个 harness 共用的台架互斥锁（`lab_lock`）：锁绑 fd，进程退出/崩溃/`kill -9` 均由内核释放，不留僵尸锁 |
 
 **对标表只报 `ttft / dur / fail / qps / ESTAB / 活跃流`。**
 活跃流用**闭式** `VUS × dur/iter`（见 [`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) §2）；

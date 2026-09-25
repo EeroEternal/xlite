@@ -68,20 +68,11 @@ GW="ssh $SSH_OPTS $GATEWAY_HOST"
 
 mkdir -p "$OUT"
 
-# ---------------------------------------------------------------- 台架互斥
-# 两个 agent session 同时往同一批 mock/网关打流，量出来的就是「谁在抢资源」的函数 ——
-# 直接毁掉结论（CPU 争用、链路争用、端口撞车）。所以开跑前先抢锁。
-# 锁绑在 fd 上：脚本退出、崩溃、被 kill -9 都由内核自动释放，**不会留僵尸锁**
-# （这也是不用「写 PID 文件」方案的原因）。
-# ⚠️ 约定：驱动压测固定用同一台机；只在某台上锁，锁不住从别处起的入口。
-LAB_LOCK=${LAB_LOCK:-$HOME/lab.lock}
-exec 9>"$LAB_LOCK"
-if ! flock -n 9; then
-  echo "✗ 台架被占用：$(cat "$LAB_LOCK" 2>/dev/null)" >&2
-  echo "  确认无人使用后再删锁文件：rm $LAB_LOCK" >&2
-  exit 1
-fi
-printf '%s %s ab_configs arms=%s\n' "${LAB_SESSION:-$(hostname)-$$}" "$(date -Is)" "$ARMS" > "$LAB_LOCK"
+# 台架互斥 —— 与 run_levels.sh / ab_topology.sh 共用同一把锁（见 lib_rig.sh）
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib_rig.sh
+. "$SCRIPT_DIR/lib_rig.sh"
+lab_lock "ab_configs arms=$ARMS" || exit 1
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"; }
 
@@ -160,6 +151,8 @@ case "$1" in
     pid=$(ss -lntp 2>/dev/null | grep ":$port " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
     [ -n "$pid" ] && kill "$pid" 2>/dev/null && sleep 2
     cd "$dir" || exit 1
+    # 网关继承本 shell 的 nofile；ssh 非交互默认只有 1024，会把高 VU 档静默卡住
+    ulimit -n 1048576 2>/dev/null || true
     env DATABASE_URL="sqlite:$dir/$arm.db" PORT="$port" LISTEN_HOST=0.0.0.0 \
         XLITE_UPSTREAM_H2C=1 "$@" \
       setsid nohup "$dir/xlite-$arm" > "$dir/gw-$arm-$port.log" 2>&1 < /dev/null &
@@ -168,7 +161,8 @@ case "$1" in
     done
     pid=$(ss -lntp 2>/dev/null | grep ":$port " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
     bl=$(ss -lnt "sport = :$port" 2>/dev/null | awk 'NR>1{print $3; exit}')
-    echo "pid=$pid backlog=$bl health=$(curl -s -m3 "http://127.0.0.1:$port/health")"
+    nofile=$(awk '/Max open files/{print $4}' "/proc/$pid/limits" 2>/dev/null)
+    echo "pid=$pid backlog=$bl nofile=$nofile health=$(curl -s -m3 "http://127.0.0.1:$port/health")"
     ;;
   cpu)
     pid="$2"; out="$3"; : > "$out"
