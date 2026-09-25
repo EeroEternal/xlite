@@ -119,14 +119,17 @@ for cfg in $CONFIGS; do
     case "$val" in
       ''|*[!0-9]*) echo "✗ 配置 '$kv' 的值必须是十进制整数（非数字会被网关静默丢掉，退回默认）" >&2; exit 2 ;;
     esac
-    if [ "$key" != "RELOAD" ] && [ "$val" -eq 0 ]; then
-      echo "✗ 配置 '$kv' 的值必须 > 0（0 会被网关当成非法值退回默认；只有 RELOAD=0 有意义 = 冻结快照）" >&2
+    # 位数先卡一道：超大数字直接过 `[ -le ]` 会让 `[` 自己报 integer expected 噪音。
+    if [ "${#val}" -gt 5 ]; then
+      echo "✗ 配置 '$kv' 位数超出（≤ 5 位）—— 超范围的值要么被网关静默退回默认，要么让 tokio panic" >&2
       exit 2
     fi
-    # 上界也要查：超出网关 `str::parse` 能表示的范围时同样会**静默**退回默认（与非法字符一样致命）。
     case "$key" in
-      TWT|CONNS) [ "$val" -le 65535 ] || { echo "✗ 配置 '$kv' 非法或超出上界 65535（网关解析失败会静默退回默认）" >&2; exit 2; } ;;
-      RELOAD)    [ "$val" -le 86400 ] || { echo "✗ 配置 '$kv' 超出上界 86400（= 1 天；再大等同于永不重载）" >&2; exit 2; } ;;
+      # tokio 对非法/0 的 TOKIO_WORKER_THREADS 是**启动即 panic**（不是静默退回）；上界只是策略上限。
+      TWT)    [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { echo "✗ 配置 '$kv' 非法（tokio 对非法或 0 值会 panic；上界 65535 为策略上限）" >&2; exit 2; } ;;
+      # 这两个是 `unwrap_or` 静默退回默认：usize 解析失败 → 32 / 5。
+      CONNS)  [ "$val" -ge 1 ] && [ "$val" -le 65535 ] || { echo "✗ 配置 '$kv' 非法或 > 65535（单目的地无意义；解析失败会被网关静默退回 32）" >&2; exit 2; } ;;
+      RELOAD) [ "$val" -le 86400 ] || { echo "✗ 配置 '$kv' 超出上界 86400（= 1 天；再大等同于永不重载）" >&2; exit 2; } ;;
     esac
   done
 done

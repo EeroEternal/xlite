@@ -25,7 +25,8 @@
    峰值逼近 `GATEWAY_BACKLOG` 就是**触顶**的直接证据，会单独告警 —— 这一档量到的是
    连接建立排队，不是网关处理能力。注意 `GATEWAY_BACKLOG` 是监听套接字的 `Send-Q`，
    **不是**内核 `net.core.somaxconn`（libc `SOMAXCONN` 会把 backlog 压到 128）。
-   非 Linux（没有 `ss`）或跨机时该文件是 `unknown`/不存在，表里原样显示，**不会记成 0**。
+   没有 `ss`、采样窗内读不到有效读数（端口未监听/无权限）或跨机时该文件是 `unknown`/不存在，
+   表里原样显示，**不会记成 0**。
 4. **链路预算**：用 `link_budget.py` 判每档是否 LINK-BOUND；任一**有效**档越界就退出码 2、
    **不写 `meta.json`**（因为那量的是网线，不是网关）。
 
@@ -122,7 +123,11 @@ def drop_stale_meta(result_dir: str) -> bool:
     目录不可写等 IO 失败不算致命：打印告警并继续，退出码契约仍由闸门决定。
     """
     path = os.path.join(result_dir, "meta.json")
-    if not os.path.isfile(path):
+    if not os.path.lexists(path):
+        return False
+    if os.path.isdir(path) and not os.path.islink(path):
+        # 契约说的是「旧 meta.json 文件」；目录同名时只告警，不动它。
+        print(f"⚠️ {path} 是目录，不是遗留的报告文件 —— 未删除", file=sys.stderr)
         return False
     try:
         os.remove(path)
@@ -257,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
 
     env = read_env_txt(args.result_dir)
     meta_path = os.path.join(args.result_dir, "meta.json")
+    stale_removed = False   # 只有 REFUSED 路径会去删；这里给默认值，供横幅判断
     if not refused:
         meta = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -279,7 +285,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         with open(meta_path, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
-        stale_removed = False
     else:
         # 同一目录先前跑成功过就会留下一个「有效」的 meta.json —— 被拒时必须清掉，
         # 否则下游按目录取数会拿到过期报告。删不掉也不掩盖闸门结论，只如实说明。
@@ -341,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     if missing_acceptq:
         names = ", ".join(row["level"] for row in missing_acceptq)
         print(f"\n⚠️ accept 队列证据缺失/不可判（{names}）："
-              f"{'本机没有 `ss`（非 Linux？）' if any(row['acceptq_max'] == 'unknown' for row in missing_acceptq) else '未采样/跨机'}"
+              f"{'本机没有 `ss`，或采样窗内读不到有效读数（端口未监听/无权限）' if any(row['acceptq_max'] == 'unknown' for row in missing_acceptq) else '未采样/跨机'}"
               " → backlog 触顶无法判定。", file=sys.stderr)
 
     if bad and not args.allow_fingerprint_mismatch:

@@ -154,9 +154,9 @@ if [ "$VUS" -gt 0 ]; then
     grep -q 'channels +0/~1' "$f" && churn_ok=1
   done
   if [ "$churn_ok" -eq 1 ]; then
-    echo "  ✓ 并发段期间确实发生过换代（churn import 报 channels +0/~1）"
+    echo "  ✓ churn import 确实写入了新路由（channels +0/~1）；网关侧换代由上面同进程的 404→200 断言证明"
   else
-    echo "  ✗ 并发段期间没有任何一次真实换代（churn import 全失败？）—— 这时的 fail 0% 不成立" >&2
+    echo "  ✗ 并发段期间 churn import 没有写入任何新路由（全失败？）—— 这时的 fail 0% 不成立" >&2
     fail=1
   fi
   if ! python3 - "$OUT/k6.json" <<'PY'
