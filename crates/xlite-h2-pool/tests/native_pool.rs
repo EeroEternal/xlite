@@ -547,7 +547,12 @@ async fn stats_track_connections_in_flight_and_dials() {
 /// `SETTINGS_MAX_CONCURRENT_STREAMS` on a live connection — but the protocol
 /// allows a peer to do exactly that at any time, so the frames are written by
 /// hand here. This is the only way to exercise the pool's live-cap handling.
-fn spawn_settings_changing_peer(io: tokio::io::DuplexStream, first: u32, then: u32) {
+fn spawn_settings_changing_peer(
+    io: tokio::io::DuplexStream,
+    first: u32,
+    then: u32,
+    mut raise: tokio::sync::watch::Receiver<bool>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     tokio::spawn(async move {
@@ -565,7 +570,18 @@ fn spawn_settings_changing_peer(io: tokio::io::DuplexStream, first: u32, then: u
 
         let _ = writer.write_all(&settings_frame(first)).await;
         let _ = writer.flush().await;
-        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Wait for the test to ask for the second frame instead of racing a wall
+        // clock: with a fixed `sleep` here, a slow machine can apply the new cap
+        // before the test has even asserted the handshake cap, which is exactly
+        // how this test used to flake. `watch` keeps the current value, so a
+        // signal that arrives before this loop still counts.
+        while !*raise.borrow_and_update() {
+            if raise.changed().await.is_err() {
+                return; // the test dropped the sender; nothing left to serve
+            }
+        }
+
         let _ = writer.write_all(&settings_frame(then)).await;
         let _ = writer.flush().await;
 
@@ -584,15 +600,23 @@ fn settings_frame(max_streams: u32) -> [u8; 15] {
     frame
 }
 
-fn settings_changing_pool(first: u32, then: u32, max_conns: usize) -> (Pool, Arc<AtomicUsize>) {
+/// Returns the pool, the dial counter, and the sender the test uses to release
+/// each peer's *second* SETTINGS frame (see [`spawn_settings_changing_peer`]).
+fn settings_changing_pool(
+    first: u32,
+    then: u32,
+    max_conns: usize,
+) -> (Pool, Arc<AtomicUsize>, tokio::sync::watch::Sender<bool>) {
     let dials = Arc::new(AtomicUsize::new(0));
+    let (raise_tx, raise_rx) = tokio::sync::watch::channel(false);
     let dial: Dial = Arc::new({
         let dials = dials.clone();
         move |_host: String| {
             let dials = dials.clone();
+            let raise_rx = raise_rx.clone();
             Box::pin(async move {
                 let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-                spawn_settings_changing_peer(server_io, first, then);
+                spawn_settings_changing_peer(server_io, first, then, raise_rx);
                 dials.fetch_add(1, Ordering::SeqCst);
                 Ok(Box::new(client_io) as BoxIo)
             })
@@ -605,7 +629,7 @@ fn settings_changing_pool(first: u32, then: u32, max_conns: usize) -> (Pool, Arc
         dial,
         idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
     });
-    (pool, dials)
+    (pool, dials, raise_tx)
 }
 
 /// A peer that lowers `SETTINGS_MAX_CONCURRENT_STREAMS` mid-connection must be
@@ -614,11 +638,15 @@ fn settings_changing_pool(first: u32, then: u32, max_conns: usize) -> (Pool, Arc
 /// exact pathology this pool exists to avoid.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mid_connection_settings_change_is_applied_live() {
-    let (pool, dials) = settings_changing_pool(3, 2, 4);
+    let (pool, dials, raise) = settings_changing_pool(3, 2, 4);
 
     let first = pool.acquire("upstream").await.unwrap();
     assert_eq!(first.max_concurrent_streams(), 3, "handshake cap");
     assert_eq!(dials.load(Ordering::SeqCst), 1);
+
+    // Only now tell the peer to lower the cap; it waits for this signal instead
+    // of a timer, so the handshake-cap assertions above cannot race it.
+    raise.send_replace(true);
 
     // The peer's second SETTINGS frame is processed on a poll of the
     // connection, which the driver task does not need a timer for.
@@ -654,7 +682,7 @@ async fn a_mid_connection_settings_change_is_applied_live() {
 /// not force needless dials.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_raised_settings_cap_is_used_without_dialling_again() {
-    let (pool, dials) = settings_changing_pool(1, 4, 4);
+    let (pool, dials, raise) = settings_changing_pool(1, 4, 4);
 
     let first = pool.acquire("upstream").await.unwrap();
     assert_eq!(first.max_concurrent_streams(), 1);
@@ -664,7 +692,11 @@ async fn a_raised_settings_cap_is_used_without_dialling_again() {
     assert_eq!(second.max_concurrent_streams(), 1);
 
     // Both connections are told the cap is now 4; the pool should notice and
-    // stop dialling for what those connections can already carry.
+    // stop dialling for what those connections can already carry. The raise is
+    // triggered here, *after* both handshake caps were observed, rather than by
+    // a timer inside the peer: a slow machine must not be able to apply the new
+    // cap before the assertions above have run.
+    raise.send_replace(true);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while first.max_concurrent_streams() != 4 {
         assert!(
