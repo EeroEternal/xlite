@@ -1,6 +1,6 @@
 ---
 name: admin-ui-change
-description: Change xrouter Admin UI with progressive reading of docs/design.md chapters. Use for admin pages, components, dialogs, wizards, lists, master-detail, selection styling, settings IA, tokens, or any user-visible admin UI work. Never load every design chapter unless editing the whole system.
+description: Change xlite Admin UI with progressive reading of docs/design.md chapters. Use for admin pages, components, dialogs, wizards, lists, master-detail, selection styling, settings IA, tokens, or any user-visible admin UI work. Never load every design chapter unless editing the whole system.
 ---
 
 # Admin UI change (progressive design docs)
@@ -54,12 +54,6 @@ Surface decisions are **not** free-form: `npm run lint` runs `admin/scripts/chec
 3. `cd admin && npm run lint`
 4. Delivery note: reader job, chapters followed, and any named anti-pattern you avoided.
 5. Mechanical: dialog `max-h-[85vh]`, table scroll inside its container, no layout jump on select.
-6. **Screenshot regression** (required when the visual baseline changes): `e2e/visual/visual.spec.ts` pixel-compares committed Linux baselines (desktop 1440×900 + mobile 390×844, light + dark).
-   - Intended appearance change → regenerate baselines locally on this Linux machine with `scripts/ci_local.sh --visual-update` (or `cd e2e && npm run test:visual:update` after `scripts/ci_db.sh up` and an admin build with `VITE_PUBLIC_LANDING=1`), commit the changed `*-linux.png` into the same change, and re-run the compare.
-   - Generate baselines only on Linux: Playwright suffixes snapshots per platform (`-linux` is the committed one) and font rasterisation differs, so a macOS/Windows run cannot match.
-   - Adding a case: append it to the spec's case list; determinism is mandatory (frozen clock, normalised fixture timestamps, no hover left over from the previous action, animations disabled).
-   - Copy that changes on every release (the help card's version summary is the known one) must be **masked**, not turned into a baseline refresh: that string's correctness belongs to `scripts/check_release_sync.sh` (four mechanical checks), while pixel comparison keeps guarding the card's presence, badge, layout and styling. Assert the mask locator count so a mask can never silently degrade into an empty set.
-   - A mask paints the **element's box**, so masking only helps while that box keeps its geometry - a shorter or longer copy changes the painted area and fails the baseline anyway. Reserve the box (fixed min-height plus a clamp for the maximum) and assert it in the test, as the help card does. Without that, every release with a different-length summary still needs a baseline refresh.
 
 ## When promoting new UI lessons
 Add the lesson to the matching chapter under `docs/design/` (or Hard rules in the entry). Update this routing table if a new file appears. Mirror this skill to `.agents/skills/admin-ui-change/SKILL.md`.
