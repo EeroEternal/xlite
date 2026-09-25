@@ -125,8 +125,10 @@ lab_lock "ab_topology" || exit 1
 #   子进程一律用 `9>&-` 显式关掉锁 fd（不然网关活着就等于替我们攥着锁）。
 SAMPLER_PID=""
 GW_STARTED=0
-# 改了农场 batch 就在这里记下原值，收尾还原（24 个 mock 是**共享**的）
-MOCK_BATCH_RESTORE=""
+# 逐口原值：**必须在这里就声明** —— cleanup 在退出时读它，而 `die` 可能在本文件任何一行触发
+# （例如 CATALOG 自检在农场那段之前）。bash 3.2 下 `${#unset[@]}` 配 `set -u` 会直接报错，
+# 那就把"收尾"变成"再炸一次"。
+declare -A FARM_BATCH_SAVED=()
 stop_gw() {
   # 只在**本次真的起过**网关时才杀。否则前置自检 die（例如 CATALOG 写错）会顺手
   # 杀掉 lab 上别人正监听 $PORT 的网关。
@@ -136,12 +138,13 @@ stop_gw() {
   [ -n "$p" ] && kill "$p" 2>/dev/null
 }
 restore_mock_batch() {
-  [ -n "$MOCK_BATCH_RESTORE" ] || return 0
+  [ "${#FARM_BATCH_SAVED[@]}" -gt 0 ] || return 0
   local p
-  for p in $(expand_ports "$MOCK_PORTS"); do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH_RESTORE" >/dev/null 2>&1
+  for p in "${!FARM_BATCH_SAVED[@]}"; do
+    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=${FARM_BATCH_SAVED[$p]}" >/dev/null 2>&1
   done
-  printf '[%s] mock _config: 已还原 batch=%s\n' "$(date +%H:%M:%S)" "$MOCK_BATCH_RESTORE"
+  # 走 log()：还原这件事必须落在 progress.log（工件）里，不能只在 stdout
+  log "  mock _config: 已按口还原 batch（${#FARM_BATCH_SAVED[@]} 口）"
 }
 cleanup() {
   [ -n "${SAMPLER_PID:-}" ] && kill "$SAMPLER_PID" 2>/dev/null
@@ -215,30 +218,38 @@ log "  mock: ${#MPIDS[@]} 个容器"
 # 拿不到读数时明说"unknown"，不要假装是 1。
 MOCK_CLAIM_BEFORE=""
 n_ports=0; n_before=0
+seen_batches=""
 for p in $(expand_ports "$MOCK_PORTS"); do
   n_ports=$((n_ports + 1))
   b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
-  [ -n "$b" ] && { n_before=$((n_before + 1)); [ -z "$MOCK_CLAIM_BEFORE" ] && MOCK_CLAIM_BEFORE="$b"; }
+  if [ -n "$b" ]; then
+    n_before=$((n_before + 1))
+    FARM_BATCH_SAVED[$p]="$b"
+    case " $seen_batches " in *" $b "*) ;; *) seen_batches="$seen_batches $b" ;; esac
+  fi
 done
+MOCK_CLAIM_BEFORE=${seen_batches# }; MOCK_CLAIM_BEFORE=${MOCK_CLAIM_BEFORE%% *}
 if [ "$n_before" -eq 0 ]; then
   log "  农场口径: batch=unknown（$n_ports 个口都没读到）"
 elif [ "$n_before" -eq "$n_ports" ]; then
   log "  农场口径: batch=${MOCK_CLAIM_BEFORE}（$n_before/$n_ports 口）"
-  [ "$MOCK_CLAIM_BEFORE" = "1" ] || log "  ⚠️ 这不是客户基线 1 —— 本轮是**台架口径**，不能与对标数据混比（§14）"
 else
   log "  农场口径: batch=${MOCK_CLAIM_BEFORE}（只读到 $n_before/$n_ports 口 ⇒ ⚠️ 各口可能不一致，本轮不可比）"
+fi
+# **不要**把告警押在"所有口都读到"上：恰恰是有口读不到时最容易留下脏状态。
+if [ -n "${seen_batches}" ] && [ "${seen_batches}" != "1" ]; then
+  log "  ⚠️ 农场 batch=[${seen_batches}] 不是客户基线 1 —— 本轮是**台架口径**，不能与对标数据混比（§14）"
 fi
 
 # 只在显式给了 `MOCK_BATCH` 时才动农场配置（留空 = 一个字节都不改）。下发后**必须校验回读**：
 # `_config` 是静默的，写错参数名不会报错，只会让"我以为我设了 batch"变成假结论
-# （同类坑见 §13.6 与 `map_cfg_key`）。收尾时**还原**（见 cleanup）。
+# （同类坑见 §13.6 与 `map_cfg_key`）。收尾**按口还原**（见 cleanup）。
 if [ -n "${MOCK_BATCH}" ]; then
   case "${MOCK_BATCH}" in
     ''|*[!0-9]*) die "MOCK_BATCH 必须是十进制整数（拿到 '${MOCK_BATCH}'）" ;;
   esac
-  [ "$n_ports" -gt 0 ] || die "MOCK_PORTS='$MOCK_PORTS' 展开后为空"
   for p in $(expand_ports "$MOCK_PORTS"); do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1
+    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=${MOCK_BATCH}" >/dev/null 2>&1
   done
   n_ok=0
   for p in $(expand_ports "$MOCK_PORTS"); do
@@ -247,8 +258,8 @@ if [ -n "${MOCK_BATCH}" ]; then
     esac
   done
   log "  mock _config: batch=${MOCK_BATCH}（回读生效 $n_ok/$n_ports 口）"
+  # 收尾**无条件**按口还原（写已经发生了）；失败时更要还原，所以这条在 die 之前
   [ "$n_ok" -eq "$n_ports" ] || die "batch=${MOCK_BATCH} 没有在所有 mock 上生效（$n_ok/${n_ports}）—— 静默失效会产出假结论"
-  [ "$n_before" -eq "$n_ports" ] && MOCK_BATCH_RESTORE="$MOCK_CLAIM_BEFORE"
 fi
 
 # ---------------------------------------------------------------- CPU 采样器

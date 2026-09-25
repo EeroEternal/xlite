@@ -159,6 +159,22 @@ mkdir -p "$RESULT_DIR"
 # 台架互斥 —— 与 ab_configs.sh / ab_topology.sh 共用同一把锁（见 lib_rig.sh）
 lab_lock "run_levels levels=$LEVELS" || exit 1
 
+# ---------------------------------------------------------------- 农场还原
+# 本脚本也会写那 24 个**共享** mock（`MOCKS` + `MOCK_BATCH`），所以和另两个 harness 同一纪律：
+# 逐口记住原值、收尾按口还原。不还原的话，一次 `MOCK_BATCH=10` 的产能跑会把台架永久留在
+# 台架口径上，而下一个"不动农场"的 session 会静默量到相反的口径（§14）。
+# `set -euo pipefail` 下数组必须显式声明（`${#unset[@]}` 会报错），且 trap 里每条都要 `|| true`。
+declare -A FARM_BATCH_SAVED=()
+restore_farm() {
+  [ "${#FARM_BATCH_SAVED[@]}" -gt 0 ] || return 0
+  local h
+  for h in "${!FARM_BATCH_SAVED[@]}"; do
+    curl -s -m 3 -X POST "http://$h/_config?batch=${FARM_BATCH_SAVED[$h]}" >/dev/null 2>&1 || true
+  done
+  printf '[%s] mock _config: 已按口还原 batch（%s 口）\n' "$(date +%H:%M:%S)" "${#FARM_BATCH_SAVED[@]}"
+}
+trap restore_farm EXIT
+
 # k6 版本**只能这样拿**：`k6 run` 的 banner 不含版本行（不加 --verbose 时），所以从运行日志里
 # grep 永远得到空值。docker 模式直接用镜像自报。
 if [ "$K6_RUNNER" = local ]; then
@@ -182,24 +198,34 @@ if [ -n "$MOCKS" ]; then
   case "${MOCK_BATCH}" in
     ''|*[!0-9]*) printf '✗ MOCK_BATCH 必须是十进制整数（拿到 %s）\n' "'$MOCK_BATCH'" >&2; exit 2 ;;
   esac
+  # 端口展开与另两个 harness 共用同一个函数（区间与逗号列表都收）
   case "$MOCKS" in
-    [0-9]*-[0-9]*) hosts=$(seq "${MOCKS%-*}" "${MOCKS#*-}" | sed 's|^|127.0.0.1:|') ;;
+    [0-9]*-[0-9]*) hosts=$(expand_ports "$MOCKS" | sed 's|^|127.0.0.1:|') ;;
     *) hosts=$(printf '%s' "$MOCKS" | tr ',' ' ') ;;
   esac
-  for host in $hosts; do
-    curl -s -m 3 -X POST "http://$host/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true
+  n_all=0
+  for h in $hosts; do n_all=$((n_all + 1)); done
+  # `MOCKS=','` 之类会展开成空白 ⇒ 循环 0 次 ⇒ 下面 `n_ok -eq n_all` 是 0 == 0 **空转通过**
+  [ "$n_all" -gt 0 ] || { printf '✗ MOCKS=%s 展开后一个口都没有\n' "$MOCKS" >&2; exit 2; }
+  # 先逐口记原值（收尾还原靠它）
+  for h in $hosts; do
+    b=$(curl -s -m 3 -X POST "http://$h/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9' || true)
+    [ -n "$b" ] && FARM_BATCH_SAVED[$h]="$b"
   done
-  n_ok=0; n_all=0
-  for host in $hosts; do
-    n_all=$((n_all + 1))
-    case "$(curl -s -m 3 -X POST "http://$host/_config" 2>/dev/null)" in
+  for h in $hosts; do
+    curl -s -m 3 -X POST "http://$h/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true
+  done
+  n_ok=0
+  for h in $hosts; do
+    case "$(curl -s -m 3 -X POST "http://$h/_config" 2>/dev/null)" in
       *"\"batch\":$MOCK_BATCH}"*) n_ok=$((n_ok + 1)) ;;
     esac
   done
   log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS batch=${MOCK_BATCH}（回读生效 $n_ok/$n_all 口）"
-  # `n_all` 为 0 说明 MOCKS 展开了但一个口都没有 ⇒ 不能让守卫空转通过
-  { [ "$n_all" -gt 0 ] && [ "$n_ok" -eq "$n_all" ]; } \
-    || { printf '✗ mock 配置未在所有口生效（%s/%s）—— 静默失效会产出假结论\n' "$n_ok" "$n_all" >&2; exit 2; }
+  # **有意 fail-closed**：以前这一整段静默吞掉失败（`|| true`），于是"以为配好了"而实际只配了
+  # 一部分，跑出来的表照样进工件。压测台架宁可**开局就死**，也不要出一份口径不明的报告：
+  # 这里在任何压测开始之前，代价只是一次 ssh，而不是一轮几十分钟的跑数。
+  [ "$n_ok" -eq "$n_all" ] || { printf '✗ mock 配置未在所有口生效（%s/%s）—— 静默失效会产出假结论\n' "$n_ok" "$n_all" >&2; exit 2; }
 fi
 
 # ---------------------------------------------------------------- 网关套接字（同机时才拿得到）

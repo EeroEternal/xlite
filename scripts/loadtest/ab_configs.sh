@@ -127,45 +127,60 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"
 #      把 `batch=10` 留在那里会让下一个"不动农场"的 session 静默量到相反的口径。
 CUR_PORT=""
 K6_PID=""
-FARM_BATCH_BEFORE=""
+# 逐口记原值：农场可能**各口不一致**（别人只改了一部分），所以还原必须按口来，
+# 不能拿"第一个读到的值"回写所有口（那会静默抹掉别的口的值）。
+declare -A FARM_BATCH_SAVED=()
 cleanup() {
   trap - EXIT
   [ -n "$K6_PID" ] && kill "$K6_PID" 2>/dev/null
   docker rm -f ab_configs_k6 >/dev/null 2>&1
   [ -n "$CUR_PORT" ] && $GW "bash /tmp/ab_gw.sh stop '$CUR_PORT'" >/dev/null 2>&1
-  # 还原农场：只在**确实改过**时才回写
-  if [ -n "$FARM_BATCH_BEFORE" ]; then
-    for p in $(expand_ports "$MOCK_PORTS"); do
-      curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$FARM_BATCH_BEFORE" >/dev/null 2>&1
+  # 还原农场：**按口**回写，且只要**曾经写过**就还原 —— 不押在"最后验成功了"上。
+  # （守卫失败/有口读不到时写入早已发生，那时不还原就会把 24 个 mock 永久留在台架口径上；
+  #   这正是复评第 2 轮指出的洞。）
+  if [ "${#FARM_BATCH_SAVED[@]}" -gt 0 ]; then
+    for p in "${!FARM_BATCH_SAVED[@]}"; do
+      curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=${FARM_BATCH_SAVED[$p]}" >/dev/null 2>&1
     done
-    printf '  mock _config: 已还原 batch=%s\n' "$FARM_BATCH_BEFORE"
+    log "  mock _config: 已按口还原 batch（${#FARM_BATCH_SAVED[@]} 口）"
   fi
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------- 农场配置（拿锁之后）
 # `_config` 是**静默**的：参数名写错不报错，只会把「我以为我设了 batch」变成假结论。
-# 所以：**先回读**当前值（无论改不改，都写进日志 —— 否则工件里看不出这一轮跑的是什么口径），
-# 校验格式，下发，再回读校验，并在收尾时还原。
+# 所以：**先逐口回读**（无论改不改都写进日志 —— 否则工件里看不出这一轮跑的是什么口径），
+# 校验格式，下发，再回读校验，并在收尾**按口**还原。
 MOCK_PORTS_LIST=$(expand_ports "$MOCK_PORTS")
-[ -n "$MOCK_PORTS_LIST" ] || { printf '✗ MOCK_PORTS=%s 展开后为空（支持 "4101-4124" 或 "4101,4102"）\n' "$MOCK_PORTS" >&2; exit 2; }
+n_ports=0
+for p in $MOCK_PORTS_LIST; do n_ports=$((n_ports + 1)); done
+# ⚠️ 必须有这一条：`MOCK_PORTS=','` 之类会展开成**空白**，循环 0 次，于是下面
+# `n_ok -eq n_ports` 是 **0 == 0 空转通过**（复评第 2 轮指出：我上一版只在注释里
+# 声称有这道守卫，代码里并没有）。
+[ "$n_ports" -gt 0 ] || { printf '✗ MOCK_PORTS=%s 展开后一个端口都没有（支持 "4101-4124" 或 "4101,4102"）\n' "$MOCK_PORTS" >&2; exit 2; }
 
-n_ports=0; n_before=0; batch_before=""
+n_before=0; seen_batches=""
 for p in $MOCK_PORTS_LIST; do
-  n_ports=$((n_ports + 1))
   b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
-  [ -n "$b" ] && { n_before=$((n_before + 1)); [ -z "$batch_before" ] && batch_before="$b"; }
+  if [ -n "$b" ]; then
+    n_before=$((n_before + 1))
+    FARM_BATCH_SAVED[$p]="$b"
+    case " $seen_batches " in *" $b "*) ;; *) seen_batches="$seen_batches $b" ;; esac
+  fi
 done
-log "农场现状: batch=${batch_before}（$n_before/$n_ports 口读到）$([ "$n_before" -eq "$n_ports" ] || echo '  ⚠️ 有口没读到，下面若有写入只按读到的判断')"
-# 没让我们改，但农场不在客户基线 1 上 ⇒ **必须说出来**，否则下一轮会静默量到别的口径
-if [ -z "$MOCK_BATCH" ] && [ "$n_before" -eq "$n_ports" ] && [ "$batch_before" != "1" ]; then
-  log "  ⚠️ 农场 batch=${batch_before}（**不是客户基线 1**）—— 这一轮是台架口径，不能与对标数据混比（见 §14）"
+seen_batches=${seen_batches# }
+log "农场现状: batch=[${seen_batches:-unknown}]（$n_before/$n_ports 口读到）$([ "$n_before" -eq "$n_ports" ] || echo '  ⚠️ 有口没读到')"
+# 没让我们改，但农场不在客户基线 1 上 ⇒ **必须说出来**，否则下一轮会静默量到别的口径。
+# **不要**把这条押在"所有口都读到"上：恰恰是有口读不到时最容易留下脏状态（复评第 2 轮）。
+if [ -z "${MOCK_BATCH}" ] && [ -n "$seen_batches" ] && [ "$seen_batches" != "1" ]; then
+  log "  ⚠️ 农场 batch=[$seen_batches] 不是客户基线 1 —— 这一轮是**台架口径**，不能与对标数据混比（§14）"
 fi
 
 if [ -n "${MOCK_BATCH}" ]; then
   case "${MOCK_BATCH}" in
     ''|*[!0-9]*) printf '✗ MOCK_BATCH 必须是十进制整数（拿到 %s）\n' "'$MOCK_BATCH'" >&2; exit 2 ;;
   esac
+  # 只还原**我们确实写过**的口（读不到原值的口不碰：写它也没意义，且 restore 无值可回）
   for p in $MOCK_PORTS_LIST; do
     curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=$MOCK_BATCH" >/dev/null 2>&1
   done
@@ -176,10 +191,8 @@ if [ -n "${MOCK_BATCH}" ]; then
     esac
   done
   log "  mock _config: batch=${MOCK_BATCH}（回读生效 $n_ok/$n_ports 口）"
-  # ⚠️ 守卫不能写成 `[ "$n_ok" -eq "$n_ports" ]` 就完事：端口展开为空时那是 **0 == 0 空转通过**。
-  # `n_ports` 上面已判过非空，这里再显式要求「全部生效」。
+  # 收尾**无条件**还原（写已经发生了）；失败时更要还原，所以这条在 exit 之前
   [ "$n_ok" -eq "$n_ports" ] || { log "  ✗ batch=$MOCK_BATCH 未在所有 mock 上生效（$n_ok/${n_ports}）—— 静默失效会产出假结论"; exit 2; }
-  [ "$n_before" -eq "$n_ports" ] && FARM_BATCH_BEFORE="$batch_before"
 fi
 
 md5_of() {
