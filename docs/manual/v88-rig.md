@@ -94,12 +94,14 @@ k6 run --compatibility-mode=base \
 
 | 闸门 | 判据 | 失败 |
 | --- | --- | --- |
-| preflight | `k6.js` 是仓库版（md5 + sha256 打印 + `KEEP_SAMPLE` / `GRACEFUL_STOP` 特征） | exit 3 |
-| 每档指纹 | `checks_total / http_reqs` = **2.00**（±0.01）且日志头 `gracefulStop: 10m0s` | exit 3 |
-| 链路预算 | `活跃流 = VUS × dur/iter`（闭式，见 §2），[`link_budget.py`](../../scripts/loadtest/link_budget.py) 判 `LINK-BOUND` | exit 2 |
-| accept 队列 | 同机时采样监听套接字 `Recv-Q` 峰值，逼近 `GATEWAY_BACKLOG` 即告警触顶 | 告警 |
+| preflight | `k6.js` 是仓库版（md5 + sha256 打印 + `KEEP_SAMPLE` / `GRACEFUL_STOP` 特征） | exit 3，未开跑 |
+| 每档指纹 | `checks_total / http_reqs` = **2.00**（±0.01）且日志头 `gracefulStop` = **期望值**（默认 `10m0s`；`run_levels.sh` 按 `GRACEFUL_STOP` 透传，手工调 `report.py` 用 `--expect-graceful-stop`） | 该档标 **`INVALID`**；exit 3 |
+| 链路预算 | `活跃流 = VUS × dur/iter`（闭式，见 §2），[`link_budget.py`](../../scripts/loadtest/link_budget.py) 判 `LINK-BOUND` | **REFUSED**；exit 2 |
+| accept 队列 | 同机时采样监听套接字 `Recv-Q` 峰值，逼近 `GATEWAY_BACKLOG` 即告警触顶（需要 Linux 的 `ss`；没有则记 `unknown`，**不记 0**） | 告警 |
 
-每个结果目录必须自带：`env.txt`（网关镜像、k6 镜像 **ID**/digest、`k6.js` md5+sha256、`TOKIO_WORKER_THREADS`、`XLITE_CATALOG_RELOAD_SECS`、`GATEWAY_BACKLOG` 及其来源、`somaxconn`、档位）、每档 `<LEVEL>.log` + `<LEVEL>.summary.json`（+ 同机时的 `<LEVEL>.acceptq`）、`meta.json`（含每档活跃流与预算判读）。**没有 `meta.json` 或标了 `INVALID` 的档位不许进对标表。**
+**闸门不过 = REFUSED = 不写 `meta.json`**（"拒绝出报告"的机械含义），只打印诊断表；标了 `INVALID` 的档不进对标表、也不参与链路预算闸门。诊断需要绕过时用 `--allow-linkbound` / `--allow-fingerprint-mismatch`，报告头会标注。
+
+每个结果目录必须自带：`env.txt`（网关镜像、k6 镜像 **ID**/digest、`k6` 版本、`k6.js` md5+sha256、`TOKIO_WORKER_THREADS`、`XLITE_CATALOG_RELOAD_SECS`、`GATEWAY_BACKLOG` 及其来源、`somaxconn`、档位）、每档 `<LEVEL>.log` + `<LEVEL>.summary.json`（+ 同机时的 `<LEVEL>.acceptq`）、`meta.json`（含每档活跃流与预算判读）。**没有 `meta.json` 或标了 `INVALID` 的档位不许进对标表。**
 
 > `GATEWAY_BACKLOG` 记的是**监听套接字自己的 `Send-Q`**，不是内核 `net.core.somaxconn`：
 > libc `SOMAXCONN` 默认 128，`TcpListener::bind` 用的就是它，`somaxconn` 再大也压不上去。
@@ -173,10 +175,11 @@ RST 来自套接字打满，不是业务码：
 
 0.2.0 现场 RST：backlog 还是 libc 128，爬坡丢 SYN。换 0.3.0 + 上面内核参数。仍出现「活 150–345s 再 reset」时查 HAProxy/中间设备，不要用 429 挡。
 
-> 上一条说的是**爬坡**（1000→31000）丢 SYN，与**平推低载**是两回事：平推 1000 VU 实测
-> `TCP_NODELAY` 只买中位数（p50 −6.6% / p90 −16.7%，对 p99 无效），
-> 尾部（p90/p95/p99 −9~13%）来自 0.3.0 相对 0.2.0 的**其余 13 项改动整体**，
-> **归不到 backlog 或零拷贝任何单项**。见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §11.4。
+> 上一条说的是**爬坡**（1000→31000）丢 SYN，与**平推低载**是两回事。平推那轮的判读已按
+> [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §11.7.4 更新：
+> **`TCP_NODELAY` 全分位有效（−9% ~ −22%，✅ 复现可承诺）**；「0.3.0 相对 0.2.0 把尾部压低
+> 10–13%」**❌ 已撤回**（换窗口未复现，`A1→A2` 在 1000 VU 测不出收益）；**backlog 65535 在
+> ≤1000 VU 无延迟贡献、在 4000 VU 是并发上限杠杆**（128 → 34.6% 失败）。判读纪律见 §9.1。
 
 ### 不要提前写 200 / SSE ping
 
@@ -318,7 +321,7 @@ DATABASE_URL=sqlite:$A.db PORT=$PORT LISTEN_HOST=0.0.0.0 \
 ss -lnt | grep ":$PORT"        # Send-Q = 128（A0/A1）或 65535（D/A2）
 
 # ★ 必查：部署/跑臂后核对版本（/health 免鉴权，带上 version 字段）
-curl -s http://10.99.255.101:$PORT/health   # {"status":"ok","gateway":"xlite","version":"…"}
+curl -s http://10.99.255.101:$PORT/health   # {"gateway":"xlite","status":"ok","version":"…"}（键序不保证）
 ```
 
 **三道机械检查凑成一套「你以为是那个、其实是那个」的验证**：`ss -lnt` 核 backlog（臂的属性）、
