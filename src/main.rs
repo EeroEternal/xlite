@@ -119,6 +119,7 @@ async fn run_server() -> Result<()> {
         redis = config.redis_url.is_some(),
         database = %config.database_url,
         max_conns = config.max_conns_per_host,
+        upstream_ttft_header = config.upstream_ttft_header,
         "starting"
     );
     if config.admin_password == "admin" {
