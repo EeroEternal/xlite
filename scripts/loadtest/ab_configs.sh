@@ -162,6 +162,9 @@ case "$1" in
     pid=$(ss -lntp 2>/dev/null | grep ":$port " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
     bl=$(ss -lnt "sport = :$port" 2>/dev/null | awk 'NR>1{print $3; exit}')
     nofile=$(awk '/Max open files/{print $4}' "/proc/$pid/limits" 2>/dev/null)
+    # 网关继承本 shell 的 nofile：ssh 默认 1024 会把高 VU 档**静默**卡住，
+    # 表现是"两臂无差异"这种假结论。所以这里也硬判，别只 echo。
+    case "$nofile" in ''|*[!0-9]*) : ;; *) [ "$nofile" -lt 65536 ] && { echo "START_FAILED nofile=$nofile 太小"; exit 1; } ;; esac
     echo "pid=$pid backlog=$bl nofile=$nofile health=$(curl -s -m3 "http://127.0.0.1:$port/health")"
     ;;
   cpu)

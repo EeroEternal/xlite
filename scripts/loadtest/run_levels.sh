@@ -131,7 +131,10 @@ start_accept_sampler() {
       esac
       sleep 0.2
     done
-  ) >/dev/null 2>&1 &
+    # `9>&-` 不可少：采样器是**后台子进程**，继承锁 fd 就会替 driver 继续持有台架锁。
+    # 采样窗是 WARMUP+STABLE+60（默认 390s）⇒ driver 被 kill -9 时锁被攥住最长 6.5 分钟，
+    # 与 lib_rig.sh / README / changelog 那句「kill -9 由内核释放、不留僵尸锁」直接矛盾。
+  ) >/dev/null 2>&1 9>&- &
   printf '%s' "$!"
 }
 
@@ -225,6 +228,8 @@ for level in $LEVELS; do
   sampler_pid=""
   if [ -n "$GW_PORT" ]; then
     # 采样窗只是上界：k6 一结束就把采样器 kill 掉（采样器每 0.2s 增量落盘，见上）。
+    # `9>&-`：采样器是后台子进程，继承锁 fd 就会替 driver 继续持有台架锁
+    # （采样窗默认 30+300+60=390s ⇒ driver 被 kill -9 后锁被攥住 6.5 分钟）
     sampler_pid=$(start_accept_sampler "$GW_PORT" "$((WARMUP_SECS + STABLE_SECS + 60))" "$RESULT_DIR/$level.acceptq")
   fi
   run_k6 "$level" || log "level $level k6 退出码非 0（保留日志，交由 report.py 判定）"

@@ -105,7 +105,11 @@ lab_lock "ab_topology" || exit 1
 #   ① 占着 $PORT 的孤儿网关，② 该网关继承了 fd 9 ⇒ **台架锁被永久持有**。
 #   子进程一律用 `9>&-` 显式关掉锁 fd（不然网关活着就等于替我们攥着锁）。
 SAMPLER_PID=""
+GW_STARTED=0
 stop_gw() {
+  # 只在**本次真的起过**网关时才杀。否则前置自检 die（例如 CATALOG 写错）会顺手
+  # 杀掉 lab 上别人正监听 $PORT 的网关。
+  [ "$GW_STARTED" = 1 ] || return 0
   local p
   p=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
   [ -n "$p" ] && kill "$p" 2>/dev/null
@@ -157,6 +161,7 @@ env DATABASE_URL="sqlite:$GW_DB" PORT="$PORT" LISTEN_HOST=127.0.0.1 \
     XLITE_UPSTREAM_H2C=1 XLITE_CATALOG_RELOAD_SECS="$RELOAD" \
     TOKIO_WORKER_THREADS="$TWT" XLITE_UPSTREAM_MAX_CONNS_PER_HOST="$CONNS" \
   setsid nohup "$GATEWAY_DIR/xlite-$ARM" > "$OUT/gw.log" 2>&1 < /dev/null 9>&- &
+GW_STARTED=1
 for _ in $(seq 1 30); do sleep 1; curl -s -m3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; done
 gwpid=$(ss -lntp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
 case "$gwpid" in ''|*[!0-9]*) die "网关没起来（看 $OUT/gw.log）";; esac
