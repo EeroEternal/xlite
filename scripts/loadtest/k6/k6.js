@@ -35,8 +35,9 @@ var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || '1');
 var ERR_SAMPLE = parseFloat(__ENV.ERR_SAMPLE || '0.01');    // 失败响应体采样率(默认1%)
 
 var ttftMs = new metricsMod.Trend('ttft_ms');
-// 响应头拆解：不依赖 KEEP_BODY，每请求各 1 个样本（远小于 chunk 指标）。
-var queueWaitMs = new metricsMod.Trend('queue_wait_ms');
+// 响应头拆解（不依赖 KEEP_BODY，每请求各 1 个样本）：只在网关真的会发对应头时才有值。
+// `x-xlite-upstream-ttft-ms` 需要网关侧 XLITE_UPSTREAM_TTFT_HEADER=1（诊断用，对标跑数时关）；
+// `retry-after` 是上游 429 才会带的。
 var upstreamTtftMs = new metricsMod.Trend('upstream_ttft_ms');
 var retryAfterS = new metricsMod.Trend('retry_after_s');
 // 失败响应体（仅 ERR_SAMPLE 采样）：区分拒绝原因
@@ -142,7 +143,6 @@ function doRequest() {
   });
 
   ttftMs.add(res.timings.waiting);
-  addHeaderTrend(queueWaitMs, res, 'x-xlite-queue-wait-ms');
   addHeaderTrend(upstreamTtftMs, res, 'x-xlite-upstream-ttft-ms');
   addHeaderTrend(retryAfterS, res, 'retry-after');
 
@@ -182,6 +182,8 @@ function doRequest() {
     });
   }
 
+  // 逐字复刻客户原件的圈间空档：`PICK_INTERVAL` 未传时默认 1，任何 >0 的值都只走
+  // `sleep(0)` —— 它不是"间隔"旋钮，保留它只为与客户脚本逐行同构（对标口径要求）。
   if (parseInt(__ENV.PICK_INTERVAL || '1', 10) > 0) k6mod.sleep(0);
 }
 

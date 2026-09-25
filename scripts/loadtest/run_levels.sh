@@ -20,6 +20,9 @@
 #   MODEL=mock-model      LAB 默认；实验室 YAML 里模型名可能是 mock
 #   LEVELS="1000 4000 10000 31000"   档位（VU）
 #   STABLE=300s WARMUP=30            每档稳态 / 爬坡
+#   GRACEFUL_STOP=600s               透传给 k6 的收尾时间。**改了它，指纹期望值也要跟着改**：
+#                                    本脚本把同一个值传给 report.py --expect-graceful-stop，
+#                                    所以 `GRACEFUL_STOP=30s` 不会被误判成「脚本被换过」。
 #   IN_TOKENS=100 OUT_TOKENS=500     与 B 组对齐
 #   K6_RUNNER=docker|local           local 用本机 k6（调试用），docker 用 K6_IMAGE
 #   K6_IMAGE=grafana/k6:latest       建议钉 digest：grafana/k6@sha256:…
@@ -54,6 +57,7 @@ OUT_TOKENS=${OUT_TOKENS:-500}
 LEVELS=${LEVELS:-"1000 4000 10000 31000"}
 STABLE=${STABLE:-300s}
 WARMUP=${WARMUP:-30}
+GRACEFUL_STOP=${GRACEFUL_STOP:-600s}
 RESULT_DIR=${RESULT_DIR:-$REPO_ROOT/scripts/loadtest/results/$(date -u +%Y%m%d-%H%M%S)}
 MOCKS=${MOCKS:-}
 MOCK_TTFT=${MOCK_TTFT:-500}
@@ -100,7 +104,16 @@ listen_backlog_of() { ss -lnt "sport = :$1" 2>/dev/null | awk 'NR>1{print $3; ex
 # 峰值逼近 backlog 就是触顶，与「负载高低」无关。$1=端口 $2=秒数 $3=输出文件
 start_accept_sampler() {
   local port="$1" secs="$2" out="$3" n
+  # `ss` 是 Linux 工具。没有它（macOS 开发机）就记 `unknown`，**绝不能记 0** ——
+  # 0 会被读成「队列从未触顶」，那是假证据。
+  if ! command -v ss >/dev/null 2>&1; then
+    printf 'unknown\n' > "$out"
+    return 0
+  fi
   n=$(( secs * 5 ))
+  # ⚠️ 后台子 shell **必须重定向 stdout**：否则它继承 `$( )` 的管道，命令替换要等整个
+  # 采样窗结束才返回 —— k6 会在采样跑完之后才开打，`.acceptq` 记的是空载网关，每档白等
+  # 一个采样窗（实测最小复现 2.17s vs 重定向后 0.01s）。
   (
     max=0
     for _ in $(seq 1 "$n"); do
@@ -109,7 +122,7 @@ start_accept_sampler() {
       sleep 0.2
     done
     printf '%s\n' "$max" > "$out"
-  ) &
+  ) >/dev/null 2>&1 &
   printf '%s' "$!"
 }
 
@@ -120,7 +133,16 @@ grep -q 'gracefulStop: GRACEFUL_STOP' "$K6_SCRIPT" || { echo "✗ $K6_SCRIPT 不
 K6_SCRIPT_MD5=$(md5_of "$K6_SCRIPT")
 mkdir -p "$RESULT_DIR"
 
-log "preflight ok: $K6_SCRIPT md5=$K6_SCRIPT_MD5"
+# k6 版本**只能这样拿**：`k6 run` 的 banner 不含版本行（不加 --verbose 时），所以从运行日志里
+# grep 永远得到空值。docker 模式直接用镜像自报。
+if [ "$K6_RUNNER" = local ]; then
+  K6_VERSION=$(k6 version 2>/dev/null | awk '{print $2}' || true)
+else
+  K6_VERSION=$(docker run --rm "$K6_IMAGE" version 2>/dev/null | awk '{print $2}' || true)
+fi
+K6_VERSION=${K6_VERSION:-unknown}
+
+log "preflight ok: $K6_SCRIPT md5=$K6_SCRIPT_MD5 k6=$K6_VERSION graceful_stop=$GRACEFUL_STOP"
 log "runner=$K6_RUNNER image=$K6_IMAGE target=$TARGET levels=[$LEVELS] stable=$STABLE out_tokens=$OUT_TOKENS"
 
 # ---------------------------------------------------------------- mock _config（可选）
@@ -142,7 +164,7 @@ GW_BACKLOG_SRC=""
 if [ -n "$GW_PORT" ]; then
   DETECTED_BACKLOG=$(listen_backlog_of "$GW_PORT" || true)
   if [ -n "${GATEWAY_BACKLOG:-}" ]; then
-    GW_BACKLOG_SRC="explicit（同机实测=$DETECTED_BACKLOG）"
+    GW_BACKLOG_SRC="explicit（同机实测=${DETECTED_BACKLOG}）"
   else
     GATEWAY_BACKLOG="$DETECTED_BACKLOG"
     GW_BACKLOG_SRC="ss -lnt Send-Q（同机自动探测）"
@@ -166,7 +188,7 @@ run_k6() {
     -e "TARGET_URL=$TARGET" -e "TOKEN=$TOKEN" -e "MODEL=$MODEL"
     -e "STREAM=true" -e "IN_TOKENS=$IN_TOKENS" -e "OUT_TOKENS=$OUT_TOKENS"
     -e "VUS=$level" -e "MAX_VUS=$level" -e "DURATION=$STABLE" -e "WARMUP=$WARMUP"
-    -e "STREAM_TIMEOUT=600000" -e "KEEP_BODY=true"
+    -e "STREAM_TIMEOUT=600000" -e "KEEP_BODY=true" -e "GRACEFUL_STOP=$GRACEFUL_STOP"
     # 不传 KEEP_SAMPLE（默认 1 = 每次迭代全量解析 → checks 比 2.00）
     # 不传 PICK_INTERVAL（默认 sleep(0)）、不传 XLITE_MAX_IN_FLIGHT
   )
@@ -205,7 +227,7 @@ done
   echo "K6_RUNNER=$K6_RUNNER"
   echo "K6_IMAGE=$K6_IMAGE"
   echo "K6_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$K6_IMAGE" 2>/dev/null || echo n/a)"
-  echo "K6_VERSION=$(grep -oE 'k6 v[0-9]+\.[0-9]+\.[0-9]+' "$RESULT_DIR"/*.log 2>/dev/null | head -1 | awk '{print $2}' || true)"
+  echo "K6_VERSION=$K6_VERSION"
   echo "K6_SCRIPT=$K6_SCRIPT"
   echo "K6_SCRIPT_MD5=$K6_SCRIPT_MD5"
   echo "K6_SCRIPT_SHA256=$(sha256_of "$K6_SCRIPT")"
@@ -224,7 +246,7 @@ done
 } > "$RESULT_DIR/env.txt"
 
 # ---------------------------------------------------------------- 出报告（含链路预算闸门）
-report_args=(--result-dir "$RESULT_DIR" --chunks "$((OUT_TOKENS + 2))")
+report_args=(--result-dir "$RESULT_DIR" --expect-graceful-stop "$GRACEFUL_STOP")
 [ -n "$LINK_MBPS" ] && report_args+=(--link-mbps "$LINK_MBPS")
 [ -n "$LINK_IFACE" ] && report_args+=(--link-iface "$LINK_IFACE")
 [ "$ALLOW_LINKBOUND" = "1" ] && report_args+=(--allow-linkbound)
