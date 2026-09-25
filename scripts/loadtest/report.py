@@ -9,13 +9,20 @@
 
 输出 = 同目录下 `meta.json` + stdout 的 markdown 表。
 
-它做三件事（契约见 `docs/manual/v88-rig.md` §1.3）：
+它做四件事（契约见 `docs/manual/v88-rig.md` §1.3）：
 
 1. **指纹校验**：每档 `checks_total / http_reqs` 必须 ≈ 2.00（`KEEP_BODY=true` 的全量
    解析口径），且日志头必须是 `gracefulStop: 10m0s`。不满足的档标 `INVALID`，不进表 ——
    客户机那次就是靠这两个数发现「挂载的 k6.js 被换过」的（`v88-rig.md` §1.1）。
-2. **活跃流**：`活跃流 = qps × dur_p50`（`v88-rig.md` §2 的稳态近似）。
-3. **链路预算**：用 `link_budget.py` 判每档是否 LINK-BOUND；有任一档越界就退出码 2、
+2. **活跃流**：**闭式** `活跃流 = VUS × dur/iter`（k6 是闭式负载，一个 VU 同时只有一个请求在飞）。
+   早先用的 `qps × dur` 会被 ramp-up / gracefulStop 的排空段**稀释**，系统性低报并发
+   —— 实测差 42%（4000 VU：闭式 2670 vs 稀释 1557），所以只留作对照列
+   `active_streams_diluted`。**链路预算用闭式那个。**
+3. **accept 队列**：读 `run_levels.sh` 采样的 `<LEVEL>.acceptq`（`ss` 的 `Recv-Q` 峰值）。
+   峰值逼近 `GATEWAY_BACKLOG` 就是**触顶**的直接证据，会单独告警 —— 这一档量到的是
+   连接建立排队，不是网关处理能力。注意 `GATEWAY_BACKLOG` 是监听套接字的 `Send-Q`，
+   **不是**内核 `net.core.somaxconn`（libc `SOMAXCONN` 会把 backlog 压到 128）。
+4. **链路预算**：用 `link_budget.py` 判每档是否 LINK-BOUND；有任一档越界就退出码 2、
    **不出报告**（因为那量的是网线，不是网关）。
 
 退出码：0 = 报告可用；2 = 有档 LINK-BOUND（拒绝出报告）；3 = 有档指纹不符或没有有效档位。
@@ -73,6 +80,22 @@ def graceful_stop_of(log_path: str) -> str:
     return ""
 
 
+def read_acceptq(result_dir: str, stem: str) -> int | None:
+    """读 run_levels.sh 采样的 accept 队列深度峰值（ss 的 Recv-Q）。
+
+    峰值逼近监听 backlog 就说明**触顶**了 —— 这是 backlog 是否成为瓶颈的直接证据，
+    与负载高低、与内核 somaxconn 都无关。没有这个文件（跨机跑）时返回 None。
+    """
+    path = os.path.join(result_dir, f"{stem}.acceptq")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def load_level(result_dir: str, stem: str) -> dict:
     """解析一档的 summary + 日志指纹。"""
     with open(os.path.join(result_dir, f"{stem}.summary.json"), encoding="utf-8") as handle:
@@ -93,15 +116,31 @@ def load_level(result_dir: str, stem: str) -> dict:
     data_bytes = metric("data_received").get("count", 0)
     graceful = graceful_stop_of(os.path.join(result_dir, f"{stem}.log"))
 
+    # 真实并发：k6 是闭式负载，一个 VU 同时只有一个请求在飞，所以
+    #   在飞流 = VUS × (dur / iter)
+    # 而 `qps × dur` 会被 ramp-up / gracefulStop 的排空段稀释（run 期间的平均速率 ≠ 稳态速率），
+    # 低报并发。两个都留，但**链路预算用闭式那个**。见 §11.6 / v88-rig.md §2。
+    vus_max = metric("vus_max")
+    vus_actual = vus_max.get("max") or vus_max.get("value")
+    iter_ms = metric("iteration_duration").get("med")
+    iterations = metric("iterations").get("count", 0)
+    iter_per_vu = (iterations / vus_actual) if vus_actual else None
+    acceptq = read_acceptq(result_dir, stem)
+
     vus_match = LEVEL_RE.match(stem)
     return {
         "level": stem,
         "vus": int(vus_match.group(1)) if vus_match else None,
+        "vus_actual": vus_actual,
         "http_reqs": reqs,
         "qps": metric("http_reqs").get("rate", 0.0),
         "checks_ratio": ratio,
         "dur_ms": dur_ms,
         "ttft_ms": ttft_ms,
+        "iter_ms": iter_ms,
+        "iterations": iterations,
+        "iter_per_vu": iter_per_vu,
+        "acceptq_max": acceptq,
         "bytes_per_stream": (data_bytes / reqs) if reqs else 0.0,
         "graceful_stop": graceful,
         "fingerprint_ok": abs(ratio - EXPECT_CHECKS_RATIO) <= RATIO_TOLERANCE
@@ -139,18 +178,27 @@ def main(argv: list[str] | None = None) -> int:
     levels = []
     for stem in stems:
         row = load_level(args.result_dir, stem)
-        if usable:
-            per_stream = row["bytes_per_stream"] or (args.chunks * args.bytes_per_chunk)
-            target_secs = (row["dur_ms"] or 0) / 1000
-            required = (row["qps"] * target_secs) * per_stream * 8 / target_secs / 1e6 if target_secs else float("inf")
-            row["active_streams"] = row["qps"] * target_secs
+        target_secs = (row["dur_ms"] or 0) / 1000
+        # 闭式（首选）：VUS × dur/iter。退化到稀释式 qps × dur（缺 iteration_duration 时）。
+        if row["vus_actual"] and row["iter_ms"]:
+            closed = row["vus_actual"] * target_secs / (row["iter_ms"] / 1000)
+        else:
+            closed = None
+        diluted = row["qps"] * target_secs
+        row["active_streams"] = closed if closed is not None else diluted
+        row["active_streams_diluted"] = diluted
+        # 一个 VU 每 iter 秒发一个请求 → 稳态 qps。与实测 qps 的比值就是排空段的稀释程度。
+        row["qps_steady"] = (row["vus_actual"] / (row["iter_ms"] / 1000)) if (row["vus_actual"] and row["iter_ms"]) else None
+
+        per_stream = row["bytes_per_stream"] or (args.chunks * args.bytes_per_chunk)
+        if usable and target_secs:
+            required = row["active_streams"] * per_stream * 8 / target_secs / 1e6
             row["required_mbps"] = required
             bound, text = verdict(required, usable)
             row["link_bound"], row["verdict"] = bound, text
         else:
-            row["active_streams"] = row["qps"] * ((row["dur_ms"] or 0) / 1000)
             row["required_mbps"] = None
-            row["link_bound"], row["verdict"] = None, "未提供链路速率"
+            row["link_bound"], row["verdict"] = None, ("未提供链路速率" if not usable else "无 dur")
         levels.append(row)
 
     env = read_env_txt(args.result_dir)
@@ -165,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             "link_mbps": link_mbps,
             "efficiency": args.efficiency,
             "chunks": args.chunks,
+            "active_streams": "VUS × dur/iter（闭式，首选）；active_streams_diluted = qps × dur 仅作对照",
         },
         "levels": levels,
     }
@@ -174,22 +223,36 @@ def main(argv: list[str] | None = None) -> int:
     print(f"# {os.path.basename(os.path.abspath(args.result_dir))}")
     if env:
         print("")
-        for key in ("GATEWAY_IMAGE", "K6_IMAGE", "K6_SCRIPT", "K6_SCRIPT_MD5", "TOKIO_WORKER_THREADS", "TARGET", "LEVELS"):
+        for key in ("GATEWAY_IMAGE", "K6_IMAGE", "K6_IMAGE_ID", "K6_VERSION", "K6_SCRIPT_MD5",
+                    "K6_SCRIPT_SHA256", "TOKIO_WORKER_THREADS", "XLITE_CATALOG_RELOAD_SECS",
+                    "GATEWAY_BACKLOG", "GATEWAY_BACKLOG_SOURCE", "SOMAXCONN", "TARGET", "LEVELS"):
             if key in env:
                 print(f"- {key}: `{env[key]}`")
     print("")
-    print("| 档位 | qps | dur p50 | TTFT p50 | 活跃流 | 链路需求 | 判读 | 指纹 |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |")
+    print("| 档位 | qps(实测) | qps(稳态) | dur p50 | TTFT p50 | 活跃流 | 稀释式 | acceptQ峰值 | 链路需求 | 判读 | 指纹 |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |")
     for row in levels:
         dur = f"{row['dur_ms'] / 1000:.2f}s" if row["dur_ms"] else "-"
         ttft = f"{row['ttft_ms']:.0f}ms" if row["ttft_ms"] else "-"
         need = f"{row['required_mbps']:,.0f} Mbps" if row["required_mbps"] else "-"
         mark = "✓" if row["fingerprint_ok"] else "✗"
+        qs = f"{row['qps_steady']:.1f}" if row["qps_steady"] else "-"
+        aq = f"{row['acceptq_max']}" if row["acceptq_max"] is not None else "-"
         print(
-            f"| {row['vus']} | {row['qps']:.1f} | {dur} | {ttft} | {row['active_streams']:.0f} | "
-            f"{need} | {row['verdict']} | {mark} |"
+            f"| {row['vus']} | {row['qps']:.1f} | {qs} | {dur} | {ttft} | {row['active_streams']:.0f} | "
+            f"{row['active_streams_diluted']:.0f} | {aq} | {need} | {row['verdict']} | {mark} |"
         )
     print(f"\nmeta.json 已写入 {os.path.join(args.result_dir, 'meta.json')}")
+
+    # backlog 触顶的直接证据：accept 队列峰值逼近监听 backlog。
+    backlog_raw = env.get("GATEWAY_BACKLOG", "")
+    if backlog_raw.isdigit():
+        backlog = int(backlog_raw)
+        hot = [row for row in levels if row["acceptq_max"] is not None and backlog and row["acceptq_max"] >= backlog]
+        if hot:
+            names = ", ".join(f"{row['level']}(峰值{row['acceptq_max']})" for row in hot)
+            print(f"\n⚠️ accept 队列触顶（backlog={backlog}）：{names}", file=sys.stderr)
+            print("  → 这一档量到了连接建立排队，不是网关处理能力。加大 backlog 或降低建连突发。", file=sys.stderr)
 
     bad = [row for row in levels if not row["fingerprint_ok"]]
     bound = [row for row in levels if row["link_bound"]]

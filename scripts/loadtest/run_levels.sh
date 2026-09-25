@@ -10,7 +10,9 @@
 #   [1] preflight：打印 k6.js 的 md5 + 校验仓库版特征（KEEP_SAMPLE / GRACEFUL_STOP）
 #   [2] 每档跑完由 report.py 断言 checks 比 2.00 与 gracefulStop 10m0s，不符的档标
 #       INVALID 且拒绝出报告
-# 另外每档算 活跃流 = qps × dur_p50 并过一遍链路预算；越界就退出码 2、拒绝出报告。
+# 另外每档算 活跃流 = VUS × dur/iter（闭式；`qps × dur` 会被排空段稀释，只作对照列）
+# 并过一遍链路预算；越界就退出码 2、拒绝出报告。
+# 同机跑时还会采样网关 accept 队列峰值（ss 的 Recv-Q），逼近 backlog 即判触顶。
 #
 # 环境变量（都有默认）:
 #   TARGET=<url>          必填，如 http://10.99.255.101:18080/v1/chat/completions
@@ -28,6 +30,10 @@
 #   MOCK_TTFT=500 MOCK_INTERVAL=10   可选：_config 参数
 #   LINK_MBPS=1000 | LINK_IFACE=eth0 可选：链路预算（不给就只算活跃流，不判越界）
 #   GATEWAY_IMAGE=xlite:0.3.0        可选：写进 env.txt，报告里可追溯
+#   GATEWAY_BACKLOG=<n>              可选：网关监听套接字的 backlog。**跨机时必填** ——
+#                                    它与内核 net.core.somaxconn 不是一回事（libc SOMAXCONN
+#                                    默认 128，会把 backlog 压到 128）。同机时本脚本自动读
+#                                    `ss -lnt` 的 Send-Q，并额外采样 accept 队列峰值。
 #   ALLOW_LINKBOUND=1                可选：越界也出报告（仅诊断；对标报告不要开）
 #
 # 退出码：0 = 报告可用；2 = 有档 LINK-BOUND；3 = 指纹不符 / 无有效档位。
@@ -55,6 +61,7 @@ MOCK_INTERVAL=${MOCK_INTERVAL:-10}
 LINK_MBPS=${LINK_MBPS:-}
 LINK_IFACE=${LINK_IFACE:-}
 GATEWAY_IMAGE=${GATEWAY_IMAGE:-unknown}
+GATEWAY_BACKLOG=${GATEWAY_BACKLOG:-}
 ALLOW_LINKBOUND=${ALLOW_LINKBOUND:-0}
 
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -62,6 +69,48 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 md5_of() {
   if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | awk '{print $1}';
   else md5 -q "$1"; fi
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+# ------------------------------------------------------- 网关监听套接字观测
+# ⚠️ 网关的 backlog 与内核 `net.core.somaxconn` **不是一回事**：libc `SOMAXCONN` 默认 128，
+# `TcpListener::bind` 用的是它，会把 backlog 压到 128（`somaxconn` 再大也没用）。
+# 所以报告里必须记 **监听套接字自己的 Send-Q**，而不是 somaxconn。见 §11.6。
+gateway_hostport() { printf '%s' "$TARGET" | sed -E 's#^[a-z]+://##; s#/.*$##'; }
+
+# 目标是本机时返回端口号；跨机返回空（跨机请显式传 GATEWAY_BACKLOG）。
+local_port_of() {
+  local hp="$1" host port
+  host="${hp%:*}"; port="${hp##*:}"
+  [ "$port" != "$hp" ] || return 1
+  case "$host" in
+    127.0.0.1|localhost|0.0.0.0|::1|'[::1]') printf '%s' "$port" ;;
+    *) hostname -I 2>/dev/null | tr ' ' '\n' | grep -qxF "$host" && printf '%s' "$port" || return 1 ;;
+  esac
+}
+
+# LISTEN 套接字的 backlog 上限（ss 的 Send-Q 列）。
+listen_backlog_of() { ss -lnt "sport = :$1" 2>/dev/null | awk 'NR>1{print $3; exit}'; }
+
+# 采样 accept 队列深度峰值（ss 的 Recv-Q 列）。**这是「backlog 到底触不触顶」的直接证据**：
+# 峰值逼近 backlog 就是触顶，与「负载高低」无关。$1=端口 $2=秒数 $3=输出文件
+start_accept_sampler() {
+  local port="$1" secs="$2" out="$3" n
+  n=$(( secs * 5 ))
+  (
+    max=0
+    for _ in $(seq 1 "$n"); do
+      v=$(ss -lnt "sport = :$port" 2>/dev/null | awk 'NR>1{print $2; exit}')
+      case "${v:-}" in ''|*[!0-9]*) ;; *) [ "$v" -gt "$max" ] && max="$v" ;; esac
+      sleep 0.2
+    done
+    printf '%s\n' "$max" > "$out"
+  ) &
+  printf '%s' "$!"
 }
 
 # ---------------------------------------------------------------- preflight
@@ -85,6 +134,30 @@ if [ -n "$MOCKS" ]; then
   done
   log "mock _config: ttft=$MOCK_TTFT interval=$MOCK_INTERVAL out_tokens=$OUT_TOKENS"
 fi
+
+# ---------------------------------------------------------------- 网关套接字（同机时才拿得到）
+GW_HP=$(gateway_hostport)
+GW_PORT=$(local_port_of "$GW_HP" || true)
+GW_BACKLOG_SRC=""
+if [ -n "$GW_PORT" ]; then
+  DETECTED_BACKLOG=$(listen_backlog_of "$GW_PORT" || true)
+  if [ -n "${GATEWAY_BACKLOG:-}" ]; then
+    GW_BACKLOG_SRC="explicit（同机实测=$DETECTED_BACKLOG）"
+  else
+    GATEWAY_BACKLOG="$DETECTED_BACKLOG"
+    GW_BACKLOG_SRC="ss -lnt Send-Q（同机自动探测）"
+  fi
+  log "网关 $GW_HP 本机可观测：backlog=$GATEWAY_BACKLOG 来源=$GW_BACKLOG_SRC"
+else
+  if [ -n "${GATEWAY_BACKLOG:-}" ]; then
+    GW_BACKLOG_SRC="explicit（跨机，网关不在本机）"
+  else
+    GATEWAY_BACKLOG="unknown"
+    GW_BACKLOG_SRC="unknown（网关不在本机，且未传 GATEWAY_BACKLOG）"
+    log "⚠️ 网关 $GW_HP 不在本机且未传 GATEWAY_BACKLOG —— 无法测 backlog，报告里记为 unknown"
+  fi
+fi
+STABLE_SECS=${STABLE%s}; WARMUP_SECS=${WARMUP%s}
 
 # ---------------------------------------------------------------- run
 run_k6() {
@@ -112,7 +185,15 @@ run_k6() {
 
 for level in $LEVELS; do
   log "level $level VU 开始"
+  sampler_pid=""
+  if [ -n "$GW_PORT" ]; then
+    sampler_pid=$(start_accept_sampler "$GW_PORT" "$((WARMUP_SECS + STABLE_SECS + 60))" "$RESULT_DIR/$level.acceptq")
+  fi
   run_k6 "$level" || log "level $level k6 退出码非 0（保留日志，交由 report.py 判定）"
+  if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; fi
+  if [ -s "$RESULT_DIR/$level.acceptq" ]; then
+    log "level $level accept 队列峰值 Recv-Q=$(cat "$RESULT_DIR/$level.acceptq") / backlog=$GATEWAY_BACKLOG"
+  fi
   log "level $level VU 结束（$RESULT_DIR/$level.log）"
 done
 
@@ -123,9 +204,16 @@ done
   echo "GATEWAY_IMAGE=$GATEWAY_IMAGE"
   echo "K6_RUNNER=$K6_RUNNER"
   echo "K6_IMAGE=$K6_IMAGE"
+  echo "K6_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$K6_IMAGE" 2>/dev/null || echo n/a)"
+  echo "K6_VERSION=$(grep -oE 'k6 v[0-9]+\.[0-9]+\.[0-9]+' "$RESULT_DIR"/*.log 2>/dev/null | head -1 | awk '{print $2}' || true)"
   echo "K6_SCRIPT=$K6_SCRIPT"
   echo "K6_SCRIPT_MD5=$K6_SCRIPT_MD5"
+  echo "K6_SCRIPT_SHA256=$(sha256_of "$K6_SCRIPT")"
   echo "TOKIO_WORKER_THREADS=${TOKIO_WORKER_THREADS:-unset（默认=核数）}"
+  echo "XLITE_CATALOG_RELOAD_SECS=${XLITE_CATALOG_RELOAD_SECS:-unset（网关侧默认 5s）}"
+  echo "GATEWAY_BACKLOG=$GATEWAY_BACKLOG"
+  echo "GATEWAY_BACKLOG_SOURCE=$GW_BACKLOG_SRC"
+  echo "SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null || echo n/a)"
   echo "TARGET=$TARGET"
   echo "MODEL=$MODEL"
   echo "IN_TOKENS=$IN_TOKENS"
@@ -133,7 +221,6 @@ done
   echo "LEVELS=$LEVELS"
   echo "STABLE=$STABLE"
   echo "WARMUP=$WARMUP"
-  echo "SOMAXCONN=$(sysctl -n net.core.somaxconn 2>/dev/null || echo n/a)"
 } > "$RESULT_DIR/env.txt"
 
 # ---------------------------------------------------------------- 出报告（含链路预算闸门）
