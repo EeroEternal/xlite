@@ -123,7 +123,7 @@ log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"
 #      实测 `trap cleanup EXIT`（不挂 INT/TERM）在 `wait` 期间收 TERM/INT，cleanup 都会跑
 #      （rc 143/129，0.01s），与额外挂 `trap 'exit 130' INT` 的延迟相同。所以**不需要**
 #      那两个 trap；真正的修复是上面第 2 条。
-#   3) 变过农场配置就要**还原**（见下面 `FARM_BATCH_BEFORE`）：24 个 mock 是**共享**的，
+#   3) 变过农场配置就要**还原**（见下面 `FARM_SAVED`）：24 个 mock 是**共享**的，
 #      把 `batch=10` 留在那里会让下一个"不动农场"的 session 静默量到相反的口径。
 CUR_PORT=""
 K6_PID=""

@@ -240,12 +240,14 @@ done
 # 一个"没事时反而响"的告警，还写进了 progress.log）。
 seen_batches=${seen_batches# }
 MOCK_CLAIM_BEFORE=${seen_batches%% *}
+# 打印**全部不同的值**（`[1 7]`），不要只印第一个：混口时"第一个"和"整组"是两件事，
+# 下一行的告警用的就是整组，两行不一致会让人以为只读到一个值。
 if [ "$n_before" -eq 0 ]; then
   log "  农场口径: batch=unknown（$n_ports 个口都没读到）"
 elif [ "$n_before" -eq "$n_ports" ]; then
-  log "  农场口径: batch=${MOCK_CLAIM_BEFORE}（$n_before/$n_ports 口）"
+  log "  农场口径: batch=[${seen_batches}]（$n_before/$n_ports 口）"
 else
-  log "  农场口径: batch=${MOCK_CLAIM_BEFORE}（只读到 $n_before/$n_ports 口 ⇒ ⚠️ 各口可能不一致，本轮不可比）"
+  log "  农场口径: batch=[${seen_batches}]（只读到 $n_before/$n_ports 口 ⇒ ⚠️ 各口可能不一致，本轮不可比）"
 fi
 # **不要**把告警押在"所有口都读到"上：恰恰是有口读不到时最容易留下脏状态。
 if [ -n "${seen_batches}" ] && [ "${seen_batches}" != "1" ]; then
