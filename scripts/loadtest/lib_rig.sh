@@ -69,3 +69,18 @@ expand_ports() {
     *) printf '%s' "$1" | tr ',' ' ' ;;
   esac
 }
+
+# ---------------------------------------------------------------- 农场原值记账
+# 记下"我们动过哪些 mock 口、它们原来的 batch 是多少"，收尾按口还原。
+#
+# ⚠️ **不要用关联数组**（`declare -A`）：那是 **bash 4+** 的特性，而 macOS 自带的
+# `/bin/bash` 是 **3.2** —— `run_levels.sh` 明确支持 macOS 开发机，而且它用的是
+# `set -euo pipefail`，`declare -A` 在 3.2 上会**直接终止脚本**（实测退出码 2）。
+# 用一条**空格分隔的 `port=batch` 串**就够了：端口/主机串里不会有空格，
+# 也就避免了 nameref（同样是 bash 4.3+）之类更花的东西。
+#
+# 用法（调用方自己持有那个变量，函数只负责追加后回显）：
+#     FARM_SAVED=$(farm_remember "$FARM_SAVED" "$port" "$batch")
+# 还原：
+#     for kv in $FARM_SAVED; do curl -s -X POST "http://${kv%%=*}/_config?batch=${kv#*=}"; done
+farm_remember() { printf '%s %s=%s' "${1:-}" "$2" "$3"; }

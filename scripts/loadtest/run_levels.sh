@@ -163,15 +163,18 @@ lab_lock "run_levels levels=$LEVELS" || exit 1
 # 本脚本也会写那 24 个**共享** mock（`MOCKS` + `MOCK_BATCH`），所以和另两个 harness 同一纪律：
 # 逐口记住原值、收尾按口还原。不还原的话，一次 `MOCK_BATCH=10` 的产能跑会把台架永久留在
 # 台架口径上，而下一个"不动农场"的 session 会静默量到相反的口径（§14）。
-# `set -euo pipefail` 下数组必须显式声明（`${#unset[@]}` 会报错），且 trap 里每条都要 `|| true`。
-declare -A FARM_BATCH_SAVED=()
+# 记在一条 `port=batch` 串里（lib_rig.sh 的 `farm_remember`）—— **不用关联数组**：
+# `declare -A` 是 bash 4+，在 macOS 的 bash 3.2 上配 `set -e` 会直接把脚本打死。
+# 本脚本是 `set -euo pipefail`，trap 里每条都要能失败而不改变退出码。
+FARM_SAVED=""
 restore_farm() {
-  [ "${#FARM_BATCH_SAVED[@]}" -gt 0 ] || return 0
-  local h
-  for h in "${!FARM_BATCH_SAVED[@]}"; do
-    curl -s -m 3 -X POST "http://$h/_config?batch=${FARM_BATCH_SAVED[$h]}" >/dev/null 2>&1 || true
+  [ -n "$FARM_SAVED" ] || return 0
+  local n=0 h
+  for h in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://${h%%=*}/_config?batch=${h#*=}" >/dev/null 2>&1 || true
+    n=$((n + 1))
   done
-  printf '[%s] mock _config: 已按口还原 batch（%s 口）\n' "$(date +%H:%M:%S)" "${#FARM_BATCH_SAVED[@]}"
+  printf '[%s] mock _config: 已按口还原 batch（%s 口）\n' "$(date +%H:%M:%S)" "$n"
 }
 trap restore_farm EXIT
 
@@ -210,7 +213,7 @@ if [ -n "$MOCKS" ]; then
   # 先逐口记原值（收尾还原靠它）
   for h in $hosts; do
     b=$(curl -s -m 3 -X POST "http://$h/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9' || true)
-    [ -n "$b" ] && FARM_BATCH_SAVED[$h]="$b"
+    [ -n "$b" ] && FARM_SAVED=$(farm_remember "$FARM_SAVED" "$h" "$b")
   done
   for h in $hosts; do
     curl -s -m 3 -X POST "http://$h/_config?ttft=$MOCK_TTFT&token_interval=$MOCK_INTERVAL&out_tokens=$OUT_TOKENS&mix=0&mode=2&batch=$MOCK_BATCH" >/dev/null 2>&1 || true

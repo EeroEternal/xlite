@@ -129,7 +129,9 @@ CUR_PORT=""
 K6_PID=""
 # 逐口记原值：农场可能**各口不一致**（别人只改了一部分），所以还原必须按口来，
 # 不能拿"第一个读到的值"回写所有口（那会静默抹掉别的口的值）。
-declare -A FARM_BATCH_SAVED=()
+# 用 lib_rig.sh 的 `farm_remember` 记在一条 `port=batch` 串里 —— **不用关联数组**：
+# `declare -A` 是 bash 4+，而 macOS 自带的 bash 是 3.2（见 lib_rig.sh 的说明）。
+FARM_SAVED=""
 cleanup() {
   trap - EXIT
   [ -n "$K6_PID" ] && kill "$K6_PID" 2>/dev/null
@@ -138,11 +140,13 @@ cleanup() {
   # 还原农场：**按口**回写，且只要**曾经写过**就还原 —— 不押在"最后验成功了"上。
   # （守卫失败/有口读不到时写入早已发生，那时不还原就会把 24 个 mock 永久留在台架口径上；
   #   这正是复评第 2 轮指出的洞。）
-  if [ "${#FARM_BATCH_SAVED[@]}" -gt 0 ]; then
-    for p in "${!FARM_BATCH_SAVED[@]}"; do
-      curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=${FARM_BATCH_SAVED[$p]}" >/dev/null 2>&1
+  if [ -n "$FARM_SAVED" ]; then
+    local n=0 kv
+    for kv in $FARM_SAVED; do
+      curl -s -m 3 -X POST "http://127.0.0.1:${kv%%=*}/_config?batch=${kv#*=}" >/dev/null 2>&1
+      n=$((n + 1))
     done
-    log "  mock _config: 已按口还原 batch（${#FARM_BATCH_SAVED[@]} 口）"
+    log "  mock _config: 已按口还原 batch（$n 口）"
   fi
 }
 trap cleanup EXIT
@@ -164,7 +168,7 @@ for p in $MOCK_PORTS_LIST; do
   b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
   if [ -n "$b" ]; then
     n_before=$((n_before + 1))
-    FARM_BATCH_SAVED[$p]="$b"
+    FARM_SAVED=$(farm_remember "$FARM_SAVED" "$p" "$b")
     case " $seen_batches " in *" $b "*) ;; *) seen_batches="$seen_batches $b" ;; esac
   fi
 done

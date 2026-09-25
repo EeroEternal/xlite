@@ -125,10 +125,10 @@ lab_lock "ab_topology" || exit 1
 #   子进程一律用 `9>&-` 显式关掉锁 fd（不然网关活着就等于替我们攥着锁）。
 SAMPLER_PID=""
 GW_STARTED=0
-# 逐口原值：**必须在这里就声明** —— cleanup 在退出时读它，而 `die` 可能在本文件任何一行触发
-# （例如 CATALOG 自检在农场那段之前）。bash 3.2 下 `${#unset[@]}` 配 `set -u` 会直接报错，
-# 那就把"收尾"变成"再炸一次"。
-declare -A FARM_BATCH_SAVED=()
+# 逐口原值（`port=batch` 串，由 lib_rig.sh 的 `farm_remember` 追加）：**必须在这里就初始化** ——
+# cleanup 在退出时读它，而 `die` 可能在本文件任何一行触发（例如 CATALOG 自检在农场那段之前），
+# `set -u` 下读未初始化的变量会直接把"收尾"变成"再炸一次"。
+FARM_SAVED=""
 stop_gw() {
   # 只在**本次真的起过**网关时才杀。否则前置自检 die（例如 CATALOG 写错）会顺手
   # 杀掉 lab 上别人正监听 $PORT 的网关。
@@ -138,13 +138,14 @@ stop_gw() {
   [ -n "$p" ] && kill "$p" 2>/dev/null
 }
 restore_mock_batch() {
-  [ "${#FARM_BATCH_SAVED[@]}" -gt 0 ] || return 0
-  local p
-  for p in "${!FARM_BATCH_SAVED[@]}"; do
-    curl -s -m 3 -X POST "http://127.0.0.1:$p/_config?batch=${FARM_BATCH_SAVED[$p]}" >/dev/null 2>&1
+  [ -n "$FARM_SAVED" ] || return 0
+  local n=0 kv
+  for kv in $FARM_SAVED; do
+    curl -s -m 3 -X POST "http://127.0.0.1:${kv%%=*}/_config?batch=${kv#*=}" >/dev/null 2>&1
+    n=$((n + 1))
   done
   # 走 log()：还原这件事必须落在 progress.log（工件）里，不能只在 stdout
-  log "  mock _config: 已按口还原 batch（${#FARM_BATCH_SAVED[@]} 口）"
+  log "  mock _config: 已按口还原 batch（$n 口）"
 }
 cleanup() {
   [ -n "${SAMPLER_PID:-}" ] && kill "$SAMPLER_PID" 2>/dev/null
@@ -224,7 +225,7 @@ for p in $(expand_ports "$MOCK_PORTS"); do
   b=$(curl -s -m 3 -X POST "http://127.0.0.1:$p/_config" 2>/dev/null | grep -o '"batch":[0-9]*}' | tr -dc '0-9')
   if [ -n "$b" ]; then
     n_before=$((n_before + 1))
-    FARM_BATCH_SAVED[$p]="$b"
+    FARM_SAVED=$(farm_remember "$FARM_SAVED" "$p" "$b")
     case " $seen_batches " in *" $b "*) ;; *) seen_batches="$seen_batches $b" ;; esac
   fi
 done
