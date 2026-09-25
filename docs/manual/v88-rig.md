@@ -94,34 +94,51 @@ k6 run --compatibility-mode=base \
 
 | 闸门 | 判据 | 失败 |
 | --- | --- | --- |
-| preflight | `k6.js` 是仓库版（md5 打印 + `KEEP_SAMPLE` / `GRACEFUL_STOP` 特征） | exit 3 |
+| preflight | `k6.js` 是仓库版（md5 + sha256 打印 + `KEEP_SAMPLE` / `GRACEFUL_STOP` 特征） | exit 3 |
 | 每档指纹 | `checks_total / http_reqs` = **2.00**（±0.01）且日志头 `gracefulStop: 10m0s` | exit 3 |
-| 链路预算 | `活跃流 = qps × dur_p50`，[`link_budget.py`](../../scripts/loadtest/link_budget.py) 判 `LINK-BOUND` | exit 2 |
+| 链路预算 | `活跃流 = VUS × dur/iter`（闭式，见 §2），[`link_budget.py`](../../scripts/loadtest/link_budget.py) 判 `LINK-BOUND` | exit 2 |
+| accept 队列 | 同机时采样监听套接字 `Recv-Q` 峰值，逼近 `GATEWAY_BACKLOG` 即告警触顶 | 告警 |
 
-每个结果目录必须自带：`env.txt`（网关镜像、k6 镜像/digest、`k6.js` md5、`TOKIO_WORKER_THREADS`、`somaxconn`、档位）、每档 `<LEVEL>.log` + `<LEVEL>.summary.json`、`meta.json`（含每档活跃流与预算判读）。**没有 `meta.json` 或标了 `INVALID` 的档位不许进对标表。**
+每个结果目录必须自带：`env.txt`（网关镜像、k6 镜像 **ID**/digest、`k6.js` md5+sha256、`TOKIO_WORKER_THREADS`、`XLITE_CATALOG_RELOAD_SECS`、`GATEWAY_BACKLOG` 及其来源、`somaxconn`、档位）、每档 `<LEVEL>.log` + `<LEVEL>.summary.json`（+ 同机时的 `<LEVEL>.acceptq`）、`meta.json`（含每档活跃流与预算判读）。**没有 `meta.json` 或标了 `INVALID` 的档位不许进对标表。**
+
+> `GATEWAY_BACKLOG` 记的是**监听套接字自己的 `Send-Q`**，不是内核 `net.core.somaxconn`：
+> libc `SOMAXCONN` 默认 128，`TcpListener::bind` 用的就是它，`somaxconn` 再大也压不上去。
+> 网关不在 k6 同机时必须显式传 `GATEWAY_BACKLOG=<n>`，否则报告记 `unknown`（见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §11.6）。
 
 ```bash
 # lab：V88 B 组档位，10 GbE，报告自动带活跃流与预算判读
 TARGET=http://10.99.255.101:18080/v1/chat/completions TOKEN=sk-loadtest \
 MODEL=mock-model LEVELS="1000 4000 10000 31000" \
-LINK_MBPS=10000 GATEWAY_IMAGE=xlite:0.3.0 \
+LINK_MBPS=10000 GATEWAY_IMAGE=xlite:0.3.0 GATEWAY_BACKLOG=65535 \
+XLITE_CATALOG_RELOAD_SECS=0 \
   scripts/loadtest/run_levels.sh
 
 # 预算自查（也可单独跑，退出码 2 = 链路绑死）
 scripts/loadtest/link_budget.py --selftest
 ```
 
-`K6_IMAGE` 建议钉 digest：`grafana/k6:latest` 漂版本会改 qps 一列（同一 xlite、同档位，k6 v2.3.0 vs v0.57.0：TTFT 不变、qps 变）。
+`K6_IMAGE` 建议钉 digest：`grafana/k6:latest` 漂版本会改 qps 一列（同一 xlite、同档位，k6 v2.3.0 vs v0.57.0：TTFT 不变、qps 变）。`env.txt` 里的 `K6_IMAGE_ID` 是实际用到的镜像 ID，比 tag 可靠。
 
 ## 2. 名义 VU ≠ 在途流
 
-稳态近似：
+**闭式公式（首选）**：k6 是闭式负载，一个 VU 同一时刻只有一个请求在飞，所以
 
 ```
-真实在途 ≈ qps × http_req_duration
+在途流 = VUS × (dur / iter)
 ```
+
+**不要用 `qps × dur`**：`qps` 是整轮（含 ramp-up 与 gracefulStop 排空段）的平均速率，
+排空段会把稳态速率拉低，于是 `qps × dur` **系统性低报**并发。
+实测差距可以很大 —— 4000 VU 档：闭式 **2670** vs 稀释式 **1557**（低报 42%）。
+`report.py` 两个都出，但**链路预算只用闭式那个**。
+
+（只有在拿不到 `iteration_duration` 时 —— 例如只有对方的 run 日志 —— 才退回 `qps × dur`，
+且必须标明这是**下界**。）
 
 k6 的 `VUS=31000` 只是协程数。下面这组数是**客户 88 集群 New API 的运行日志**（`deploy_origin/loadtest/results/v88-single` ≡ `nohup-full88.log`，TARGET `http://10.56.88.31:8006`，09-17 17:28 → 09-18 08:41），**不是**实验室 xlite；实验室 xlite 的同喂法数据见 §8。V88 单节点 `KEEP_BODY=true` 组 B 实测：VU 从 5k 涨到 58k，`qps × dur` 仍在约 **3000–4000**，QPS 封在 ~600。组 B 31000 VU：qps 584.5 × dur 6.55s ≈ **3828** 路在途。
+
+> ⚠️ 上面这几个数是**从对方日志反推的 `qps × dur`，即稀释式下界**（日志里没有 `iteration_duration`）。
+> 真值按闭式只会更高。引用时要说清是下界，别与 `report.py` 出的闭式活跃流混着比。
 
 组 E 20000→21000 **换了 k6 脚本**（判据见 §1.1），不是同一脚本突然能吃了：`checks_total / http_reqs` 从 **2.00**（每次迭代 `status` + `body ok`，全量解析 body）变成 **1.10**（`KEEP_SAMPLE=0.1`）。VU 只多 5%，qps 从 1033 到 1912，收尾连接数从 1.0 万到 2.0 万。一喂满：TTFT p50 1747ms / p99 21s；22000 档 k6 空指标。B_31000 的 checks 比也是 2.00，iteration − http 约 45s。
 
@@ -155,6 +172,11 @@ RST 来自套接字打满，不是业务码：
 | HAProxy（客户现场） | `timeout client/server/tunnel 600s`，`option http-keep-alive`，`httpchk GET /health` |
 
 0.2.0 现场 RST：backlog 还是 libc 128，爬坡丢 SYN。换 0.3.0 + 上面内核参数。仍出现「活 150–345s 再 reset」时查 HAProxy/中间设备，不要用 429 挡。
+
+> 上一条说的是**爬坡**（1000→31000）丢 SYN，与**平推低载**是两回事：平推 1000 VU 实测
+> `TCP_NODELAY` 只买中位数（p50 −6.6% / p90 −16.7%，对 p99 无效），
+> 尾部（p90/p95/p99 −9~13%）来自 0.3.0 相对 0.2.0 的**其余 13 项改动整体**，
+> **归不到 backlog 或零拷贝任何单项**。见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §11.4。
 
 ### 不要提前写 200 / SSE ping
 
@@ -196,7 +218,7 @@ k6 TTFT 是 `timings.waiting`（第一个字节）。空头会把排队从 waiti
 
 臂 C 的 iteration − http ≈ 30s，等于人为睡眠，用来**解释** V88 的圈间空档；对标交付仍用原脚本的 `KEEP_BODY=true` + `sleep(0)`，不要改成 30s sleep。臂 B 说明限流只把难看从 dur 搬到 TTFT，不要恢复 `XLITE_MAX_IN_FLIGHT`。
 
-「3 万连接」要问清是 **TCP ESTAB**（含 keep-alive 空闲）还是 **同时在转的 SSE**。`KEEP_BODY` 自锁 / think-time 下 ESTAB 可以仍高、活跃流只有几千。带宽账（`30k × token 率`）用的是活跃流。对标表填 TTFT/dur/fail；ESTAB 与 `qps × dur` 两列都写。
+「3 万连接」要问清是 **TCP ESTAB**（含 keep-alive 空闲）还是 **同时在转的 SSE**。`KEEP_BODY` 自锁 / think-time 下 ESTAB 可以仍高、活跃流只有几千。带宽账（`30k × token 率`）用的是活跃流。对标表填 TTFT/dur/fail；ESTAB 与**活跃流**（闭式 `VUS × dur/iter`；拿不到 `iteration_duration` 时才写 `qps × dur` 并标为下界，见 §2）两列都写。
 
 ## 5. 压测时库与控制面（可调）
 
@@ -253,3 +275,90 @@ mock 自己的 `ttft = 500ms`：xlite 加 **2ms**，New API 加 **4ms**。
 **⇒ 因此「xlite 在纯延迟上领先 New API」这个说法不成立**：低载下两者无差别。不要拿延迟优势去对标。
 
 高载段的结论经过一次更正，又经过一次**降级**：按客户配置（`SQL_MAX_OPEN_CONNS=2000` / PG `max_connections=2000`）时 4000 VU fail **12.4%**；把两边都放开（8000 / 10000）后出现过 **0.57%**，但**同一配置复跑又出现过 12.4% / 12.98%**（波动 20×）—— 所以那一档**不能用来归因**：既不能说"就是 DB 连接数配置"，也不能说"就是 New API 的行为"。要下结论先补 run ledger（每轮记 PG `max_connections` / `SQL_MAX_OPEN_CONNS` / fail%），见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §3.1 / §10.4。可说的只有架构那条：放开连接数后瓶颈上移到 **Postgres CPU**（10000 VU 时吃满 74 核，错误为 `failed to connect to postgres`），根因是 **New API 每个请求的结算都要和 Postgres 往返一次**。本轮 New API 仍是 **1 副本 + 无 HAProxy + PG 与网关同机**，客户现场是 **2 副本 + HAProxy + 独占 PG**，**不可外推**。完整数据、部署配方、边界与复现命令见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md)。
+
+## 9. xlite 内部归因的臂记号：`A0` / `A1` / `D` / `A2`
+
+对标 New API 用 §8；**判断 xlite 自己哪个改动作了多少**用这套记号。
+它们是**四个不同的构建**，不是机器、不是网关实例。
+
+| 记号 | 是什么 | 构建来源 | backlog | 入站 NODELAY | 其余 12 项 |
+| --- | --- | --- | ---: | :---: | :---: |
+| **`A0`** | v0.2.0 原样（客户现场基线） | `git archive v0.2.0` | 128 | ✗ | ✗ |
+| **`A1`** | v0.2.0 **只加**入站 `TCP_NODELAY` | v0.2.0 手改 2 行 | 128 | **✓** | ✗ |
+| **`D`** | `A1` **再加** backlog 65535 | `A1` 手改 | **65535** | ✓ | ✗ |
+| **`A2`** | HEAD = 0.3.0 全量 | `git archive HEAD` | 65535 | ✓ | **✓** |
+
+相邻两臂之差**各自是一个可归因的单项**：
+
+```
+A0 ──NODELAY──▶ A1 ──backlog──▶ D ──其余 12 项──▶ A2
+   └────────────── 0.2.0 → 0.3.0 全部 ──────────────┘
+```
+
+**构建**（`A1`/`D` 在 v0.2.0 上只加下述代码，别的不动）：
+
+```rust
+// A1：main.rs 加 use axum::serve::ListenerExt; 并把 serve 改成
+axum::serve(listener.tap_io(|stream| { let _ = stream.set_nodelay(true); }),
+            app.into_make_service()).await?;
+
+// D：再加（libc SOMAXCONN 默认 128，会把 TcpListener::bind 的 backlog 压到 128）
+const LISTEN_BACKLOG: u32 = 65535;   // socket.listen(LISTEN_BACKLOG)
+```
+
+**跑**（四臂同机、同 mock、同窗口交错；拓扑见 [`lab-loadtest.md`](lab-loadtest.md)）：
+
+```bash
+# 每臂一份 sqlite 目录；导入 `examples/mock-24.yaml`（跨机把 base_url 改成 mock 机 IP）
+DATABASE_URL=sqlite:$A.db ./xlite-$A import examples/mock-24.yaml --replace
+DATABASE_URL=sqlite:$A.db PORT=$PORT LISTEN_HOST=0.0.0.0 \
+  XLITE_UPSTREAM_H2C=1 XLITE_CATALOG_RELOAD_SECS=5 ./xlite-$A
+
+# ★ 必查：监听套接字的 backlog 必须与上表相符，否则臂不是你以为的那个
+ss -lnt | grep ":$PORT"        # Send-Q = 128（A0/A1）或 65535（D/A2）
+
+# ★ 必查：部署/跑臂后核对版本（/health 免鉴权，带上 version 字段）
+curl -s http://10.99.255.101:$PORT/health   # {"status":"ok","gateway":"xlite","version":"…"}
+```
+
+**三道机械检查凑成一套「你以为是那个、其实是那个」的验证**：`ss -lnt` 核 backlog（臂的属性）、
+二进制 sha256 核构建身份、`curl /health` 核**部署出去的到底是哪一版**。
+最后一条是 2026-09-25 补的 —— 在这之前，网关自己没有任何可远程核对的版本指纹，
+而文档却一直在要求钉 k6 镜像 digest 与脚本 sha256：**要求的对象与能验证的对象不对称。**
+
+四臂二进制 sha256 必须两两不同。k6 侧加 **`GRACEFUL_STOP=30s`** 给墙钟封顶 ——
+否则个别上游挂死请求会被默认 600s 一直等，把每轮从 4 分钟拖到 10.5 分钟。
+
+### 9.1 判读纪律（比单点数字重要）
+
+1. **必须同窗口交错 ≥3 轮**，且**换窗口复现**才算数。实测同一二进制跨两个窗口（相隔 45 分钟）
+   四个分位全部完全分离、系统性好 **−3% ~ −9.8%** —— **窗口漂移与被测效应同量级**。
+2. **n=3 的「完全分离」是弱证据**：零假设下 3×3 完全分离概率 = `1/C(6,3)` = **5%**；4×3 = 2.9%。
+   曾据此误判过一次（见 [`../dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §11.7.4）。
+3. **不可跨窗口合并样本**：漂移会凭空造出「完全分离」。
+4. 要下 **<10%** 的结论：同窗口、≥3 轮、复现。
+
+### 9.2 目前测到的（1000 VU 平推，跨 1 GbE）
+
+| 对比 | 结论 |
+| --- | --- |
+| `A0 → A1`（`TCP_NODELAY`） | ✅ **全分位 −9% ~ −22%**，4×3 完全分离（p=2.9%），跨窗口复现 |
+| `A1 → D`（backlog 65535） | **≤1000 VU 零延迟贡献**（accept 队列峰值 17/128）；**但 4000 VU 是硬悬崖：128 → fail 34.6%，65535 → 0.00%** —— 它是**并发上限**杠杆，不是延迟杠杆 |
+| `D → A2`（零拷贝等其余 12 项） | ❌ 1000 VU 下**测不出收益**（四个分位全部重叠） |
+| `A0 → A2`（0.2.0 → 0.3.0 全部） | 改善集中在 `TCP_NODELAY` 那一项 |
+
+**⇒ xlite 低载延迟的立足点是 `TCP_NODELAY`**；backlog 与热路径零拷贝在低载不是延迟手段。
+
+**backlog 65535 要照发**：它不是延迟优化，是**并发上限**保障 —— 4000 VU 下 128 直接
+34.6% 失败，65535 为 0.00%。**别因为"低载测不出延迟收益"就把它当成可选项。**
+
+> **backlog 悬崖与线程数无关**（4000 VU 下 TWT=128/32/8 都是 34.6%，失败计数几乎相同）——
+> 见 dev 文档 §12.4。调线程不会影响这条。
+
+**未测到的两个**（都别当成已否定）：
+
+- **零拷贝 / 热路径 CPU 那 12 项**：延迟（§11.7.4）与 CPU（§12.3）**两头都测不出**。
+  收益面可能是更高的请求率或更长 payload，现台架够不到 —— 见 dev 文档 §12.4 待办。
+- **`TOKIO_WORKER_THREADS` 的缩放**：实测 **1000 VU 下 2 线程最优**（省 40% CPU、p95 −60%），
+  **4000 VU 下 128→8 省 9%**；幅度随载荷变小，所以**必须按负载定，不能抄常数**。
+  4000 VU 的最优值（4/2？拐点在哪）**未测**。
