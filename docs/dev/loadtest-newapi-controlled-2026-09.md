@@ -870,7 +870,7 @@ CPU 并不随**并发流数**线性增长：1000 VU（~992 流 / 138.7 req/s）�
 1. `TOKIO_WORKER_THREADS` 在 4000 VU 的**最优值** —— 只测了 128/32/8，8 最好，没试 4/2，也没找拐点。
 2. 零拷贝那 12 项在**更高请求率 / 更长 payload** 下的收益 —— 现台架 1 GbE 先绑死（§9），够不到。
 
-### 12.6 `RwLock` → `ArcSwap`：**CPU 无收益（假设证伪），但尾部尖刺被消掉**
+### 12.6 `RwLock` → `ArcSwap`：读者不再被写者阻塞（**结构性**）；CPU 无收益（假设证伪）；尾部未达门槛
 
 **假设**：`store.rs` 的路由快照是 `Arc<std::sync::RwLock<Snapshot>>`，每个请求都要在这把锁的
 原子上做一次读加锁 —— 128 个 worker 就是 128 个核在同一条缓存行上来回弹。
@@ -886,14 +886,31 @@ CPU 并不随**并发流数**线性增长：1000 VU（~992 流 / 138.7 req/s）�
 
 （不引用 `S` 的提交哈希：reword/rebase 会让它变，而二进制 sha256 才是身份。）
 
-目录后端 sqlite、`XLITE_CATALOG_RELOAD_SECS=5`（**reload 写路径全程活着**，这正是被测的停顿来源）、
-backlog 65535。**3 轮同窗口交错**，第 3 轮**反序**（先 `S` 后 `L`）以抵消位置效应。
+目录后端 sqlite、`XLITE_CATALOG_RELOAD_SECS=5`、backlog 65535。**3 轮同窗口交错**，
+第 3 轮**反序**（先 `S` 后 `L`）以抵消位置效应。
 
-**工件可复跑**：[`scripts/loadtest/ab_configs.sh`](../../scripts/loadtest/ab_configs.sh)（本轮即用它跑出）
+> ⚠️ **本轮没有走到被改的那条路径（读代码即可确认）**：`reload()` 在路由内容不变时提前
+> `return`（冻结的 sqlite 目录下每个字段都稳定，channels 还带显式 `ORDER BY`），所以
+> 120s 窗口里 `store()` / 写锁**一次都没执行** —— 这份 CPU/p99 零结果只证明**读路径**没有
+> 可测成本，**不构成对「写者阻塞读者」这个停顿的量化证据**。要量它必须制造一次真实换快照
+> （窗口间改路由再 import），见 [`scripts/loadtest/e2e_reload_swap.sh`](../../scripts/loadtest/e2e_reload_swap.sh)。
+> 因此立项口径只能是结构性的：**读者不再被写者阻塞**（`RwLock` 下写者持锁期间读请求要等它，
+> `ArcSwap` 下读者继续用旧 `Arc`），而不是"我们测到了停顿"。
+
+**为什么不改成零新依赖的 `mem::replace`**：那把旧快照的析构挪出临界区，但**写者仍要持写锁
+完成换指针**，读者依旧会在那一刻等待 —— 与本节要主张的结构性性质不符。`arc-swap` 本来就是
+传递依赖（`redis` 带进来，见 `Cargo.lock`），新增的只是一条依赖边。
+
+**工件可复跑**：[`scripts/loadtest/ab_configs.sh`](../../scripts/loadtest/ab_configs.sh)（本轮即用它跑出；
+它会打印 k6 镜像 digest 与 `k6.js` md5/sha256，并把生效 env 写进 `progress.log`）
 
 ```bash
-GATEWAY_DIR=/home/bodesi/ab8 ARMS="L:18110 S:18111" CONFIGS="TWT=128" \
-  scripts/loadtest/ab_configs.sh      # 产出 progress.log + k6 日志 + /proc/<pid>/stat CPU 采样
+# 复现 §12.6 的三轮交错（第 3 轮反序）——单轮 A / 单轮 B 分不出与噪声的差别
+for round in 1 2 3; do
+  GATEWAY_DIR=/home/bodesi/ab8 OUT=$HOME/labtest/ab-arcswap-r$round \
+    ARMS="$([ "$round" -eq 3 ] && echo 'S:18111 L:18110' || echo 'L:18110 S:18111')" \
+    CONFIGS="TWT=128" scripts/loadtest/ab_configs.sh
+done
 ```
 
 `gateway_overhead_ms`（ms）与 cores，`TWT=128`、1000 VU 平推 120s：

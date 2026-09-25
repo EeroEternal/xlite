@@ -67,9 +67,39 @@ SSH_OPTS=${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no}
 GW="ssh $SSH_OPTS $GATEWAY_HOST"
 
 mkdir -p "$OUT"
-ulimit -n 1048576 2>/dev/null
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/progress.log"; }
+
+md5_of() {
+  if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | awk '{print $1}';
+  else md5 -q "$1"; fi
+}
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+# 配置短键 → 网关**真实** env 名。
+# 不映射就会把 `TWT=128` 原样丢给 `env`，而网关只读 TOKIO_WORKER_THREADS —— 那会静默
+# 产出「三臂完全相同 = 零效应」的假结论（这条正是评审抓到的 blocker）。
+map_cfg_key() {
+  case "$1" in
+    TWT)    printf 'TOKIO_WORKER_THREADS' ;;
+    CONNS)  printf 'XLITE_UPSTREAM_MAX_CONNS_PER_HOST' ;;
+    RELOAD) printf 'XLITE_CATALOG_RELOAD_SECS' ;;
+    *) return 1 ;;
+  esac
+}
+
+# 跑数身份：k6.js 与 k6 镜像必须可追溯，否则「工件可复跑」是空话。
+K6_JS=${K6_JS:-$K6_DIR/k6.js}
+[ -f "$K6_JS" ] || { echo "✗ 找不到 K6_JS=${K6_JS}（k6 脚本；它是以 -v ${K6_DIR}:/k6 挂进容器的）" >&2; exit 2; }
+K6_JS_MD5=$(md5_of "$K6_JS")
+K6_JS_SHA256=$(sha256_of "$K6_JS")
+K6_IMAGE_ID=$(docker image inspect --format '{{index .RepoDigests 0}}' "$K6_IMAGE" 2>/dev/null \
+  || docker image inspect --format '{{.Id}}' "$K6_IMAGE" 2>/dev/null || echo n/a)
+K6_GRACEFUL_OK=$(grep -c 'gracefulStop: GRACEFUL_STOP' "$K6_JS" || true)
+[ "$K6_GRACEFUL_OK" -ge 1 ] || { echo "✗ $K6_JS 不是仓库版（gracefulStop 未参数化）" >&2; exit 2; }
 
 # ---------------------------------------------------------------- 远端助手
 # 装一次，之后用参数调用，避免多层引号转义（这里踩过好几次）。
@@ -128,7 +158,7 @@ run_k6() {      # $1=port $2=outfile
     -e TARGET_URL="http://$TARGET_HOST:$1/v1/chat/completions" \
     -e TOKEN="$TOKEN" -e MODEL="$MODEL" -e STREAM=true \
     -e IN_TOKENS=100 -e OUT_TOKENS=500 -e VUS="$VUS" -e DURATION="$DURATION" -e MAX_VUS="$VUS" \
-    -e STREAM_TIMEOUT=600000 -e WARMUP="$WARMUP" -e KEEP_BODY=true -e KEEP_SAMPLE=1 \
+    -e STREAM_TIMEOUT=600000 -e WARMUP="$WARMUP" -e KEEP_BODY=true \
     -e GRACEFUL_STOP="$GRACEFUL_STOP" \
     "$K6_IMAGE" run --compatibility-mode=base \
     --summary-trend-stats='p(50),p(90),p(95),p(99),avg,min,max' /k6/k6.js > "$2" 2>&1
@@ -136,21 +166,43 @@ run_k6() {      # $1=port $2=outfile
 
 # ---------------------------------------------------------------- 主循环
 log "ab_configs: arms=[$ARMS] configs=[$CONFIGS] vus=$VUS dur=$DURATION stop=$GRACEFUL_STOP"
+log "身份: k6.js=$K6_JS md5=$K6_JS_MD5 sha256=$K6_JS_SHA256 | k6 镜像=$K6_IMAGE id=$K6_IMAGE_ID"
+ok_groups=0
 for arm_spec in $ARMS; do
   arm=${arm_spec%%:*}; port=${arm_spec##*:}
   for cfg in $CONFIGS; do
-    if [ "$cfg" = "-" ]; then cfg_env=""; label="$arm-default"
-    else cfg_env=$(printf '%s' "$cfg" | tr ',' ' '); label="$arm-$(printf '%s' "$cfg" | tr ',' '_')"; fi
-    log "开始 $label (port $port)"
+    if [ "$cfg" = "-" ]; then
+      cfg_env=""; label="$arm-default"
+    else
+      cfg_env=""
+      for kv in $(printf '%s' "$cfg" | tr ',' ' '); do
+        key=${kv%%=*}; val=${kv#*=}
+        if [ "$key" = "$val" ]; then log "✗ 配置 '$kv' 缺少 '=值'（形如 TWT=128）—— 中止"; exit 2; fi
+        if ! real=$(map_cfg_key "$key"); then
+          log "✗ 未知配置键 '$key'（可用：TWT / CONNS / RELOAD）—— 中止：原样传给 env 会静默产出假零效应"
+          exit 2
+        fi
+        cfg_env="$cfg_env $real=$val"
+      done
+      label="$arm-$(printf '%s' "$cfg" | tr ',' '_')"
+    fi
+    log "开始 $label (port $port) 生效 env:[${cfg_env:- 默认}]"
     info=$(start_arm "$arm" "$port" $cfg_env)
     if [ "$info" = "START_FAILED" ]; then log "  $label 网关启动失败，跳过"; continue; fi
     log "  gw: $info"
     pid=$(printf '%s' "$info" | sed -E 's/.*pid=([0-9]+).*/\1/')
+    gw_backlog=$(printf '%s' "$info" | sed -nE 's/.*backlog=([0-9]+).*/\1/p')
+    [ -n "$gw_backlog" ] || log "  ⚠️ $label 读不到监听 backlog（远端没有 ss？）—— accept 触顶无法判定"
     $GW "setsid nohup bash /tmp/ab_gw.sh cpu '$pid' '$GATEWAY_DIR/cpu-$label.log' >/dev/null 2>&1 < /dev/null & sleep 1; echo up" >/dev/null
     run_k6 "$port" "$OUT/$label.log"
     $GW "bash /tmp/ab_gw.sh stop '$port'" >/dev/null 2>&1
-    log "  cores=$(cores_of "$GATEWAY_DIR/cpu-$label.log")"
+    log "  cores=$(cores_of "$GATEWAY_DIR/cpu-$label.log") backlog=${gw_backlog:-unknown} env:[${cfg_env:- 默认}]"
     grep -E "gateway_overhead_ms|http_reqs\.|http_req_failed" "$OUT/$label.log" | sed "s/^/  $label /" | tee -a "$OUT/progress.log"
+    ok_groups=$((ok_groups + 1))
   done
 done
-log "ab_configs 完成"
+if [ "$ok_groups" -eq 0 ]; then
+  log "✗ ab_configs 结束：0 个组合成功（网关未起/ssh 不通/docker 拉不到？）→ 非零退出，避免把空结果当成结论"
+  exit 2
+fi
+log "ab_configs 完成：$ok_groups 个组合成功"

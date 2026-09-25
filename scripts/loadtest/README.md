@@ -3,6 +3,14 @@
 喂法规则、以及「哪一份 k6.js 真正跑了」的判据见
 [`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md)。
 
+| 文件 | 用途 |
+| --- | --- |
+| `k6/k6.js` | 喂负载的脚本（下面第一节） |
+| `run_levels.sh` + `report.py` | **对标 New API** 的定档位压测 + 三道闸门（指纹 / 活跃流 / 链路预算） |
+| `link_budget.py` | 链路预算预检（`--selftest` 自证；退出码 2 = LINK-BOUND） |
+| `ab_configs.sh` | **同一份代码里某个旋钮/改动值不值**的 A/B harness（判决指标含网关 CPU）；`CONFIGS` 的短键 `TWT/CONNS/RELOAD` 会映射成真实 env 名，未知键直接非零退出 |
+| `e2e_reload_swap.sh` | **端到端**验证「reload → 换快照 → 读者看到新快照」（`ab_configs.sh` 在目录冻结时走不到那条路径） |
+
 **对标表只报 `ttft / dur / fail / qps / ESTAB / 活跃流`。**
 活跃流用**闭式** `VUS × dur/iter`（见 [`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) §2）；
 `qps × dur` 被排空段稀释、系统性低报，只在拿不到 `iteration_duration` 时当**下界**用。

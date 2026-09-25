@@ -58,11 +58,19 @@ pub struct Snapshot {
 pub struct Store {
     /// Routing snapshot, swapped wholesale by the reload loop.
     ///
-    /// `ArcSwap` rather than `RwLock`: every request reads this, so with an
-    /// `RwLock` the guard's atomic is a single shared cache line that every
-    /// worker thread bounces off every request. `load()` is a lock-free atomic
-    /// acquire instead, and the writer (`reload`) uses `store`, so readers never
-    /// block a writer or each other. Measured effect and method: see
+    /// `ArcSwap` rather than `RwLock`, for a **structural** reason: with an
+    /// `RwLock`, a `reload()` writer holds the lock while it swaps the snapshot
+    /// (and, before this change, while it dropped the old one), so concurrent
+    /// readers wait on it; with `ArcSwap` readers keep serving the old `Arc` and
+    /// never wait. `load()` is a lock-free acquire.
+    ///
+    /// Not `mem::replace` under the same `RwLock`: that would move the old
+    /// snapshot's drop outside the critical section, but the writer would still
+    /// hold the lock while swapping, so readers would still wait at that moment.
+    ///
+    /// The CPU rationale ("the lock's cache line bounces between workers") is a
+    /// **falsified hypothesis, not a claim**: measured at +0.15% (inside noise).
+    /// Method, negative result and its limits: see
     /// `docs/dev/loadtest-newapi-controlled-2026-09.md` §12.6.
     inner: Arc<ArcSwap<Snapshot>>,
     catalog: Catalog,
@@ -83,10 +91,9 @@ impl Store {
     pub async fn reload(&self) -> Result<()> {
         let routing = self.catalog.load_routing().await?;
         let next = snapshot_from_routing(routing);
-        // Skip the swap when nothing changed. With `ArcSwap` this is not about
-        // avoiding a stall (readers never block) but about not churning the
-        // shared pointer — and it keeps the reload loop from allocating a new
-        // snapshot every few seconds when the routing is identical.
+        // Skip the swap when nothing changed: the snapshot is rebuilt above on
+        // every reload anyway, so this saves the pointer store and keeps the loop
+        // from churning the shared pointer every few seconds.
         if self.inner.load().as_ref() == &next {
             return Ok(());
         }
