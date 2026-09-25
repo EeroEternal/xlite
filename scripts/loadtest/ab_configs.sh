@@ -94,24 +94,38 @@ map_cfg_key() {
 # 跑数身份：k6.js 与 k6 镜像必须可追溯，否则「工件可复跑」是空话。
 K6_JS=${K6_JS:-$K6_DIR/k6.js}
 [ -f "$K6_JS" ] || { echo "✗ 找不到 K6_JS=${K6_JS}（k6 脚本；它是以 -v ${K6_DIR}:/k6 挂进容器的）" >&2; exit 2; }
+[ "$K6_JS" = "$K6_DIR/k6.js" ] || {
+  echo "✗ K6_JS=${K6_JS} 与容器挂载点 ${K6_DIR}/k6.js 不是同一份 —— 哈希会对不上真正跑的那份脚本" >&2
+  exit 2
+}
 K6_JS_MD5=$(md5_of "$K6_JS")
 K6_JS_SHA256=$(sha256_of "$K6_JS")
-K6_IMAGE_ID=$(docker image inspect --format '{{index .RepoDigests 0}}' "$K6_IMAGE" 2>/dev/null \
-  || docker image inspect --format '{{.Id}}' "$K6_IMAGE" 2>/dev/null || echo n/a)
+# digest 优先，取不到就退回镜像 ID；两种情况都可能只吐一个空行，所以必须显式判空。
+K6_IMAGE_ID=$(docker image inspect --format '{{index .RepoDigests 0}}' "$K6_IMAGE" 2>/dev/null | head -1 | tr -d '\n' || true)
+[ -n "$K6_IMAGE_ID" ] || K6_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$K6_IMAGE" 2>/dev/null | head -1 | tr -d '\n' || true)
+[ -n "$K6_IMAGE_ID" ] || K6_IMAGE_ID=n/a
 K6_GRACEFUL_OK=$(grep -c 'gracefulStop: GRACEFUL_STOP' "$K6_JS" || true)
 [ "$K6_GRACEFUL_OK" -ge 1 ] || { echo "✗ $K6_JS 不是仓库版（gracefulStop 未参数化）" >&2; exit 2; }
 
-# 配置键**开跑前**就校验一遍：拼错一个键就必须在这里死，而不是等 ssh/docker 起来之后
-# 才发现「三臂跑的是同一个默认值」。
+# 配置键**和值**开跑前就校验：拼错一个键/写个非法值必须在这里死，而不是等 ssh/docker
+# 起来之后才发现「三臂跑的是同一个默认值」。网关对非法 env 会**静默**退回默认
+# （`src/config.rs` 的 `unwrap_or(32)` / `unwrap_or(5)`），那正是假零效应的成因。
 for cfg in $CONFIGS; do
   [ "$cfg" = "-" ] && continue
   for kv in $(printf '%s' "$cfg" | tr ',' ' '); do
-    key=${kv%%=*}
+    key=${kv%%=*}; val=${kv#*=}
     [ "$key" = "$kv" ] && { echo "✗ 配置 '$kv' 缺少 '=值'（形如 TWT=128）" >&2; exit 2; }
     map_cfg_key "$key" >/dev/null || {
       echo "✗ 未知配置键 '$key'（可用：TWT / CONNS / RELOAD）—— 原样传给 env 会静默产出假零效应" >&2
       exit 2
     }
+    case "$val" in
+      ''|*[!0-9]*) echo "✗ 配置 '$kv' 的值必须是十进制整数（非数字会被网关静默丢掉，退回默认）" >&2; exit 2 ;;
+    esac
+    if [ "$key" != "RELOAD" ] && [ "$val" -eq 0 ]; then
+      echo "✗ 配置 '$kv' 的值必须 > 0（0 会被网关当成非法值退回默认；只有 RELOAD=0 有意义 = 冻结快照）" >&2
+      exit 2
+    fi
   done
 done
 
@@ -191,11 +205,7 @@ for arm_spec in $ARMS; do
       cfg_env=""
       for kv in $(printf '%s' "$cfg" | tr ',' ' '); do
         key=${kv%%=*}; val=${kv#*=}
-        if [ "$key" = "$val" ]; then log "✗ 配置 '$kv' 缺少 '=值'（形如 TWT=128）—— 中止"; exit 2; fi
-        if ! real=$(map_cfg_key "$key"); then
-          log "✗ 未知配置键 '$key'（可用：TWT / CONNS / RELOAD）—— 中止：原样传给 env 会静默产出假零效应"
-          exit 2
-        fi
+        real=$(map_cfg_key "$key")   # 键与值都已在开跑前校验过
         cfg_env="$cfg_env $real=$val"
       done
       label="$arm-$(printf '%s' "$cfg" | tr ',' '_')"
@@ -207,12 +217,21 @@ for arm_spec in $ARMS; do
     pid=$(printf '%s' "$info" | sed -E 's/.*pid=([0-9]+).*/\1/')
     gw_backlog=$(printf '%s' "$info" | sed -nE 's/.*backlog=([0-9]+).*/\1/p')
     [ -n "$gw_backlog" ] || log "  ⚠️ $label 读不到监听 backlog（远端没有 ss？）—— accept 触顶无法判定"
+    arm_hash=$($GW "sha256sum '$GATEWAY_DIR/xlite-$arm' 2>/dev/null | awk '{print \$1}'" || true)
+    log "  臂 $arm 二进制 sha256=${arm_hash:-unknown}"
     $GW "setsid nohup bash /tmp/ab_gw.sh cpu '$pid' '$GATEWAY_DIR/cpu-$label.log' >/dev/null 2>&1 < /dev/null & sleep 1; echo up" >/dev/null
     run_k6 "$port" "$OUT/$label.log"
     $GW "bash /tmp/ab_gw.sh stop '$port'" >/dev/null 2>&1
-    log "  cores=$(cores_of "$GATEWAY_DIR/cpu-$label.log") backlog=${gw_backlog:-unknown} env:[${cfg_env:- 默认}]"
+    cores=$(cores_of "$GATEWAY_DIR/cpu-$label.log")
+    log "  cores=$cores backlog=${gw_backlog:-unknown} env:[${cfg_env:- 默认}]"
     grep -E "gateway_overhead_ms|http_reqs\.|http_req_failed" "$OUT/$label.log" | sed "s/^/  $label /" | tee -a "$OUT/progress.log"
-    ok_groups=$((ok_groups + 1))
+    # 「成功」必须是**取到指标**，不只是网关起来：docker/k6 全挂时 k6 日志里没有任何指标，
+    # 那种组合不能算数（否则会打印「1 个组合成功」并 exit 0）。
+    if grep -q 'gateway_overhead_ms' "$OUT/$label.log" 2>/dev/null && [ -n "$cores" ] && [ "$cores" != "n/a" ]; then
+      ok_groups=$((ok_groups + 1))
+    else
+      log "  ✗ $label 未取到有效指标（cores=$cores）—— 不计入成功"
+    fi
   done
 done
 if [ "$ok_groups" -eq 0 ]; then

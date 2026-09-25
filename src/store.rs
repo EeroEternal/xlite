@@ -91,9 +91,12 @@ impl Store {
     pub async fn reload(&self) -> Result<()> {
         let routing = self.catalog.load_routing().await?;
         let next = snapshot_from_routing(routing);
-        // Skip the swap when nothing changed: the snapshot is rebuilt above on
-        // every reload anyway, so this saves the pointer store and keeps the loop
-        // from churning the shared pointer every few seconds.
+        // Skip the swap when nothing changed. The snapshot is rebuilt above on every
+        // reload anyway, so this is not about allocation: `ArcSwap`'s pointer store is
+        // O(1), while this `==` is a deep compare. What it buys is that a genuine
+        // swap happens *only* on real change — so the previous snapshot is not handed
+        // to the reclaimer (it is dropped by whichever thread releases the last
+        // `Guard`, see §12.6) every few seconds for nothing.
         if self.inner.load().as_ref() == &next {
             return Ok(());
         }
@@ -277,6 +280,80 @@ mod tests {
                 .iter()
                 .all(|c| Arc::ptr_eq(c, &group[0]) || Arc::ptr_eq(c, &group[1])),
             "every ordered channel must be a pointer to an input, never a clone"
+        );
+    }
+
+    /// 回归：`reload()` 换快照后，**已经拿到的 key 句柄**必须看到新路由、且旧路由消失。
+    /// 这是 `RwLock` → `ArcSwap` 这次改动唯一的行为契约（读者不再被写者阻塞，但换代必须可见）。
+    fn catalog_yaml(model: &str) -> String {
+        format!(
+            r#"providers:
+  - name: p
+    base_url: http://127.0.0.1:1
+    api_key: ""
+    enabled: true
+models:
+  - name: {model}
+    enabled: true
+    channels:
+      - provider: p
+        upstream_model: m
+        weight: 1
+        priority: 0
+        enabled: true
+api_keys:
+  - name: k
+    key: sk-test
+    models: []
+    enabled: true
+"#
+        )
+    }
+
+    #[tokio::test]
+    async fn reload_swaps_the_snapshot_so_readers_see_the_new_routing() {
+        use crate::catalog::{Catalog, yaml};
+        use crate::config::Config;
+
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: false,
+            admin_password: "admin".into(),
+            session_secret: None,
+            max_conns_per_host: 8,
+            catalog_reload_secs: 0,
+            upstream_ttft_header: false,
+        };
+        let catalog = Catalog::connect(&cfg).await.expect("connect");
+        yaml::import_yaml(&catalog, &catalog_yaml("alpha"), yaml::ImportMode::Replace)
+            .await
+            .expect("import alpha");
+        let store = Store::new(catalog.clone());
+        store.reload().await.expect("reload alpha");
+
+        let key = store.authenticate("sk-test").expect("key survives reload");
+        assert_eq!(
+            store.channels_for(&key, "alpha").map(|c| c.len()),
+            Some(1),
+            "alpha must route after the first reload"
+        );
+        assert!(store.channels_for(&key, "beta").is_none());
+
+        yaml::import_yaml(&catalog, &catalog_yaml("beta"), yaml::ImportMode::Replace)
+            .await
+            .expect("import beta");
+        store.reload().await.expect("reload beta");
+
+        assert!(
+            store.channels_for(&key, "alpha").is_none(),
+            "the old route must be gone after the swap"
+        );
+        assert_eq!(
+            store.channels_for(&key, "beta").map(|c| c.len()),
+            Some(1),
+            "the same key handle must observe the new snapshot"
         );
     }
 }

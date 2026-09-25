@@ -4,9 +4,10 @@
 #
 # 为什么需要它：A/B harness（`ab_configs.sh`）量的是**同配置下的 CPU/延迟差异**，而目录冻结
 # 时 `reload()` 会在内容不变处提前 return —— 也就是说它**根本没走到**被改的换快照路径
-# （见 `docs/dev/loadtest-newapi-controlled-2026-09.md` §12.6）。这个脚本反过来：**制造一次
-# 真实的路由变化**，然后用「旧模型 404 / 新模型 200」直接证明换代可见，并可选地在换快照
-# 窗口内压一把，检查 fail=0。
+# （见 `docs/dev/loadtest-newapi-controlled-2026-09.md` §12.6）。这个脚本反过来：**制造真实
+# 换代**，然后用「旧模型 404 / 新模型 200」直接证明换代可见；并发段**期间每 2s 交替 import
+# 两份 weight 不同的目录**（模型名不变 ⇒ 路由仍可用，但快照内容变了 ⇒ `store()` 真的执行），
+# 所以那段确实是「换快照窗口内」，fail=0% 才有意义。
 #
 # 用法：
 #   XLITE_BIN=/path/to/xlite scripts/loadtest/e2e_reload_swap.sh
@@ -44,7 +45,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat_yaml() { # $1=模型名
+cat_yaml() { # $1=模型名 $2=weight（默认 1）
   cat <<YAML
 providers:
   - name: mock-a
@@ -57,7 +58,7 @@ models:
     channels:
       - provider: mock-a
         upstream_model: mock
-        weight: 1
+        weight: ${2:-1}
         priority: 0
         enabled: true
 api_keys:
@@ -70,7 +71,18 @@ YAML
 
 cat_yaml mock  > "$OUT/catalog-a.yaml"
 cat_yaml mock2 > "$OUT/catalog-b.yaml"
+# 并发段用的两份：模型名相同（路由一直可用），只有 weight 不同 —— 内容变了 ⇒ store() 会执行。
+cat_yaml mock2 1 > "$OUT/catalog-c.yaml"
+cat_yaml mock2 7 > "$OUT/catalog-d.yaml"
 DB="sqlite:$OUT/e2e.db"
+
+# 端口必须先确认是空的：否则健康探测会打到上一轮残留进程上，断言会以误导的方式通过/失败。
+for p in "$MOCK_PORT" "$GW_PORT"; do
+  if curl -s -m 1 "http://127.0.0.1:$p/health" >/dev/null 2>&1; then
+    echo "✗ :$p 已有服务在监听（上一轮残留？先清掉再跑）" >&2
+    exit 2
+  fi
+done
 
 echo "[e2e] mock :$MOCK_PORT"
 node "$REPO_ROOT/scripts/stream_mock_server.mjs" --port "$MOCK_PORT" --listen 127.0.0.1 \
@@ -112,20 +124,37 @@ check "mock2(新模型) " "$(code mock2)" 200
 
 if [ "$VUS" -gt 0 ]; then
   command -v k6 >/dev/null || { echo "✗ VUS>0 但本机没有 k6" >&2; exit 2; }
-  echo "[e2e] 并发段：${VUS} VU × ${DURATION}（换快照窗口内）"
+  echo "[e2e] 并发段：${VUS} VU × ${DURATION}，期间每 2s 交替 import weight=1/7 的目录（**真的在换代**）"
+  churn_pid=""
+  (
+    i=0
+    while :; do
+      i=$((i + 1))
+      if [ $((i % 2)) -eq 0 ]; then src="$OUT/catalog-c.yaml"; else src="$OUT/catalog-d.yaml"; fi
+      # 用 **merge**（不带 --replace）：merge 会 upsert channel 的 weight ⇒ 快照内容变了、
+      # `store()` 会执行；而 `--replace` 是 `wipe()` 之后再插入、**没有事务**，中间的空目录
+      # 一旦被 reload 拍到就会让请求 404，测试会假失败。
+      DATABASE_URL="$DB" "$XLITE_BIN" import "$src" > "$OUT/import-churn-$i.log" 2>&1 || true
+      sleep 2
+    done
+  ) &
+  churn_pid=$!
   k6 run --compatibility-mode=base --summary-export="$OUT/k6.json" \
     -e TARGET_URL="http://127.0.0.1:$GW_PORT/v1/chat/completions" -e TOKEN=sk-loadtest -e MODEL=mock2 \
     -e STREAM=true -e IN_TOKENS=4 -e OUT_TOKENS=5 -e VUS="$VUS" -e MAX_VUS="$VUS" -e WARMUP=0 \
     -e DURATION="${DURATION}" -e STREAM_TIMEOUT=30000 -e KEEP_BODY=true \
     "$REPO_ROOT/scripts/loadtest/k6/k6.js" > "$OUT/k6.log" 2>&1 || true
-  python3 - "$OUT/k6.json" <<'PY'
+  kill "$churn_pid" 2>/dev/null || true
+  if ! python3 - "$OUT/k6.json" <<'PY'
 import json, sys
 m = json.load(open(sys.argv[1]))["metrics"]
 fails = m["http_req_failed"]["value"] * 100
-print(f"  {'✓' if fails == 0 else '✗'} 并发段 fail = {fails:.2f}%   http_reqs = {m['http_reqs']['count']:.0f}")
+print(f"  {'✓' if fails == 0 else '✗'} 并发段（跨换代）fail = {fails:.2f}%   http_reqs = {m['http_reqs']['count']:.0f}")
 sys.exit(0 if fails == 0 else 1)
 PY
-  [ $? -eq 0 ] || fail=1
+  then
+    fail=1
+  fi
 fi
 
 [ "$fail" -eq 0 ] && { echo "[e2e] ✓ 全部通过，产物在 $OUT"; exit 0; }
