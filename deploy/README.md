@@ -150,7 +150,8 @@ docker build -t xlite:0.5.0 .
 docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
-> `Dockerfile` 默认用**与 `rust-toolchain.toml` 同版本**的 base 镜像（不触发 rustup 下载工具链）。
+> `Dockerfile` 默认用**与 `rust-toolchain.toml` 同版本**的 base 镜像（工具链本体不用下；
+> 但 base 是 minimal profile，rustup 每次构建都会经 RUSTUP_MIRROR 补 clippy/rustfmt 组件）。
 > 依赖走哪条路由**构建上下文里有没有离线脚手架**自动决定，没有开关：
 >
 > | 上下文里有 `.cargo/` + `vendor/`？ | builder 段 | 要不要外网 |
@@ -168,15 +169,13 @@ docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 > scripts/prepare_offline_vendor.sh --check  # 换机器后校验；缺失即 exit 2（不联网）
 > ```
 >
-> 新克隆（无脚手架）时各外网依赖都可以指国内镜像（全部默认空 = 官方源，行为不变）：
+> **默认面向国内构建**：npm 走 npmmirror、crates.io 在线分支走 rsproxy、rustup 组件走 USTC
+> —— 三个 build-arg 的默认值已内置，`docker build .` 即可；要回官方源给对应参数传**空值**：
 >
 > ```bash
+> docker build -t xlite:0.5.0 .                              # 国内默认
 > docker build -t xlite:0.5.0 \
->   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
->   --build-arg CRATES_MIRROR=sparse+https://rsproxy.cn/index/ .
-> # 覆盖 rust base 且与 toolchain pin 不同版本、rustup 真要下工具链时，再加：
-> #   --build-arg RUST_IMAGE=rust:1.93-bookworm \
-> #   --build-arg RUSTUP_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/rustup
+>   --build-arg NPM_REGISTRY= --build-arg CRATES_MIRROR= .   # 回官方源
 > ```
 >
 > **docker.io 上的基础镜像**（`node` / `rust` / `debian`）拉不动是 **daemon 层**的问题，

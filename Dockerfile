@@ -1,24 +1,23 @@
 # xlite gateway image. Build from the repo root:
 #   docker build -t xlite:dev .
 #
-# 国内可构建（三条外网依赖 + 一条 daemon 层）：
+# **默认面向国内构建**：npm / crates.io（在线分支）/ rustup 三处镜像站内置为默认值，
+# `docker build .` 即国内可构建；要回官方源给对应 build-arg 传**空值**。
 #   1. Rust 工具链：base 镜像默认**与 `rust-toolchain.toml` 的 pin 同版本**（1.93.1），
-#      所以 `cargo` 不会再让 rustup 去 static.rust-lang.org 下工具链。
-#      镜像源里没有这个 tag 时用 --build-arg 覆盖；覆盖出的 base 与 pin **不同版本**时
-#      rustup 要下工具链，可同时给镜像（默认空 = 官方源）：
-#        docker build --build-arg RUST_IMAGE=rust:1.93-bookworm \
-#          --build-arg RUSTUP_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/rustup -t xlite:dev .
+#      工具链本体不用下；但官方 rust 镜像是 **minimal profile**（不带 clippy/rustfmt），
+#      而 rust-toolchain.toml 要求这两个组件 ⇒ **每次构建 rustup 都会补装**（实测），
+#      默认走 USTC 镜像 —— 这正是国内构建原本卡死在 static.rust-lang.org 的那一步。
+#      镜像源里没有这个 tag 时 --build-arg 覆盖 base（不同版本同理走镜像）：
+#        docker build --build-arg RUST_IMAGE=rust:1.93-bookworm .
 #   2. 依赖：构建上下文里**有**本机离线脚手架（`.cargo/` + `vendor/`，用
 #      `scripts/prepare_offline_vendor.sh` 生成）时，builder 段走 `cargo build --offline`，
-#      不访问 crates.io；**没有就自动退回在线构建**（`cargo build`，需要 crates.io）。
-#      这两个目录在 `.gitignore` 里（本地脚手架，从不提交），所以新克隆的机器默认走在线。
-#      在线构建连 crates.io 慢/不通时给 sparse 镜像（默认空 = 官方源；USTC/TUNA 也有同款）：
-#        --build-arg CRATES_MIRROR=sparse+https://rsproxy.cn/index/
+#      不访问 crates.io（rustup 组件仍走 RUSTUP_MIRROR，见第 1 条）；**没有就自动退回
+#      在线构建**，crates.io 默认走 rsproxy（回官方：`--build-arg CRATES_MIRROR=`）。这两个目录在 `.gitignore` 里
+#      （本地脚手架，从不提交），所以新克隆的机器默认走在线。
 #   3. 基础镜像在 docker.io：这是 **daemon 层**的事，Dockerfile 管不了 —— 国内给 dockerd
 #      配 registry mirror（/etc/docker/daemon.json 的 "registry-mirrors"，改完
 #      systemctl restart docker）。镜像站时效变化频繁，失效就换一个。
-#   npm 走 registry；要用镜像站：
-#        --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+#   npm 默认走 npmmirror（回官方：`--build-arg NPM_REGISTRY=`）。
 #
 # 需要 BuildKit：builder 段用 `RUN --mount=type=bind` 把（被 .dockerignore 过滤后的）
 # 整个构建上下文只读挂进容器，才能对**可能不存在**的脚手架做条件分支 —— `COPY` 对不存在
@@ -31,7 +30,8 @@ ARG RUST_IMAGE=rust:1.93.1-bookworm
 FROM node:20-bookworm-slim AS admin
 WORKDIR /admin
 COPY admin/package.json admin/package-lock.json ./
-ARG NPM_REGISTRY=
+# npm 默认走 npmmirror；回官方传空：--build-arg NPM_REGISTRY=
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
     && npm ci
 COPY admin/ ./
@@ -44,11 +44,13 @@ COPY crates ./crates
 COPY src ./src
 COPY migrations ./migrations
 COPY --from=admin /admin/dist ./admin/dist
-# 可选镜像站（默认空 = 官方源，行为不变）：
-#   RUSTUP_MIRROR — rustup 下工具链的镜像；仅当 base 与 pin 不同版本、rustup 真要下载时生效。
-#   CRATES_MIRROR — 在线分支的 crates.io sparse 镜像；离线脚手架存在时被忽略。
-ARG RUSTUP_MIRROR=
-ARG CRATES_MIRROR=
+# 镜像站默认值（**默认国内**；传空回官方源，如 --build-arg CRATES_MIRROR= ）：
+#   RUSTUP_MIRROR — rustup 补 clippy/rustfmt 组件（base 是 minimal profile，每次构建必走）、
+#                   及工具链下载（仅 base 与 pin 不同版本时）的镜像。USTC 的 dist 与上游
+#                   字节一致；TUNA/rsproxy 的 dist 路径实测 404，别换过去。
+#   CRATES_MIRROR — 在线分支的 crates.io sparse 镜像；离线脚手架存在时被忽略（离线优先）。
+ARG RUSTUP_MIRROR=https://mirrors.ustc.edu.cn/rust-static
+ARG CRATES_MIRROR=sparse+https://rsproxy.cn/index/
 # `.cargo/` + `vendor/` 是可选的离线脚手架：本机产物、不进 git（见 .gitignore 与
 # scripts/prepare_offline_vendor.sh）。新克隆没有它们，而 `COPY` 不能容忍源缺失，
 # 所以从整个（已被 .dockerignore 过滤的）构建上下文只读挂载后，在这里做条件分支。
