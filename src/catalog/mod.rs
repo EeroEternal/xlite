@@ -90,13 +90,6 @@ impl Catalog {
         }
     }
 
-    pub async fn get_provider(&self, id: i64) -> Result<Option<Provider>> {
-        match &self.inner {
-            Inner::Sqlite(c) => c.get_provider(id).await,
-            Inner::Redis(c) => c.get_provider(id).await,
-        }
-    }
-
     pub async fn create_provider(
         &self,
         name: &str,
@@ -141,13 +134,6 @@ impl Catalog {
         match &self.inner {
             Inner::Sqlite(c) => c.list_models().await,
             Inner::Redis(c) => c.list_models().await,
-        }
-    }
-
-    pub async fn get_model(&self, id: i64) -> Result<Option<Model>> {
-        match &self.inner {
-            Inner::Sqlite(c) => c.get_model(id).await,
-            Inner::Redis(c) => c.get_model(id).await,
         }
     }
 

@@ -1,6 +1,6 @@
 ---
 name: admin-ui-change
-description: Change xlite Admin UI with progressive reading of docs/design.md chapters. Use for admin pages, components, dialogs, wizards, lists, master-detail, selection styling, settings IA, tokens, or any user-visible admin UI work. Never load every design chapter unless editing the whole system.
+description: Change xlite Admin UI with progressive reading of docs/design.md chapters. Use for admin pages, components, dialogs, lists, selection styling, settings IA, tokens, or any user-visible admin UI work. Never load every design chapter unless editing the whole system.
 ---
 
 # Admin UI change (progressive design docs)
@@ -15,7 +15,7 @@ If editing the design system itself, open only the chapters you change (plus Har
 2. `docs/design/surfaces.md` (surface levels: `bg-canvas` / level-1 floating cards / level-2 tonal groups — every card, panel or shadow decision)
 3. `AGENTS.md` §始终生效 → UI + Admin i18n + 列表排序与检索；细则 [`docs/ai/agents/ui-entry.md`](../../../docs/ai/agents/ui-entry.md)
 4. Global settings IA: settings page is the only global-config home
-5. Name the **reader job** (list / detail / wizard / dashboard / settings) before choosing layout
+5. Name the **reader job** (list / detail dialog / dashboard / settings) before choosing layout
 
 ## Route by task (chapter files)
 
@@ -24,15 +24,13 @@ If editing the design system itself, open only the chapters you change (plus Har
 | Colors, dark mode, badges, status, brand narrative | `docs/design/colors.md` |
 | Token table / hex values | `docs/design/tokens.md` |
 | Page title, subtitle, density, i18n wrap | `docs/design/typography.md`, `docs/design/layout.md` (no casual subtitles) |
-| Page shell, sidebar/topbar, page types, dashboard heights, filters | `docs/design/layout.md` |
+| Page shell, sidebar/topbar, page types, filters | `docs/design/layout.md` |
 | Button / Input / Select / Switch / Tabs sizes and states | `docs/design/components.md` + `docs/design/tokens.md` |
-| Wizard / Select / expand causes jump | `docs/design/layout.md` (Layout stability) |
+| Select / toggle causes jump | `docs/design/layout.md` (Layout stability) |
 | Shadows, selected-row depth, radius, card/panel surfaces, canvas tint | `docs/design/surfaces.md` (+ `docs/design/tokens.md` for `canvas` / `shadow-card`) |
 | New list page, row actions, create entry | `docs/design/components.md` (Entity list pattern) + `docs/ai/agents/ui-entry.md` (列表排序与检索) |
-| Side-by-side list+detail browser | `docs/design/components.md` (Detail modes, Master–detail) |
 | Edit/detail dialog | `docs/design/components.md` (Entity detail dialog, Overlay a11y) |
-| Create wizard (API Key, Route) | `docs/design/components.md` + `docs/design/layout.md` (stability) |
-| Org/project name display | `docs/design/components.md` (naming display) |
+| Settings page | `docs/design/components.md` (Settings page) |
 | Quick anti-patterns | `docs/design/dos-donts.md` |
 | Token / CSS baseline change | `docs/design/tokens.md` + `admin` `index.css` / Tailwind; then change order in PR checklist footer |
 

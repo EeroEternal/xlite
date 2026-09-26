@@ -207,15 +207,6 @@ impl RedisCatalog {
         Ok(dump.providers.into_iter().map(strip_provider).collect())
     }
 
-    pub async fn get_provider(&self, id: i64) -> Result<Option<Provider>> {
-        let dump = self.load().await?;
-        Ok(dump
-            .providers
-            .into_iter()
-            .find(|p| p.id == id)
-            .map(strip_provider))
-    }
-
     pub async fn create_provider(
         &self,
         name: &str,
@@ -277,11 +268,6 @@ impl RedisCatalog {
         let mut dump = self.load().await?;
         dump.models.sort_by_key(|m| std::cmp::Reverse(m.id));
         Ok(dump.models)
-    }
-
-    pub async fn get_model(&self, id: i64) -> Result<Option<Model>> {
-        let dump = self.load().await?;
-        Ok(dump.models.into_iter().find(|m| m.id == id))
     }
 
     pub async fn create_model(&self, name: &str, enabled: bool) -> Result<Model> {

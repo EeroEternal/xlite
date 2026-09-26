@@ -31,7 +31,7 @@ Page -> domain hook -> resource API -> api client -> Admin handler
 
 ## Resource rules
 
-- Prefer named functions such as `listProjects`, `listProjectOptions`, `rotateApiKey`, or `getBillingTrend`.
+- Prefer named functions such as `listProviders`, `createChannel`, `rotateApiKey`, or `exportCatalog`.
 - Keep endpoint paths and query parameter names in one resource module.
 - Provide a narrower option function when a selector does not need a full entity.
 - Preserve endpoint behavior and statistics semantics during structural migration.
@@ -43,8 +43,8 @@ Page -> domain hook -> resource API -> api client -> Admin handler
 
 - Use `EntityListToolbar` for entity-list search and result counts.
 - Search placeholders must enumerate fields actually searched; matching is normally case-insensitive substring matching.
-- Keep organization and project labels separate. Select options show one entity identity only.
-- Follow the canonical list and master-detail patterns in `docs/design/components.md`.
+- Select options show one entity identity only (the display name), never a `·`-joined summary.
+- Follow the entity list and detail-dialog patterns in `docs/design/components.md`.
 - All visible copy uses `t()` and both locale files are updated for new keys.
 - Reuse semantic tokens and shared UI primitives; do not introduce page-specific button or selection dialects.
 

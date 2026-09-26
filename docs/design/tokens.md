@@ -217,12 +217,4 @@ Narrative: [colors.md](colors.md) · [typography.md](typography.md) · [layout.m
 
 Alpha: primary/success/destructive at 10% fill, 15% status hover, 20% focus ring. Quiet selection is `bg-primary/10`.
 
-## Surfaces and elevation
-
-Level-1 surfaces (cards, panes, tables) are **white and floating**: `bg-card` + `rounded-lg` + `shadow-card`, **no hairline border**. They sit on the tinted canvas (`bg-canvas`) so the edge is read from tone plus shadow, not from a 1px line.
-
-Level-2 surfaces (metric tiles, banners, nested groups **inside** a level-1 surface or a dialog) use a **tonal fill** instead: `bg-muted/30`, no border, no shadow. Never stack a second elevation inside a card.
-
-Controls (inputs, selects, tab tracks, pills, chips) keep their own hairline/tone treatment — that is not a card surface. Status-tinted borders (`border-warning/50`) are allowed on a card because they carry meaning, not separation.
-
-`npm run lint` enforces this via `admin/scripts/check-design-tokens.mjs`.
+Surface levels (canvas / level-1 floating card / level-2 tonal group / controls) are owned by [`surfaces.md`](surfaces.md); `npm run lint` enforces them via `admin/scripts/check-design-tokens.mjs`.
