@@ -19,6 +19,10 @@
 //   VUS / DURATION / MAX_VUS / WARMUP(默认30) / RAMP_MODE(linear/burst)
 //   STREAM_TIMEOUT(默认600000) / KEEP_BODY(默认false) / GRACEFUL_STOP(默认600s)
 //   KEEP_SAMPLE(默认1=全量; 0.1=memopt 采样) / PICK_INTERVAL
+//   CHUNK_MAX(默认64) / CHUNK_SAMPLE(默认1) —— `chunk_interval_ms` 的有界采样，
+//     治 k6 在高 VU 下 OOM（客户 D 组 out=6000 时每次迭代 5999 个 Trend 样本）。
+//     ⚠️ 不影响 ttft / dur / fail / qps / gateway_overhead_ms；有效样本数看 `chunk_samples_added`。
+//     `CHUNK_MAX=0` 恢复客户原版的无上限行为。
 //   ERR_SAMPLE(默认0.01) 失败响应体采样率: 从 429 body 提取 error.type /
 //     queue_wait_ms / queue_position 并计数, 同时始终采集 Retry-After 头 ——
 //     用于区分「队列满 / 排队超时 / 并发到顶 / 限流」
@@ -33,6 +37,16 @@ var GRACEFUL_STOP = __ENV.GRACEFUL_STOP || '600s';
 // 显式传 0.1 复刻客户 v3.2-memopt (checks 比 1.10), 0 = 只留状态码校验。
 var KEEP_SAMPLE = parseFloat(__ENV.KEEP_SAMPLE || '1');
 var ERR_SAMPLE = parseFloat(__ENV.ERR_SAMPLE || '0.01');    // 失败响应体采样率(默认1%)
+// `chunk_interval_ms` 的**有界采样**。它原本是每次迭代给每个 chunk 加一个样本 ——
+// 客户 D 组 `out=6000` ⇒ 每次迭代 **5999 个样本**，实测是本 rig 最大的内存黑洞
+// （k6 在高 VU 下 OOM/空指标的主因，见 docs/dev/loadtest-newapi-controlled-2026-09.md §13.6）。
+//   CHUNK_MAX  每次迭代最多加多少个样本（0 = 不设上限，复刻客户原版行为）
+//   CHUNK_SAMPLE 抽取比例（1 = 全取；0.1 = 每 10 个取 1）
+// ⚠️ **只影响 `chunk_interval_ms` 的样本量**：`ttft_ms`（首字节，解析 body 之前就记）、
+// `http_req_duration`、`fail`、`qps`、`gateway_overhead_ms`（每次迭代仍 1 个样本）全不受影响。
+// 有效样本数由 `chunk_samples_added` 计数上报，报告里必须写出来。
+var CHUNK_MAX = parseInt(__ENV.CHUNK_MAX || '64', 10);
+var CHUNK_SAMPLE = parseFloat(__ENV.CHUNK_SAMPLE || '1');
 
 var ttftMs = new metricsMod.Trend('ttft_ms');
 // 响应头拆解（不依赖 KEEP_BODY，每请求各 1 个样本）：只在网关真的会发对应头时才有值。
@@ -54,6 +68,9 @@ var cntOther = new metricsMod.Counter('err_other');
 // checks 比 1.00 —— 满负荷"3 万连接"那一臂就是这一档)。
 var chunkIntervalMs = KEEP_BODY ? new metricsMod.Trend('chunk_interval_ms') : null;
 var gatewayOverheadMs = KEEP_BODY ? new metricsMod.Trend('gateway_overhead_ms') : null;
+// `chunk_interval_ms` 实际加进去的样本数（Counter，开销可忽略）。
+// 有界采样之后**必须**把它报出来，否则「分位是几十个样本算的」这件事会静默消失。
+var chunkSamplesAdded = new metricsMod.Counter('chunk_samples_added');
 
 var TARGET_URL = __ENV.TARGET_URL || 'http://127.0.0.1:8004/v1/chat/completions';
 var TOKEN = __ENV.TOKEN || 'sk-test';
@@ -165,9 +182,19 @@ function doRequest() {
     if (STREAM && res.status === 200) {
       var tsArr = extractTs(res.body);
       if (tsArr.length >= 2) {
-        for (var i = 1; i < tsArr.length; i++) {
-          chunkIntervalMs.add(tsArr[i] - tsArr[i - 1]);
+        // 有界抽样（CHUNK_MAX / CHUNK_SAMPLE，见文件头）。`gw_oh` 不受影响：它每次迭代只算
+        // 一个「首块 ts → 末块 ts」的跨度，本来就是 1 个样本。
+        var step = CHUNK_SAMPLE > 0 ? Math.max(1, Math.round(1 / CHUNK_SAMPLE)) : 0;
+        var added = 0;
+        if (step > 0) {
+          for (var i = 1; i < tsArr.length; i++) {
+            if (CHUNK_MAX > 0 && added >= CHUNK_MAX) break;
+            if ((i - 1) % step !== 0) continue;
+            chunkIntervalMs.add(tsArr[i] - tsArr[i - 1]);
+            added++;
+          }
         }
+        chunkSamplesAdded.add(added);
         var backendStreamDur = tsArr[tsArr.length - 1] - tsArr[0];
         var clientStreamDur = res.timings.receiving;
         if (isFinite(backendStreamDur) && isFinite(clientStreamDur)) {
