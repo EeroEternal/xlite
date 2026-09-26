@@ -22,7 +22,7 @@ services:
   mocks:
     build:
       context: ..
-      dockerfile: Dockerfile.mock
+      dockerfile: deploy/Dockerfile.mock
     image: xlite-mock:0.1.0
     environment:
       MOCK_MODEL: ${MOCK_MODEL:-mock}

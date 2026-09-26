@@ -10,7 +10,7 @@
 | `docker-compose.yml` | redis + mocks + xlite（可选 xlite-2） |
 | `env.example` | 可改的参数；复制为 `.env` |
 
-镜像在仓库根构建：`Dockerfile`（网关）、`Dockerfile.mock`（24 端口 SSE）。目录 YAML 用 `examples/mock-24.docker.yaml`（上游主机名是 `mocks`）。
+网关镜像在仓库根构建（`Dockerfile`）；mock 镜像的构建文件在**本目录**（`Dockerfile.mock`，compose 直接引用）。目录 YAML 用 `examples/mock-24.docker.yaml`（上游主机名是 `mocks`）。
 
 当前镜像标签：`xlite:0.5.0`、`xlite-mock:0.1.0`。
 
@@ -147,7 +147,7 @@ docker compose ps
 ```bash
 cd ~/github/xlite
 docker build -t xlite:0.5.0 .
-docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
+docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
 > `Dockerfile` 默认用**与 `rust-toolchain.toml` 同版本**的 base 镜像（不触发 rustup 下载工具链）。
@@ -168,13 +168,20 @@ docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
 > scripts/prepare_offline_vendor.sh --check  # 换机器后校验；缺失即 exit 2（不联网）
 > ```
 >
-> 镜像源里没有那个 tag、或 npm 慢时：
+> 新克隆（无脚手架）时各外网依赖都可以指国内镜像（全部默认空 = 官方源，行为不变）：
 >
 > ```bash
 > docker build -t xlite:0.5.0 \
->   --build-arg RUST_IMAGE=rust:1.93-bookworm \
->   --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+>   --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
+>   --build-arg CRATES_MIRROR=sparse+https://rsproxy.cn/index/ .
+> # 覆盖 rust base 且与 toolchain pin 不同版本、rustup 真要下工具链时，再加：
+> #   --build-arg RUST_IMAGE=rust:1.93-bookworm \
+> #   --build-arg RUSTUP_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/rustup
 > ```
+>
+> **docker.io 上的基础镜像**（`node` / `rust` / `debian`）拉不动是 **daemon 层**的问题，
+> Dockerfile 管不了：给 dockerd 配 registry mirror（`/etc/docker/daemon.json` 的
+> `"registry-mirrors"`，改完 `systemctl restart docker`）。镜像站时效变化频繁，失效就换。
 >
 > 构建用到 BuildKit 的 `RUN --mount=type=bind`（Docker 23+ / Compose v2 默认启用）：
 > 脚手架是**可选**的，而 `COPY` 对不存在的源是硬失败，所以只能挂载整个上下文再做条件分支。

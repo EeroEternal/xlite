@@ -133,7 +133,7 @@ k6 run --compatibility-mode=base \
 | 农场 | 载体 | 认 `_config` / `batch`？ | 用于 |
 | --- | --- | --- | --- |
 | **Go `mock-llm:h2c`**（= 客户/实验室，同一个二进制） | `bench/0924/deploy_origin/deploy88/mock-llm-h2c.tar.gz`（离线镜像）或 `mock-llm-linux-usage`（裸二进制） | ✅（`_config?batch=N`，另有 env `MOCK_BATCH`） | **对标/产能，一律用这个** |
-| **仓库 Node 农场** | `Dockerfile.mock` + `scripts/stream_mock_server.mjs` | ✅（本仓已补） | 只用于 `deploy/` 那套自测栈 |
+| **仓库 Node 农场** | `deploy/Dockerfile.mock` + `scripts/stream_mock_server.mjs` | ✅（本仓已补） | 只用于 `deploy/` 那套自测栈 |
 
 农场是**无源码的 Go 静态二进制**，`MOCK_BATCH` 之外还能提取到
 `MOCK_TTFT / MOCK_TOKEN_INTERVAL / MOCK_OUT_TOKENS / MOCK_MIX / MOCK_TOTAL_DELAY` 等同族 env。

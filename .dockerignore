@@ -14,13 +14,19 @@ docs/sessions
 # 代价是：**留在上下文里的每个文件都进 Rust 层的缓存键**。所以任何 Dockerfile 都不
 # COPY 的路径都是纯粹的失效面 —— 实测（Docker 29.2.1）：只改 `docs/changelog.md`
 # 一行，`RUN cargo build` 就重跑，**1m48s**；排掉之后同样的改动命中缓存。
-# 下面这些没有任何 Dockerfile 读（`Dockerfile` / `Dockerfile.mock` / 本地 `Dockerfile.lab`
-# 的 COPY 清单都核过）—— 增删前请重新核对，尤其别把 `admin/`、`crates/`、`src/`、
-# `migrations/`、`examples/`、`scripts/`、`Cargo.*`、`rust-toolchain.toml` 排掉。
+# 下面这些没有任何 Dockerfile COPY（`Dockerfile` / `deploy/Dockerfile.mock` /
+# 本地 `deploy/Dockerfile.lab` 的 COPY 清单都核过）—— 增删前请重新核对，尤其别把
+# `admin/`、`crates/`、`src/`、`migrations/`、`examples/`、`scripts/`、`Cargo.*`、
+# `rust-toolchain.toml` 排掉。
 docs
 .agents
 .github
-deploy
+# deploy/* 排掉文档与台架脚本；但两个 Dockerfile **本体**必须留在上下文里，否则
+# `docker build -f deploy/Dockerfile.mock .` 与 compose 的 build.dockerfile 读不到文件。
+# 它们极少改，进 Rust 层的缓存键可接受。
+deploy/*
+!deploy/Dockerfile.mock
+!deploy/Dockerfile.lab
 bench
 *.md
 .mise.toml

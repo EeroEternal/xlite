@@ -12,7 +12,7 @@
 | `examples/mock-24.docker.yaml` | `http://mocks:4101` … | Compose 网络 |
 | 实验室 Redis 目录 | `http://10.99.255.102:4101` … | 跨机 h2c |
 
-网关 `XLITE_UPSTREAM_H2C=1`。仓库 `Dockerfile.mock` 是 Node HTTP/1.1 SSE（`scripts/stream_mock_server.mjs`）。实验室和客户现场用的是 Go `mock-llm:h2c`，同样 24 端口。
+网关 `XLITE_UPSTREAM_H2C=1`。仓库 `deploy/Dockerfile.mock` 是 Node HTTP/1.1 SSE（`scripts/stream_mock_server.mjs`）。实验室和客户现场用的是 Go `mock-llm:h2c`，同样 24 端口。
 
 | mock 参数 | 冒烟 | B 组（客户脚本） |
 | --- | --- | --- |
