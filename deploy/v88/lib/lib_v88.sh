@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================
 # deploy/v88 框架共用件：日志 / 哈希 / 封条自检 / 农场控制 / 产能预算。
-# 被 `run_full_88_xg.sh` 与 `farm_ceiling_scan.sh` source，不单独执行。
+# 被 `run_full_88_xg.sh` 与 `advanced/farm_ceiling_scan.sh` source，不单独执行。
 #
 # **离线自足**是硬约束：客户机上只拷 `deploy/v88/` 也必须能跑，所以这里**不** source
-# 仓库里的任何路径，只 source 同目录的 `lib_rig.sh`。本目录与 `scripts/loadtest/` 之间
+# 仓库里的任何路径，只 source 同目录的 `lib_rig.sh`。本包与 `scripts/loadtest/` 之间
 # **没有**跨目录校验；身份保护靠自封条 `BUNDLE_SHA256`（见 `seal_bundle.sh` 与 README）。
 # ============================================================
 
-V88_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+V88_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)   # 本文件在 lib/ 下 ⇒ 上一级是包根
 # shellcheck source=lib_rig.sh
-. "$V88_DIR/lib_rig.sh"
+. "$V88_DIR/lib/lib_rig.sh"
 
 v88_log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 v88_warn() { printf '⚠️  %s\n' "$*" >&2; }
@@ -32,8 +32,9 @@ v88_sha256() {
 # 规则：`$name` 后接非 ASCII 时必须写 ${name}。
 v88_lint_expansions() {
   local bad=0 f hits
-  for f in "$V88_DIR"/*.sh; do
+  for f in "$V88_DIR"/*.sh "$V88_DIR"/advanced/*.sh "$V88_DIR"/lib/*.sh; do
     [ -f "$f" ] || continue
+    case "${f##*/}" in ._*) continue ;; esac   # macOS 拷贝留下的 AppleDouble 影子文件，别拿去 grep
     hits=$(LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~[:space:]]' "$f" || true)
     if [ -n "$hits" ]; then
       printf '✗ %s：`$var` 后面紧跟非 ASCII 字符，必须写成 ${var}：\n%s\n' "$f" "$hits" >&2

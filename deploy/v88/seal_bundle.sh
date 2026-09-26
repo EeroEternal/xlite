@@ -16,7 +16,7 @@ set -euo pipefail
 
 V88_DIR=$(cd "$(dirname "$0")" && pwd)
 # 只封**身份决定口径**的文件。框架自己的 driver/文档不算：改它们不该需要重新打封条。
-SEALED="k6.js ab_topology.sh lib_rig.sh"
+SEALED="k6.js advanced/ab_topology.sh lib/lib_rig.sh"
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then

@@ -123,7 +123,7 @@ k6 run --compatibility-mode=base \
 > 链路不再是墙（10 GbE ≈45000 流容量），**农场就是墙**，于是 `batch` 成了一个**真实可用**的杠杆
 > （32 核：batch=1 ≈5000 流 / batch=5 ≈1.3 万流 / batch=10 也不到 3.1 万流 ⇒ 该扩机器）。
 > 但它同时把口径换成**台架口径**、首字 +（batch−1)×21ms —— 所以仍按上面四条硬约束走：
-> **先实测上限**（`deploy/v88/farm_ceiling_scan.sh`）再决定「扩机器」还是「改 batch」。
+> **先实测上限**（`deploy/v88/advanced/farm_ceiling_scan.sh`）再决定「扩机器」还是「改 batch」。
 > **`batch=1` 不是我们的选择，是客户口径**：客户的 driver 自己就写死它 ——
 > `bench/0924/deploy_origin/loadtest/run_full_88.sh:68` 每组开跑前
 > `POST /_config?ttft=500&token_interval=$TI&out_tokens=$OUT&mix=0&mode=2&batch=1`。

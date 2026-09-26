@@ -26,8 +26,8 @@
 set -uo pipefail
 
 V88_DIR=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=lib_v88.sh
-. "$V88_DIR/lib_v88.sh"
+# shellcheck source=lib/lib_v88.sh
+. "$V88_DIR/lib/lib_v88.sh"
 
 DRY_RUN=0
 PREFLIGHT_ONLY=0

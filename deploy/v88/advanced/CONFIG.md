@@ -1,8 +1,8 @@
 # 现场配置文档（V88 框架）
 
 面向**去客户现场部署 + 压测**的一份配置口径。环境变量逐个与 `src/config.rs` 核对过；
-数值与判读纪律以 [`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) 与
-[`docs/dev/loadtest-newapi-controlled-2026-09.md`](../../docs/dev/loadtest-newapi-controlled-2026-09.md) 为准。
+数值与判读纪律以 [`docs/manual/v88-rig.md`](../../../docs/manual/v88-rig.md) 与
+[`docs/dev/loadtest-newapi-controlled-2026-09.md`](../../../docs/dev/loadtest-newapi-controlled-2026-09.md) 为准。
 
 > 本文只讲**怎么配、为什么这么配**。怎么跑压测见 [`README.md`](README.md)。
 
@@ -74,7 +74,7 @@
 
 ### 1.4 怎么设（四种路径，任选）
 
-**① Docker Compose（推荐，与 [`../docker-compose.yml`](../docker-compose.yml) 一致）**
+**① Docker Compose（推荐，与 [`../../docker-compose.yml`](../../docker-compose.yml) 一致）**
 
 `deploy/.env` 里写：
 
@@ -141,7 +141,7 @@ awk -v p="$pid" '{print systime(), $14, $15}' /proc/$pid/stat   # 压测期间�
 
 客户包里那份是 `bench/0924/deploy_origin/deploy88/haproxy.cfg`（**客户包在 `bench/` 下、被
 `.gitignore` 忽略、不进仓库**，所以这里只是文献引用 —— 与
-[`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) 引用客户包的方式一致）：
+[`docs/manual/v88-rig.md`](../../../docs/manual/v88-rig.md) 引用客户包的方式一致）：
 `:8005` 双节点（32+33）、`:8006` 单节点（仅 32），`httpchk GET /api/status`，
 `timeout client/server/tunnel 600s`，`mode http`，`option http-keep-alive`。
 
@@ -297,7 +297,7 @@ sysctl -n net.core.somaxconn                                          # 期望 6
 | `XLITE_MAX_IN_FLIGHT` | 已于 `21fa7a7` 从主干拿掉；**0.3.0 的 `src/config.rs` 根本没有这个变量，设了也不读**。它只把难看从 duration 搬到 TTFT（31000 VU 下 TTFT p50 1.4s → 27.7s） |
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 调大 | 32/64/128 实测**零效应**（h2c 把多流复用到一条连接） |
 | `XLITE_UPSTREAM_TTFT_HEADER=1` | 诊断用；开了会**等上游第一个 body 字节才发响应头 ⇒ 推迟客户端首字**。对标跑数时必须关 |
-| 任何"提前写 200 / SSE 空头" | 伪造 TTFT：报表 TTFT 能低到 ~1ms（**低于 mock 的 500ms**），且破坏 failover 与状态码透传，违反 [`docs/ai/agents/wire-boundary.md`](../../docs/ai/agents/wire-boundary.md) |
+| 任何"提前写 200 / SSE 空头" | 伪造 TTFT：报表 TTFT 能低到 ~1ms（**低于 mock 的 500ms**），且破坏 failover 与状态码透传，违反 [`docs/ai/agents/wire-boundary.md`](../../../docs/ai/agents/wire-boundary.md) |
 | HAProxy 侧限流 / 短超时 | 见 §2.5 |
 
 ---

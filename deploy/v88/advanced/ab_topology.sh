@@ -67,10 +67,10 @@
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=lib_rig.sh
-. "$SCRIPT_DIR/lib_rig.sh"
+# shellcheck source=../lib/lib_rig.sh
+. "$SCRIPT_DIR/../lib/lib_rig.sh"
 
-REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
 CATALOG=${CATALOG:-}
 GATEWAY_DIR=${GATEWAY_DIR:-$HOME/ab6}
 ARM=${ARM:-A2}

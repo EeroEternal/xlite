@@ -1,6 +1,6 @@
 # deploy/v88 —— 测试环境启动
 
-口径见 [`../../docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md)，各配置项取值见 [`CONFIG.md`](CONFIG.md)。
+口径见 [`../../docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md)，各配置项取值见 [`advanced/CONFIG.md`](advanced/CONFIG.md)。
 
 ```
 k6 ──HTTP/1.1──► HAProxy :8005/:8006 ──► xlite ──h2c──► mock-llm :8081-8104

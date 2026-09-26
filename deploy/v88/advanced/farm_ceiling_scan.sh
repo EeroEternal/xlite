@@ -20,9 +20,9 @@
 #
 # ## 用法
 #
-#   TARGET=http://<入口>/v1/chat/completions TOKEN=<key> deploy/v88/farm_ceiling_scan.sh   # 默认 group B
-#   TARGET=… TOKEN=… deploy/v88/farm_ceiling_scan.sh --combo D
-#   TARGET=… TOKEN=… deploy/v88/farm_ceiling_scan.sh --levels 1000,2000,4000,8000,16000
+#   TARGET=http://<入口>/v1/chat/completions TOKEN=<key> deploy/v88/advanced/farm_ceiling_scan.sh   # 默认 group B
+#   TARGET=… TOKEN=… deploy/v88/advanced/farm_ceiling_scan.sh --combo D
+#   TARGET=… TOKEN=… deploy/v88/advanced/farm_ceiling_scan.sh --levels 1000,2000,4000,8000,16000
 #   （**不读任何配置文件**：口径全部走环境变量，未给的用保守默认）
 #
 # 产能扫描的固定口径（与对标**必须分开跑**，见 docs/manual/v88-rig.md §4）：
@@ -33,9 +33,10 @@
 # ============================================================
 set -uo pipefail
 
-V88_DIR=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=lib_v88.sh
-. "$V88_DIR/lib_v88.sh"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+V88_DIR=$(cd "$SCRIPT_DIR/.." && pwd)   # 本脚本在 advanced/ 下；共用件与 k6.js 在上一级
+# shellcheck source=../lib/lib_v88.sh
+. "$V88_DIR/lib/lib_v88.sh"
 
 SCAN_COMBO="B"
 LEVELS="1000,2000,4000,8000,16000,31000"
