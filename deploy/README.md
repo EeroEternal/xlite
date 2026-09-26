@@ -150,8 +150,25 @@ docker build -t xlite:0.5.0 .
 docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
-> `Dockerfile` 默认用**与 `rust-toolchain.toml` 同版本**的 base 镜像（不触发 rustup 下载工具链），
-> 并拷 `.cargo/` + `vendor/` 走 **`--offline`**（不访问 crates.io）。镜像源里没有那个 tag、或 npm 慢时：
+> `Dockerfile` 默认用**与 `rust-toolchain.toml` 同版本**的 base 镜像（不触发 rustup 下载工具链）。
+> 依赖走哪条路由**构建上下文里有没有离线脚手架**自动决定，没有开关：
+>
+> | 上下文里有 `.cargo/` + `vendor/`？ | builder 段 | 要不要外网 |
+> | --- | --- | --- |
+> | 有 | `cargo build --offline`，直接用 `vendor/` | **不要**（`--offline`） |
+> | 没有 = **新克隆的默认状态** | `cargo build`，从 crates.io 拉 | 要 crates.io |
+>
+> 这两个目录在 `.gitignore` 里（本机脚手架，**从不提交**），所以新克隆的机器默认走在线。
+> 要在**连不上 crates.io** 的机器上构建，先在**有网**的机器上物化一次脚手架，再把整个工作副本
+> （含 `.cargo/`、`vendor/`）拷过去：
+>
+> ```bash
+> cd ~/github/xlite
+> scripts/prepare_offline_vendor.sh          # 生成 .cargo/config.toml + vendor/（需要一次 crates.io）
+> scripts/prepare_offline_vendor.sh --check  # 换机器后校验；缺失即 exit 2（不联网）
+> ```
+>
+> 镜像源里没有那个 tag、或 npm 慢时：
 >
 > ```bash
 > docker build -t xlite:0.5.0 \
@@ -159,7 +176,8 @@ docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
 >   --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
 > ```
 >
-> `Dockerfile.lab` 是另一条路（用预构建的 `admin/dist` + 本机已有的 base 镜像），见其头注释。
+> 构建用到 BuildKit 的 `RUN --mount=type=bind`（Docker 23+ / Compose v2 默认启用）：
+> 脚手架是**可选**的，而 `COPY` 对不存在的源是硬失败，所以只能挂载整个上下文再做条件分支。
 
 ---
 
