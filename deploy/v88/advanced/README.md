@@ -19,7 +19,7 @@
 | `run_full_88.sh:68` 把 `batch=1` 写死，且 `curl … >/dev/null 2>&1` **不检查结果** | `MOCK_BATCH` 参数化 + 逐口**回读校验** + 收尾还原 + 每轮记账 |
 | `deploy88/start-mocks.sh` 起 **12** 口，driver 却按 **24** 口配（`seq 8081 8104`），配不上的口完全静默 | 农场路数显式校验：读不到口径的口直接判失败并中止 |
 | 长流组（D `out=6000`）每次迭代给 `chunk_interval_ms` 塞 **5999** 个 Trend 样本 —— k6 高 VU 下 OOM 的主因 | `CHUNK_MAX` 有界采样（默认 64/次迭代）+ 上报 `chunk_samples_added`；k6 崩溃时降采样重试并**记为口径变更** |
-| 一路顶到连续两档 fail>1% 才停，中途农场早就饱和了 | **农场产能预算闸门**：超预算的档位直接拒绝并说明该加几台机器 |
+| 一路顶到连续两档 fail>1% 才停 | 对标 driver 同样：只按 fail>1% 与 `MAX_VUS` 停，不打印、不拦截农场预算。找天花板用 `farm_ceiling_scan.sh` |
 
 ## 2. 目录
 
