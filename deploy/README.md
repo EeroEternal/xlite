@@ -98,7 +98,16 @@ h2c 池：对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 满了会再拨一条连接�
 | `MOCK_CHUNKS` | `20` | `500` | 每个流的 SSE 块数 |
 | `MOCK_INTERVAL_MS` | `10` | `10` | 块间隔 |
 | `MOCK_TTFT_MS` | `0` | `0` | 第一个字节前额外等待 |
+| `MOCK_BATCH` | `1` | `1` | 每 N 个 chunk 合并成一次 write。**不改载荷一个字节**，只降台架自身 CPU（4000 VU：农场 22.5→6.8 核）。**对标/延迟类必须 1**（客户 driver 就写死 1，TTFT 是头条指标）；产能/天花板类才用 `10`，代价是首字 +（N−1）×21 ms（529→722 ms）。见 [`../docs/dev/loadtest-newapi-controlled-2026-09.md`](../docs/dev/loadtest-newapi-controlled-2026-09.md) §14 |
 | `MOCK_LISTEN` | `0.0.0.0` | `0.0.0.0` | 必须 `0.0.0.0`，否则隔壁容器连不上 |
+
+这 24 个 mock 进程支持运行时改参（`POST /_config`：无查询串 = 读，带查询串 = 写并回读同一份 JSON），
+所以 `scripts/loadtest/run_levels.sh MOCKS="4101-4124"` 这类下发**在本农场可以直接跑**；
+该契约由 `scripts/loadtest/test_stream_mock_config.sh` 自证（20 项）。写入时未知键 / 非整数 /
+越界一律 **400**，不静默忽略。
+
+⚠️ **对标客户 V88 不要用这套 Node 农场**：客户与实验室跑的是 Go `mock-llm:h2c`
+（h2c、每 chunk 一次 flush），两者每 chunk 成本不同，换农场就换了口径。
 
 B 组墙钟大约 `500 × 10ms = 5s` 量级（再加网关和调度）。只改 mock 时长：
 

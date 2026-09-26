@@ -4,9 +4,13 @@ MODEL="${MOCK_MODEL:-mock}"
 CHUNKS="${MOCK_CHUNKS:-20}"
 INTERVAL="${MOCK_INTERVAL_MS:-10}"
 TTFT="${MOCK_TTFT_MS:-0}"
+# 每 N 个 chunk 合并成一次 write（不改载荷字节）。对标/延迟类必须 1（客户就是 1）；
+# 产能/天花板类才用 10：台架 CPU 降约 71%，代价是首字 +（N-1）×21ms。
+# 见 docs/dev/loadtest-newapi-controlled-2026-09.md §14 / docs/manual/v88-rig.md §4。
+BATCH="${MOCK_BATCH:-1}"
 LISTEN="${MOCK_LISTEN:-0.0.0.0}"
 
-echo "[mocks] listen=${LISTEN} ports=4101-4124 model=${MODEL} chunks=${CHUNKS} interval_ms=${INTERVAL} ttft_ms=${TTFT}"
+echo "[mocks] listen=${LISTEN} ports=4101-4124 model=${MODEL} chunks=${CHUNKS} interval_ms=${INTERVAL} ttft_ms=${TTFT} batch=${BATCH}"
 for port in $(seq 4101 4124); do
   node /app/stream_mock_server.mjs \
     --port "${port}" \
@@ -15,6 +19,7 @@ for port in $(seq 4101 4124); do
     --chunks "${CHUNKS}" \
     --interval-ms "${INTERVAL}" \
     --ttft-ms "${TTFT}" \
+    --batch "${BATCH}" \
     --label "mock-${port}" &
 done
 wait
