@@ -8,10 +8,9 @@ interface PageContainerProps {
   className?: string
   /**
    * Console content width tier. Two tiers only — do not pass raw `max-w-[…]`
-   * for console pages: `default` (1400px) for every standard page, `wide`
-   * (1680px) for data-dense pages (dashboard, analytics, billing, logs and the
-   * other chart/table surfaces). Reading surfaces (settings, help) may still cap
-   * explicitly for line length; see docs/design/layout.md.
+   * for console pages: `default` (1400px) is what every current page uses,
+   * `wide` (1680px) exists for genuinely data-dense tables and is unused today.
+   * See docs/design/layout.md.
    */
   size?: PageContainerSize
 }

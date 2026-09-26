@@ -34,15 +34,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/providers", get(list_providers).post(create_provider))
         .route(
             "/api/providers/{id}",
-            get(get_provider)
-                .put(update_provider)
-                .delete(delete_provider),
+            put(update_provider).delete(delete_provider),
         )
         .route("/api/models", get(list_models).post(create_model))
-        .route(
-            "/api/models/{id}",
-            get(get_model).put(update_model).delete(delete_model),
-        )
+        .route("/api/models/{id}", put(update_model).delete(delete_model))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
             "/api/channels/{id}",
@@ -203,21 +198,6 @@ async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -> Re
     }
 }
 
-async fn get_provider(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-) -> Response {
-    if let Some(resp) = require_session(&state, &headers) {
-        return resp.into_response();
-    }
-    match state.store.catalog().get_provider(id).await {
-        Ok(Some(row)) => ok(row).into_response(),
-        Ok(None) => err(StatusCode::NOT_FOUND, "provider not found").into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
-    }
-}
-
 async fn create_provider(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -294,21 +274,6 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
     }
     match state.store.catalog().list_models().await {
         Ok(rows) => ok(rows).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
-    }
-}
-
-async fn get_model(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-) -> Response {
-    if let Some(resp) = require_session(&state, &headers) {
-        return resp.into_response();
-    }
-    match state.store.catalog().get_model(id).await {
-        Ok(Some(row)) => ok(row).into_response(),
-        Ok(None) => err(StatusCode::NOT_FOUND, "model not found").into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
 }

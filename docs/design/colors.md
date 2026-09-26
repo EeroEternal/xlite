@@ -4,7 +4,7 @@ The palette is semantic first. Product code should consume `primary`, `secondary
 
 - Brand `#2744A5` comes from the canonical X-series SVG and is the stable identity color for logos and brand marks.
 - Primary uses brand blue in light mode and an accessible lighter blue in dark mode for important actions, selected states, links, and focused emphasis. Interactive shades may differ from the logo color to preserve contrast.
-- Selection fill uses a light primary tint (`bg-primary/10` or `primary-light`), not a near-white muted gray and not a theme-colored left border on table rows or sidebar items (the shared card-list indicator bar is the one exception).
+- Selection fill uses a light primary tint (`bg-primary/10` or `primary-light`), not a near-white muted gray and not a theme-colored left border on table rows or sidebar items.
 - Neutral surfaces stay light and quiet: `background`, `card`, `secondary`, and `muted` should carry most of the interface.
 - Feedback colors are explicit and not interchangeable: `success` for healthy states, `warning` for caution, `destructive` for failure or irreversible actions.
 - `info` communicates processing and neutral operational information, `inactive` communicates stopped or offline states, and `experimental` is reserved for beta or AI-assisted capabilities.

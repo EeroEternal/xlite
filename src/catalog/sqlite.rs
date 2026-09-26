@@ -177,15 +177,6 @@ impl SqliteCatalog {
         Ok(())
     }
 
-    pub async fn get_provider(&self, id: i64) -> Result<Option<Provider>> {
-        Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, base_url, enabled, created_at FROM providers WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?)
-    }
-
     pub async fn create_provider(
         &self,
         name: &str,
@@ -246,15 +237,6 @@ impl SqliteCatalog {
             "SELECT id, name, enabled, created_at FROM models ORDER BY id DESC",
         )
         .fetch_all(&self.pool)
-        .await?)
-    }
-
-    pub async fn get_model(&self, id: i64) -> Result<Option<Model>> {
-        Ok(sqlx::query_as::<_, Model>(
-            "SELECT id, name, enabled, created_at FROM models WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
         .await?)
     }
 
