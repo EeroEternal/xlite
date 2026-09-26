@@ -54,9 +54,9 @@ docker exec xlite-gw xlite import /tmp/cat.yaml --replace
 
 ```sh
 docker run -d --name xlite-gw --network host --ulimit nofile=1048576:1048576 \
-  -e TOKIO_WORKER_THREADS=8 -e REDIS_URL=redis://127.0.0.1:6379 \
+  -e TOKIO_WORKER_THREADS=8 -e REDIS_URL=redis://10.56.88.22:6379 \
   -e XLITE_UPSTREAM_H2C=1 -e XLITE_UPSTREAM_MAX_CONNS_PER_HOST=32 \
-  -e ADMIN_PASSWORD='<自己定>' -e LISTEN_HOST=0.0.0.0 -e PORT=8001 \
+  -e ADMIN_PASSWORD='<自己定>' -e LISTEN_HOST=0.0.0.0 -e PORT=8080 \
   xlite:0.4.0
 ```
 
@@ -71,7 +71,7 @@ defaults
     timeout tunnel 600s
 backend xlite
     option httpchk GET /health          # 不是 /api/status
-    server node1 10.0.0.1:8001 check inter 5s fall 3 rise 2
+    server node1 10.0.0.1:8080 check inter 5s fall 3 rise 2
 ```
 
 ## 5. 跑
