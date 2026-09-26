@@ -41,14 +41,9 @@ for p in $(seq 8081 8104); do curl -s -m 3 -X POST \
   "http://127.0.0.1:$p/_config?ttft=500&token_interval=10&out_tokens=500&mix=0&mode=2&batch=1" >/dev/null; done
 ```
 
-## 2. Redis + 目录
+## 2. Redis
 
-```sh
-docker run -d --name xlite-redis --network host redis:7-alpine redis-server --save "" --appendonly no
-
-docker cp cat.yaml xlite-gw:/tmp/cat.yaml                      # upstream 指向 mock 机 :8081-8104
-docker exec xlite-gw xlite import /tmp/cat.yaml --replace
-```
+用现场 22 上那台（与 New API 共用）：**不要新起、也不要改它的启动参数**，只把网关的 `REDIS_URL` 指过去。xlite 在里面只占 `xlite:catalog`（约 7KB）+ 写入短锁，互不影响；目录数据本来就在里面，不用再导入。
 
 ## 3. 网关
 
@@ -60,19 +55,46 @@ docker run -d --name xlite-gw --network host --ulimit nofile=1048576:1048576 \
   xlite:0.4.0
 ```
 
-## 4. HAProxy（多节点才需要）
+## 4. HAProxy（两个 xlite）
 
 ```haproxy
+global
+    maxconn 200000
+    log stdout format raw local0
+
 defaults
     mode http
+    log global
     option http-keep-alive
+    timeout connect 10s
     timeout client 600s
     timeout server 600s
     timeout tunnel 600s
-backend xlite
-    option httpchk GET /health          # 不是 /api/status
-    server node1 10.0.0.1:8080 check inter 5s fall 3 rise 2
+    timeout http-request 60s
+
+frontend api_dual
+    bind *:8005
+    default_backend xgw_dual
+
+frontend api_single
+    bind *:8006
+    default_backend xgw_single
+
+backend xgw_dual
+    balance roundrobin
+    option httpchk GET /health
+    http-check expect status 200
+    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
+    server n26 10.56.88.26:8080 check inter 5s fall 3 rise 2
+
+backend xgw_single
+    balance roundrobin
+    option httpchk GET /health
+    http-check expect status 200
+    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
 ```
+
+`:8005` 打两台（`n24`+`n26`），`:8006` 只打 `n24`（单节点对照口）；两个 `server` 就是两个 xlite 的 `IP:PORT`（客户现场 `PORT=8080`）。
 
 ## 5. 跑
 

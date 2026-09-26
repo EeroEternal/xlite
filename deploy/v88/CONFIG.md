@@ -145,12 +145,12 @@ awk -v p="$pid" '{print systime(), $14, $15}' /proc/$pid/stat   # 压测期间�
 `:8005` 双节点（32+33）、`:8006` 单节点（仅 32），`httpchk GET /api/status`，
 `timeout client/server/tunnel 600s`，`mode http`，`option http-keep-alive`。
 
-### 2.2 换成 xlite 必须改的**三处**
+### 2.2 从客户包那份 cfg（New API 的）起步时要动的**三处**
 
-| # | 现状 | 改成 | 不改的后果 |
+| # | 客户包那份 | 改成 | 不改的后果 |
 | --- | --- | --- | --- |
-| 1 | `option httpchk GET /api/status` | **`GET /health`** | xlite 没有 `/api/status` → 探活一直失败 → **节点被摘掉** |
-| 2 | `server node1 10.56.88.32:8001` | 指向 xlite 监听端口 | — |
+| 1 | `option httpchk GET /api/status` | **`GET /health`** —— **已经探 `/health` 就不用动** | xlite 没有 `/api/status` → 探活一直失败 → **节点被摘掉** |
+| 2 | `server node1 10.56.88.32:8001` | 指向 xlite 监听端口（现场是 `server n24 10.56.88.24:8080` / `n26 …:8080`） | — |
 | 3 | （无粘性配置） | **保持无粘性** | 无状态签名 Cookie，加粘性只是白搭还降低可用性 |
 
 超时**不用动**（客户已是 600s）。`maxconn 200000`、`option http-keep-alive` 也保持。
@@ -174,22 +174,24 @@ defaults
 
 frontend api_dual
     bind *:8005
-    default_backend xlite_dual
+    default_backend xgw_dual
 
 frontend api_single
     bind *:8006
-    default_backend xlite_single
+    default_backend xgw_single
 
-backend xlite_dual
-    balance roundrobin           # 无粘性：会话是签名 Cookie
-    option httpchk GET /health   # ★ 不是 /api/status
-    server node1 10.56.88.32:8001 weight 1 check inter 5s fall 3 rise 2
-    server node2 10.56.88.33:8002 weight 1 check inter 5s fall 3 rise 2
-
-backend xlite_single
+backend xgw_dual
     balance roundrobin
-    option httpchk GET /health   # ★
-    server node1 10.56.88.32:8001 weight 1 check inter 5s fall 3 rise 2
+    option httpchk GET /health
+    http-check expect status 200
+    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
+    server n26 10.56.88.26:8080 check inter 5s fall 3 rise 2
+
+backend xgw_single
+    balance roundrobin
+    option httpchk GET /health
+    http-check expect status 200
+    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
 ```
 
 **可选增强**（未在本仓测过，按需自行评估，别当既有结论）：
