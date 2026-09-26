@@ -9,12 +9,107 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use futures_util::Stream;
-use http::Request;
+use http::{HeaderName, HeaderValue, Request};
 use reqwest::Client;
 use tokio::net::TcpStream;
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
 
+use crate::catalog::{HeaderPair, UpstreamShape};
 use crate::config::Config;
+
+/// Headers the gateway owns. Letting a catalog field set these would let operator
+/// input decide protocol correctness (`host` drives the h2 `:authority`, the
+/// gateway sets `content-type`, and the credential must go through the dedicated
+/// auth fields so there is exactly one source for it).
+pub const RESERVED_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+    "te",
+    "upgrade",
+    "authorization",
+];
+
+/// Precomputed `Authorization`-style credential header for one channel.
+///
+/// `scheme` is `bearer` | `raw` | `none`; `header` is the header name (empty
+/// means `authorization`). Returns `Err` with an operator-facing reason so the
+/// control plane can reject the write instead of failing silently.
+pub fn build_auth(
+    scheme: &str,
+    header: &str,
+    api_key: &str,
+) -> std::result::Result<Option<(HeaderName, HeaderValue)>, String> {
+    let scheme = scheme.trim().to_ascii_lowercase();
+    let scheme = if scheme.is_empty() {
+        "bearer".to_string()
+    } else {
+        scheme
+    };
+    if !matches!(scheme.as_str(), "bearer" | "raw" | "none") {
+        return Err(format!(
+            "unknown auth_scheme `{scheme}` (expected bearer, raw or none)"
+        ));
+    }
+    // The credential header is validated even when it will not be sent, so a
+    // typo is rejected at write time instead of silently doing nothing.
+    let name = if header.trim().is_empty() {
+        "authorization".to_string()
+    } else {
+        header.trim().to_ascii_lowercase()
+    };
+    let name = valid_header_name(&name)?;
+    if api_key.is_empty() || scheme == "none" {
+        return Ok(None);
+    }
+    let value = match scheme.as_str() {
+        // Identical to `authorization_header()` — the default path is unchanged.
+        "bearer" => authorization_header(api_key),
+        _ => api_key.to_string(),
+    };
+    let value = HeaderValue::from_str(&value)
+        .map_err(|_| "credential is not a valid header value".to_string())?;
+    Ok(Some((name, value)))
+}
+
+/// Validate an upstream shape without building it. Used by every write path
+/// (Admin API, YAML import) so a bad provider is rejected with a 400 instead of
+/// silently doing nothing or failing later at snapshot build.
+pub fn validate_upstream(shape: &UpstreamShape, api_key: &str) -> std::result::Result<(), String> {
+    build_auth(&shape.auth_scheme, &shape.auth_header, api_key)?;
+    build_extra_headers(&shape.extra_headers)?;
+    Ok(())
+}
+
+/// Precompute the static extra headers for one channel.
+pub fn build_extra_headers(
+    pairs: &[HeaderPair],
+) -> std::result::Result<Vec<(HeaderName, HeaderValue)>, String> {
+    let mut out = Vec::with_capacity(pairs.len());
+    for pair in pairs {
+        let raw = pair.name.trim().to_ascii_lowercase();
+        if raw.is_empty() {
+            return Err("extra header name must not be empty".to_string());
+        }
+        if RESERVED_HEADERS.contains(&raw.as_str()) {
+            return Err(format!(
+                "header `{raw}` is reserved by the gateway and cannot be set per provider"
+            ));
+        }
+        let name = valid_header_name(&raw)?;
+        let value = HeaderValue::from_str(pair.value.trim())
+            .map_err(|_| format!("extra header `{}` has an invalid value", pair.name))?;
+        out.push((name, value));
+    }
+    Ok(out)
+}
+
+fn valid_header_name(name: &str) -> std::result::Result<HeaderName, String> {
+    HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| format!("`{name}` is not a valid header name"))
+}
 
 #[derive(Clone)]
 pub struct Upstream {
@@ -74,15 +169,16 @@ impl Upstream {
         endpoint: &str,
         authority: &str,
         path: &str,
-        authorization: &str,
+        auth: Option<&(HeaderName, HeaderValue)>,
+        extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
     ) -> Result<UpstreamResponse> {
-        // Authority / path / Authorization are computed once per channel at
-        // snapshot build — the request path does not parse the URL again.
+        // Auth header, extra headers, authority and path are all computed once
+        // per channel at snapshot build — the request path parses nothing.
         if self.h2c && endpoint.starts_with("http://") {
-            self.post_h2c(authority, path, authorization, body).await
+            self.post_h2c(authority, path, auth, extra, body).await
         } else {
-            self.post_reqwest(endpoint, authorization, body).await
+            self.post_reqwest(endpoint, auth, extra, body).await
         }
     }
 
@@ -90,7 +186,8 @@ impl Upstream {
         &self,
         authority: &str,
         path: &str,
-        authorization: &str,
+        auth: Option<&(HeaderName, HeaderValue)>,
+        extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
     ) -> Result<UpstreamResponse> {
         if authority.is_empty() {
@@ -107,8 +204,11 @@ impl Upstream {
             .uri(path)
             .header("host", authority)
             .header("content-type", "application/json");
-        if !authorization.is_empty() {
-            builder = builder.header("authorization", authorization);
+        if let Some((name, value)) = auth {
+            builder = builder.header(name.clone(), value.clone());
+        }
+        for (name, value) in extra {
+            builder = builder.header(name.clone(), value.clone());
         }
         let request = builder.body(()).context("build h2 request")?;
         let (response_future, mut send_stream) = lease
@@ -148,18 +248,21 @@ impl Upstream {
     async fn post_reqwest(
         &self,
         url: &str,
-        authorization: &str,
+        auth: Option<&(HeaderName, HeaderValue)>,
+        extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
     ) -> Result<UpstreamResponse> {
         let mut req = self
             .http
             .post(url)
-            .header("content-type", "application/json")
-            .body(body);
-        if !authorization.is_empty() {
-            req = req.header("authorization", authorization);
+            .header("content-type", "application/json");
+        if let Some((name, value)) = auth {
+            req = req.header(name.clone(), value.clone());
         }
-        let response = req.send().await.context("upstream request")?;
+        for (name, value) in extra {
+            req = req.header(name.clone(), value.clone());
+        }
+        let response = req.body(body).send().await.context("upstream request")?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -227,6 +330,16 @@ pub fn chat_completions_url(base: &str) -> String {
     }
 }
 
+/// `base_url` + an explicit provider path (the `chat_path` override).
+pub fn upstream_url(base: &str, path: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    if path.starts_with('/') {
+        format!("{b}{path}")
+    } else {
+        format!("{b}/{path}")
+    }
+}
+
 /// `(authority, path[+query])` for an already-built chat/completions URL.
 pub fn h2c_parts(endpoint: &str) -> Option<(String, String)> {
     let parsed = url::Url::parse(endpoint).ok()?;
@@ -288,5 +401,95 @@ mod tests {
         assert!(!should_failover(400, false));
         assert!(!should_failover(502, true));
         assert!(!should_failover(200, false));
+    }
+
+    fn pair(name: &str, value: &str) -> HeaderPair {
+        HeaderPair {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    /// The whole point of the feature: an untouched provider must produce exactly
+    /// the header the gateway produced before upstream shapes existed.
+    #[test]
+    fn default_auth_is_byte_identical_to_the_old_bearer_header() {
+        let (name, value) = build_auth("bearer", "", "sk-test")
+            .expect("default auth")
+            .expect("credential present");
+        assert_eq!(name.as_str(), "authorization");
+        assert_eq!(value.to_str().unwrap(), authorization_header("sk-test"));
+        assert_eq!(value.to_str().unwrap(), "Bearer sk-test");
+
+        // An empty `auth_scheme` is the bearer default, not an error.
+        let (_, value) = build_auth("", "", "sk-test").unwrap().unwrap();
+        assert_eq!(value.to_str().unwrap(), "Bearer sk-test");
+    }
+
+    #[test]
+    fn auth_scheme_none_and_empty_key_send_no_credential() {
+        assert!(build_auth("none", "", "sk-test").unwrap().is_none());
+        assert!(build_auth("bearer", "", "").unwrap().is_none());
+        // A custom header name is still validated even when nothing is sent.
+        assert!(build_auth("none", "bad header", "").is_err());
+    }
+
+    #[test]
+    fn raw_auth_sends_the_key_verbatim() {
+        let (name, value) = build_auth("raw", "X-Api-Key", "sk-test").unwrap().unwrap();
+        assert_eq!(name.as_str(), "x-api-key");
+        assert_eq!(value.to_str().unwrap(), "sk-test");
+    }
+
+    #[test]
+    fn unknown_auth_scheme_is_rejected() {
+        let err = build_auth("oauth", "", "sk-test").unwrap_err();
+        assert!(err.contains("unknown auth_scheme"), "{err}");
+    }
+
+    #[test]
+    fn reserved_extra_headers_are_rejected() {
+        for reserved in RESERVED_HEADERS {
+            let err = build_extra_headers(&[pair(reserved, "x")]).unwrap_err();
+            assert!(err.contains("reserved"), "{reserved}: {err}");
+        }
+    }
+
+    #[test]
+    fn extra_headers_are_parsed_once_and_lowercased() {
+        let parsed = build_extra_headers(&[
+            pair("X-Title", "xlite"),
+            pair("HTTP-Referer", "https://e.com"),
+        ])
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0.as_str(), "x-title");
+        assert_eq!(parsed[0].1.to_str().unwrap(), "xlite");
+        assert_eq!(parsed[1].0.as_str(), "http-referer");
+    }
+
+    #[test]
+    fn extra_header_with_a_bad_value_is_rejected() {
+        assert!(build_extra_headers(&[pair("X-Title", "line\nbreak")]).is_err());
+        assert!(build_extra_headers(&[pair("", "v")]).is_err());
+        assert!(build_extra_headers(&[pair("bad header", "v")]).is_err());
+    }
+
+    #[test]
+    fn validate_upstream_accepts_the_default_shape() {
+        assert!(validate_upstream(&UpstreamShape::default(), "sk-test").is_ok());
+        assert!(validate_upstream(&UpstreamShape::default(), "").is_ok());
+    }
+
+    #[test]
+    fn upstream_url_joins_with_exactly_one_slash() {
+        assert_eq!(
+            upstream_url("http://h:1/", "/api/v1/chat"),
+            "http://h:1/api/v1/chat"
+        );
+        assert_eq!(
+            upstream_url("http://h:1", "api/v1/chat"),
+            "http://h:1/api/v1/chat"
+        );
     }
 }

@@ -1,6 +1,6 @@
 # 设计稿：快照预计算式能力扩展（P2）
 
-- **状态**：待人工评审（2026-09-28）
+- **状态**：V1 已按 §5 实现（后端 + YAML + Admin UI；见同一分支的提交）。**§7.2 的台架 A/B 尚未执行**——实现机无 docker daemon，`ab_configs.sh` 需要实验室网关机，未跑就不声称任何 CPU 结论。
 - **范围**：控制面字段 + 快照构建 + 上游请求形状。**不改调度、不改流式转发、不改鉴权顺序**。
 - **前置约束**：`AGENTS.md` 规则 9（数据面保持空管）、[`docs/ai/agents/wire-boundary.md`](../ai/agents/wire-boundary.md)、[`docs/architecture.md`](../architecture.md)（"No CostAware, CapabilityAware, session stickiness, or strategy enum"）。
 - **不包含**：限流/配额、按 header 或模型的路由策略、usage 解析、body 改写、内容审核（见 §6）。
@@ -129,8 +129,8 @@ for (name, value) in extra { builder = builder.header(name, value); }
 
 **成本陈述（不含糊）**：
 
-- 默认配置（未设置任何新字段）时 `extra` 为空切片 → 内层循环 **0 次迭代**，`auth` 恒为 `Some(("authorization","Bearer …"))` → 写出的 header 集合与今天**完全相同**。
-- 配置了 N 个附加头时，代价是向 `http::HeaderMap` 插入 N 个已解析的条目，无字符串格式化、无分配（值在快照期已解析）。
+- 默认配置（未设置任何新字段）时 `extra` 为空切片 → 内层循环 **0 次迭代**，`auth` 恒为 `Some(("authorization","Bearer …"))` → 写出的 header 集合与今天**完全相同**（同一次 `HeaderMap` 插入，没有额外的解析或分配）。
+- 配置了 N 个附加头时，代价是向 `http::HeaderMap` 多插入 N 个**已解析**的条目——header 名与值在快照期就解析成 `HeaderName` / `HeaderValue`，请求期不做字符串解析，但每次插入本身就是一次常规的 map 写入（**这里原先写的「无分配」不准确，已更正**：HeaderMap 插入会分配，准确的收益是「不解析、不格式化」）。
 - **不在请求期做**：URL 解析、头名合法性校验、JSON 解析、锁、await 之外的 I/O。
 
 ### 5.4 YAML 与 Redis 兼容
@@ -144,23 +144,24 @@ providers:
     api_key: sk-...
     auth_scheme: bearer            # bearer | raw | none
     auth_header: ""                # 空 = authorization
-    headers:                       # 静态附加头
-      HTTP-Referer: https://example.com
-      X-Title: xlite
+    headers:                       # 静态附加头，保持书写顺序
+      - name: HTTP-Referer
+        value: https://example.com
+      - name: X-Title
+        value: xlite
     chat_path: ""                  # 空 = 自动推导 /v1/chat/completions
 ```
 
-- **导出必须对默认值 `skip_serializing_if`**，否则现有 catalog 的导出结果会凭空多出四个键，破坏"导出一份、存起来、再导入"的既有工作流。
+- **与本文初稿的偏差**：初稿写的是 `headers:` 映射（`X-Title: xlite`），实现改成了 `- name/value` 列表——列表与 Admin API、SQLite 的表示完全一致，且不会丢顺序或撞上重复头名。映射写法更短，若评审坚持要，可以在 `ProviderYaml` 上单独做一层映射转换，不影响其余设计。
+- **导出必须对默认值 `skip_serializing_if`**，否则现有 catalog 的导出结果会凭空多出四个键，破坏"导出一份、存起来、再导入"的既有工作流（已有单测锁住）。
 - Redis：`ProviderSecret` 加 `#[serde(default)]`。旧节点写、新节点读 → 走默认值；新节点写、旧节点读 → serde 默认忽略未知键（S8 已核实 Dump 用 `serde_json::from_str`）。**双向滚动升级安全**。
 
-### 5.5 Admin UI（可选，建议拆成 V1b）
+### 5.5 Admin UI（本 PR 已交付）
 
 严格按 P1 的封闭集合纪律：**只扩展现有「供应商」对话框的字段，不新增页面/导航/过滤维度**。
 
-- V1b：`auth_scheme` 用 `Select`，`auth_header` 用 `Input`，`chat_path` 用 `Input`。
-- V1c（若确有需求）：`headers` 需要一个键值对编辑器——这是新的交互形态，应单独评估，不要顺手塞进 V1。
-
-**建议 V1 先只做后端 + YAML**，UI 等有真实用户需求再上；这样热路径收益与 UI 成本可以分开评审。
+- 已交付：`auth_scheme` 用 `Select`，`auth_header` / `chat_path` 用 `Input`，`extra_headers` 用「每行一个 `名称: 值`」的 textarea（复用 `settings.tsx` 已有的 textarea 样式，不引入新的交互组件）。对话框改为 `max-h-[85vh]` + 内部滚动，保证底部按钮始终可见。
+- 仍然是 V1c（未做、需单独评估）：带增删行的键值对编辑器。textarea 的表达力够用，且不会让对话框随行数增长而抖动。
 
 ### 5.6 安全护栏（fail loud）
 

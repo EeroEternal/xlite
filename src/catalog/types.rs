@@ -1,16 +1,62 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+/// One static upstream request header. Stored as a pair (not a map) so the
+/// operator's order survives a YAML/JSON round trip.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderPair {
+    pub name: String,
+    pub value: String,
+}
+
+/// Provider-level upstream request shape.
+///
+/// Every field defaults to xlite's original behaviour — `Bearer <api_key>` sent
+/// as `authorization` to the derived `/v1/chat/completions` — so a catalog that
+/// never sets any of them produces byte-identical requests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamShape {
+    /// `bearer` | `raw` | `none`.
+    #[serde(default = "default_auth_scheme")]
+    pub auth_scheme: String,
+    /// Credential header name; empty means `authorization`.
+    #[serde(default)]
+    pub auth_header: String,
+    /// Static extra request headers.
+    #[serde(default)]
+    pub extra_headers: Vec<HeaderPair>,
+    /// Override for the chat/completions path; empty keeps the derived default.
+    #[serde(default)]
+    pub chat_path: String,
+}
+
+fn default_auth_scheme() -> String {
+    "bearer".into()
+}
+
+impl Default for UpstreamShape {
+    fn default() -> Self {
+        Self {
+            auth_scheme: default_auth_scheme(),
+            auth_header: String::new(),
+            extra_headers: Vec::new(),
+            chat_path: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
     pub id: i64,
     pub name: String,
     pub base_url: String,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub upstream: UpstreamShape,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderSecret {
     pub id: i64,
     pub name: String,
@@ -18,6 +64,8 @@ pub struct ProviderSecret {
     pub api_key: String,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub upstream: UpstreamShape,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
@@ -68,6 +116,9 @@ pub struct RoutingChannel {
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
+    /// Provider upstream shape, carried through unparsed: the snapshot build is
+    /// the single place that validates and precomputes it.
+    pub upstream: UpstreamShape,
 }
 
 #[derive(Clone, Debug)]

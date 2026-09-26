@@ -8,6 +8,69 @@ use sqlx::{Row, SqlitePool};
 use super::types::*;
 use crate::config::is_memory_url;
 
+/// `providers` row including the upstream-shape columns. `extra_headers` is JSON
+/// text in SQLite; it is parsed here and validated again at snapshot build.
+#[derive(sqlx::FromRow)]
+struct ProviderRow {
+    id: i64,
+    name: String,
+    base_url: String,
+    api_key: String,
+    enabled: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    auth_scheme: String,
+    auth_header: String,
+    extra_headers: String,
+    chat_path: String,
+}
+
+const PROVIDER_COLUMNS: &str = "id, name, base_url, api_key, enabled, created_at, \
+                                auth_scheme, auth_header, extra_headers, chat_path";
+
+impl ProviderRow {
+    fn upstream(&self) -> Result<UpstreamShape> {
+        Ok(UpstreamShape {
+            auth_scheme: self.auth_scheme.clone(),
+            auth_header: self.auth_header.clone(),
+            extra_headers: decode_headers(&self.extra_headers)?,
+            chat_path: self.chat_path.clone(),
+        })
+    }
+
+    fn into_provider(self) -> Result<Provider> {
+        let upstream = self.upstream()?;
+        Ok(Provider {
+            id: self.id,
+            name: self.name,
+            base_url: self.base_url,
+            enabled: self.enabled,
+            created_at: self.created_at,
+            upstream,
+        })
+    }
+
+    fn into_secret(self) -> Result<ProviderSecret> {
+        let upstream = self.upstream()?;
+        Ok(ProviderSecret {
+            id: self.id,
+            name: self.name,
+            base_url: self.base_url,
+            api_key: self.api_key,
+            enabled: self.enabled,
+            created_at: self.created_at,
+            upstream,
+        })
+    }
+}
+
+fn encode_headers(headers: &[HeaderPair]) -> Result<String> {
+    serde_json::to_string(headers).context("encode extra_headers")
+}
+
+fn decode_headers(raw: &str) -> Result<Vec<HeaderPair>> {
+    serde_json::from_str(raw).with_context(|| format!("decode extra_headers: {raw}"))
+}
+
 #[derive(Clone)]
 pub struct SqliteCatalog {
     pool: SqlitePool,
@@ -103,7 +166,7 @@ impl SqliteCatalog {
         let channels = sqlx::query(
             r#"
             SELECT c.id, c.model_id, c.provider_id, c.upstream_model, c.weight, c.priority,
-                   p.base_url, p.api_key
+                   p.base_url, p.api_key, p.auth_scheme, p.auth_header, p.extra_headers, p.chat_path
             FROM channels c
             JOIN providers p ON p.id = c.provider_id
             WHERE c.enabled = 1 AND p.enabled = 1
@@ -116,6 +179,7 @@ impl SqliteCatalog {
             std::collections::HashMap::new();
         for row in channels {
             let model_id: i64 = row.get("model_id");
+            let extra_headers: String = row.get("extra_headers");
             by_model.entry(model_id).or_default().push(RoutingChannel {
                 id: row.get("id"),
                 provider_id: row.get("provider_id"),
@@ -124,6 +188,12 @@ impl SqliteCatalog {
                 upstream_model: row.get("upstream_model"),
                 weight: row.get("weight"),
                 priority: row.get("priority"),
+                upstream: UpstreamShape {
+                    auth_scheme: row.get("auth_scheme"),
+                    auth_header: row.get("auth_header"),
+                    extra_headers: decode_headers(&extra_headers)?,
+                    chat_path: row.get("chat_path"),
+                },
             });
         }
         let routing_models = models
@@ -143,19 +213,19 @@ impl SqliteCatalog {
     }
 
     pub async fn list_providers(&self) -> Result<Vec<Provider>> {
-        Ok(sqlx::query_as::<_, Provider>(
-            "SELECT id, name, base_url, enabled, created_at FROM providers ORDER BY id DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?)
+        let sql = format!("SELECT {PROVIDER_COLUMNS} FROM providers ORDER BY id DESC");
+        let rows = sqlx::query_as::<_, ProviderRow>(&sql)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(ProviderRow::into_provider).collect()
     }
 
     pub async fn list_provider_secrets(&self) -> Result<Vec<ProviderSecret>> {
-        Ok(sqlx::query_as::<_, ProviderSecret>(
-            "SELECT id, name, base_url, api_key, enabled, created_at FROM providers ORDER BY id ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?)
+        let sql = format!("SELECT {PROVIDER_COLUMNS} FROM providers ORDER BY id ASC");
+        let rows = sqlx::query_as::<_, ProviderRow>(&sql)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(ProviderRow::into_secret).collect()
     }
 
     pub async fn wipe(&self) -> Result<()> {
@@ -183,20 +253,28 @@ impl SqliteCatalog {
         base_url: &str,
         api_key: &str,
         enabled: bool,
+        upstream: &UpstreamShape,
     ) -> Result<Provider> {
         let created = now();
-        Ok(sqlx::query_as::<_, Provider>(
-            "INSERT INTO providers (name, base_url, api_key, enabled, created_at)
-             VALUES (?, ?, ?, ?, ?)
-             RETURNING id, name, base_url, enabled, created_at",
-        )
-        .bind(name)
-        .bind(base_url)
-        .bind(api_key)
-        .bind(enabled)
-        .bind(created)
-        .fetch_one(&self.pool)
-        .await?)
+        let sql = format!(
+            "INSERT INTO providers (name, base_url, api_key, enabled, created_at,
+                auth_scheme, auth_header, extra_headers, chat_path)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING {PROVIDER_COLUMNS}"
+        );
+        let row = sqlx::query_as::<_, ProviderRow>(&sql)
+            .bind(name)
+            .bind(base_url)
+            .bind(api_key)
+            .bind(enabled)
+            .bind(created)
+            .bind(&upstream.auth_scheme)
+            .bind(&upstream.auth_header)
+            .bind(encode_headers(&upstream.extra_headers)?)
+            .bind(&upstream.chat_path)
+            .fetch_one(&self.pool)
+            .await?;
+        row.into_provider()
     }
 
     pub async fn update_provider(
@@ -206,22 +284,30 @@ impl SqliteCatalog {
         base_url: &str,
         api_key: &str,
         enabled: bool,
+        upstream: &UpstreamShape,
     ) -> Result<Option<Provider>> {
-        Ok(sqlx::query_as::<_, Provider>(
+        let sql = format!(
             "UPDATE providers SET name = ?, base_url = ?,
                 api_key = CASE WHEN ? = '' THEN api_key ELSE ? END,
-                enabled = ?
+                enabled = ?,
+                auth_scheme = ?, auth_header = ?, extra_headers = ?, chat_path = ?
              WHERE id = ?
-             RETURNING id, name, base_url, enabled, created_at",
-        )
-        .bind(name)
-        .bind(base_url)
-        .bind(api_key)
-        .bind(api_key)
-        .bind(enabled)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?)
+             RETURNING {PROVIDER_COLUMNS}"
+        );
+        let row = sqlx::query_as::<_, ProviderRow>(&sql)
+            .bind(name)
+            .bind(base_url)
+            .bind(api_key)
+            .bind(api_key)
+            .bind(enabled)
+            .bind(&upstream.auth_scheme)
+            .bind(&upstream.auth_header)
+            .bind(encode_headers(&upstream.extra_headers)?)
+            .bind(&upstream.chat_path)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(ProviderRow::into_provider).transpose()
     }
 
     pub async fn delete_provider(&self, id: i64) -> Result<()> {

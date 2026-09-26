@@ -96,10 +96,17 @@ impl Catalog {
         base_url: &str,
         api_key: &str,
         enabled: bool,
+        upstream: &UpstreamShape,
     ) -> Result<Provider> {
         match &self.inner {
-            Inner::Sqlite(c) => c.create_provider(name, base_url, api_key, enabled).await,
-            Inner::Redis(c) => c.create_provider(name, base_url, api_key, enabled).await,
+            Inner::Sqlite(c) => {
+                c.create_provider(name, base_url, api_key, enabled, upstream)
+                    .await
+            }
+            Inner::Redis(c) => {
+                c.create_provider(name, base_url, api_key, enabled, upstream)
+                    .await
+            }
         }
     }
 
@@ -110,14 +117,15 @@ impl Catalog {
         base_url: &str,
         api_key: &str,
         enabled: bool,
+        upstream: &UpstreamShape,
     ) -> Result<Option<Provider>> {
         match &self.inner {
             Inner::Sqlite(c) => {
-                c.update_provider(id, name, base_url, api_key, enabled)
+                c.update_provider(id, name, base_url, api_key, enabled, upstream)
                     .await
             }
             Inner::Redis(c) => {
-                c.update_provider(id, name, base_url, api_key, enabled)
+                c.update_provider(id, name, base_url, api_key, enabled, upstream)
                     .await
             }
         }
@@ -330,7 +338,13 @@ mod tests {
         assert_eq!(catalog.kind(), StorageKind::Memory);
         catalog.ping().await.expect("ping");
         let provider = catalog
-            .create_provider("p1", "http://127.0.0.1:9", "sk", true)
+            .create_provider(
+                "p1",
+                "http://127.0.0.1:9",
+                "sk",
+                true,
+                &UpstreamShape::default(),
+            )
             .await
             .expect("provider");
         let model = catalog.create_model("gpt", true).await.expect("model");

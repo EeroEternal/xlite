@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::Catalog;
+use super::types::{HeaderPair, UpstreamShape};
 use crate::hash::{generate_api_key, hash_api_key, key_prefix};
+use crate::upstream;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CatalogYaml {
@@ -24,6 +26,37 @@ pub struct ProviderYaml {
     pub api_key: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(
+        default = "default_auth_scheme",
+        skip_serializing_if = "is_default_auth_scheme"
+    )]
+    pub auth_scheme: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_header: String,
+    /// Static extra request headers, in operator order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderPair>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chat_path: String,
+}
+
+fn default_auth_scheme() -> String {
+    "bearer".to_string()
+}
+
+fn is_default_auth_scheme(value: &String) -> bool {
+    value == "bearer"
+}
+
+impl ProviderYaml {
+    fn upstream(&self) -> UpstreamShape {
+        UpstreamShape {
+            auth_scheme: self.auth_scheme.clone(),
+            auth_header: self.auth_header.clone(),
+            extra_headers: self.headers.clone(),
+            chat_path: self.chat_path.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +186,10 @@ pub async fn export_doc(catalog: &Catalog) -> Result<CatalogYaml> {
             base_url: p.base_url,
             api_key: p.api_key,
             enabled: p.enabled,
+            auth_scheme: p.upstream.auth_scheme,
+            auth_header: p.upstream.auth_header,
+            headers: p.upstream.extra_headers,
+            chat_path: p.upstream.chat_path,
         })
         .collect();
     provider_docs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -197,6 +234,9 @@ pub async fn import_doc(
         if provider.name.trim().is_empty() {
             bail!("provider name is empty");
         }
+        let upstream = provider.upstream();
+        upstream::validate_upstream(&upstream, &provider.api_key)
+            .map_err(|e| anyhow::anyhow!("provider {}: {e}", provider.name))?;
         let existing = catalog
             .list_providers()
             .await?
@@ -210,6 +250,7 @@ pub async fn import_doc(
                     &provider.base_url,
                     &provider.api_key,
                     provider.enabled,
+                    &upstream,
                 )
                 .await?;
             report.providers.updated += 1;
@@ -220,6 +261,7 @@ pub async fn import_doc(
                     &provider.base_url,
                     &provider.api_key,
                     provider.enabled,
+                    &upstream,
                 )
                 .await?;
             report.providers.created += 1;
@@ -335,4 +377,106 @@ pub async fn import_doc(
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    async fn memory_catalog() -> Catalog {
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: false,
+            admin_password: "admin".into(),
+            session_secret: None,
+            max_conns_per_host: 8,
+            catalog_reload_secs: 0,
+            upstream_ttft_header: false,
+        };
+        Catalog::connect(&cfg).await.expect("connect")
+    }
+
+    const BARE: &str = r#"
+providers:
+  - name: p
+    base_url: http://h
+models: []
+api_keys: []
+"#;
+
+    /// An untouched catalog must keep exporting exactly the keys it used to.
+    #[tokio::test]
+    async fn default_upstream_shape_is_not_exported() {
+        let catalog = memory_catalog().await;
+        import_yaml(&catalog, BARE, ImportMode::Replace)
+            .await
+            .expect("import");
+        let text = export_yaml(&catalog).await.expect("export");
+        for key in ["auth_scheme", "auth_header", "headers", "chat_path"] {
+            assert!(
+                !text.contains(key),
+                "default shape must not add `{key}` to the export:\n{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_shape_round_trips_through_yaml() {
+        let catalog = memory_catalog().await;
+        let text = r#"
+providers:
+  - name: p
+    base_url: http://h
+    api_key: sk-1
+    auth_scheme: raw
+    auth_header: X-Api-Key
+    headers:
+      - name: X-Title
+        value: xlite
+    chat_path: /api/chat
+models: []
+api_keys: []
+"#;
+        import_yaml(&catalog, text, ImportMode::Replace)
+            .await
+            .expect("import");
+        let out = export_yaml(&catalog).await.expect("export");
+        assert!(out.contains("auth_scheme: raw"), "{out}");
+        assert!(out.contains("X-Api-Key"), "{out}");
+        assert!(out.contains("/api/chat"), "{out}");
+
+        // The export must be re-importable unchanged.
+        import_yaml(&catalog, &out, ImportMode::Replace)
+            .await
+            .expect("re-import the export");
+        let providers = catalog.list_providers().await.expect("providers");
+        assert_eq!(providers[0].upstream.auth_scheme, "raw");
+        assert_eq!(providers[0].upstream.auth_header, "X-Api-Key");
+        assert_eq!(providers[0].upstream.extra_headers.len(), 1);
+        assert_eq!(providers[0].upstream.chat_path, "/api/chat");
+    }
+
+    /// Import refuses a reserved header instead of storing a provider that the
+    /// snapshot build would later reject.
+    #[tokio::test]
+    async fn reserved_headers_are_rejected_on_import() {
+        let catalog = memory_catalog().await;
+        let text = r#"
+providers:
+  - name: p
+    base_url: http://h
+    headers:
+      - name: Host
+        value: evil.example
+models: []
+api_keys: []
+"#;
+        let err = import_yaml(&catalog, text, ImportMode::Replace)
+            .await
+            .expect_err("reserved header must be rejected");
+        assert!(err.to_string().contains("reserved"), "{err}");
+    }
 }

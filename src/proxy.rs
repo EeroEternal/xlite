@@ -181,7 +181,8 @@ async fn try_channel(
             &channel.endpoint,
             &channel.authority,
             &channel.path,
-            &channel.authorization,
+            channel.auth.as_ref(),
+            &channel.extra_headers,
             body,
         )
         .await
