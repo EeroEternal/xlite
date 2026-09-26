@@ -167,6 +167,7 @@ impl RedisCatalog {
                     upstream_model: ch.upstream_model.clone(),
                     weight: ch.weight,
                     priority: ch.priority,
+                    upstream: provider.upstream.clone(),
                 });
         }
         for chs in by_model.values_mut() {
@@ -213,6 +214,7 @@ impl RedisCatalog {
         base_url: &str,
         api_key: &str,
         enabled: bool,
+        upstream: &UpstreamShape,
     ) -> Result<Provider> {
         self.mutate(|dump| {
             let id = next_id(&dump.providers, |p| p.id);
@@ -223,6 +225,7 @@ impl RedisCatalog {
                 api_key: api_key.to_string(),
                 enabled,
                 created_at: now(),
+                upstream: upstream.clone(),
             };
             dump.providers.push(row.clone());
             Ok(strip_provider(row))
@@ -237,6 +240,7 @@ impl RedisCatalog {
         base_url: &str,
         api_key: &str,
         enabled: bool,
+        upstream: &UpstreamShape,
     ) -> Result<Option<Provider>> {
         self.mutate(|dump| {
             let Some(row) = dump.providers.iter_mut().find(|p| p.id == id) else {
@@ -248,6 +252,7 @@ impl RedisCatalog {
                 row.api_key = api_key.to_string();
             }
             row.enabled = enabled;
+            row.upstream = upstream.clone();
             Ok(Some(strip_provider(row.clone())))
         })
         .await
@@ -477,6 +482,7 @@ fn strip_provider(row: ProviderSecret) -> Provider {
         base_url: row.base_url,
         enabled: row.enabled,
         created_at: row.created_at,
+        upstream: row.upstream,
     }
 }
 

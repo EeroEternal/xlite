@@ -44,7 +44,7 @@
 6. **UI 技术栈与弹窗视口规范**：Admin 只在 `admin/`（React + `components/ui`），**禁止**另起 HTML/JS 页面；弹窗稳定宽度（`w-full max-w-*` 禁止 shrinkwrap 抖动）+ 高度紧凑优先无滚动条 + 底部操作按钮始终直观可见 + `max-h-[85vh]` 兜底；禁止冗余副标题。全局配置只进「设置」。**表面层级**：一级卡片/面板/表格 = `bg-card` + `shadow-card` 无描边浮于 `bg-canvas`；二级分组（卡片/弹窗内部）= `bg-muted/30` 色调，禁止描边、禁止卡中卡叠阴影（详见 [`docs/design/surfaces.md`](docs/design/surfaces.md)，`npm run lint` 已机械拦截）。
 7. **Admin i18n 与语言纯洁性**：用户可见文案全部走 `t('namespace.key')` 并同步写入 `zh.ts` 与 `en.ts`；**严禁中英混杂**（除标准术语如 API Key / HTTP / JSON 外，禁止在中文后附加括号英文）。
 8. **列表排序与检索一致性**：实体列表排序选项必须标明方向（如「名称（A→Z）」）；检索框 placeholder 必须真实准确说明可搜字段。
-9. **数据面保持空管**：`src/proxy.rs` 只做鉴权、选通道、字节透传；调度仅加权随机 + 优先级 failover。禁止组织/项目/智能路由/策略枚举。压测可 `DATABASE_URL=memory` 或冻结 Redis 快照、探 `/health`；请求路径仍不碰库。禁止为刷 TTFT 做准入排队或提前写 200。
+9. **数据面保持空管**：`src/proxy.rs` 只做鉴权、选通道、字节透传；调度仅加权随机 + 优先级 failover。禁止组织/项目/智能路由/策略枚举；**通道级上游形状（鉴权头、静态附加头、chat 路径）属快照预计算数据，不是策略**。压测可 `DATABASE_URL=memory` 或冻结 Redis 快照、探 `/health`；请求路径仍不碰库。禁止为刷 TTFT 做准入排队或提前写 200。
 10. **发版 promoter 流程**：打 tag / 发版必须走 skill [`release`](.agents/skills/release/SKILL.md)。
 11. **分层门禁**：推送前跑 `scripts/ci_local.sh`（t0，按改动路径只跑被改到的面，全绿才推）；**合入 main 由 CI 跑 t1 全量**（`.github/workflows/ci.yml`），发版跑 t2。禁止把 CI 当本地沙盒；细则见 skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md)。
 
