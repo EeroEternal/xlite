@@ -302,11 +302,34 @@ def main(argv: list[str] | None = None) -> int:
               + ", ".join(name for name, on in (("--allow-linkbound", args.allow_linkbound),
                                                 ("--allow-fingerprint-mismatch", args.allow_fingerprint_mismatch)) if on)
               + "）→ 结果可用于诊断，**不可进对标表**。")
+
+    # 农场口径（`MOCK_BATCH`）必须出现在**报告正文**里，不能只躺进 meta.json：
+    # 别人是**复制这张表**去比对的，表上不写就一定会被漏掉。它改的是台架自身的
+    # 每 chunk 成本，batch≠1 的结论是**台架口径**、不是产品口径
+    # （docs/dev/loadtest-newapi-controlled-2026-09.md §14.5）。
+    batch = env.get("MOCK_BATCH", "")
+    if batch == "1":
+        print("")
+        print("> 农场口径：`MOCK_BATCH=1`（对标/延迟口径；客户 driver 写死的就是 1）。")
+    elif batch == "" or batch.startswith("unset"):
+        print("")
+        print("> ⚠️ **农场口径未知**：`env.txt` 里没有可用的 `MOCK_BATCH`（未向农场下发，保持原配置）"
+              "→ 与 batch 相关的量（农场/网关 CPU、首字）**不可**与已知口径的表比较。")
+    else:
+        delta = f"首字 ≈ +{(int(batch) - 1) * 21}ms" if batch.isdigit() else "首字代价见 §14.4"
+        print("")
+        print(f"> 🧪 **台架口径**：`MOCK_BATCH={batch}`（≠1）—— 台架每 chunk 成本被改小"
+              f"（农场 −69%、网关 −65%），{delta}。")
+        print("> 真实上游按 token 推送 = 每 chunk 一次 flush = `batch=1`，所以 "
+              "**本表的产品相关绝对核数不可用**，也**不可**与 `batch=1` 的表混算比值"
+              "（`docs/dev/loadtest-newapi-controlled-2026-09.md` §14.5）。")
+
     if env:
         print("")
         for key in ("GATEWAY_IMAGE", "K6_IMAGE", "K6_IMAGE_ID", "K6_VERSION", "K6_SCRIPT_MD5",
                     "K6_SCRIPT_SHA256", "TOKIO_WORKER_THREADS", "XLITE_CATALOG_RELOAD_SECS",
-                    "GATEWAY_BACKLOG", "GATEWAY_BACKLOG_SOURCE", "SOMAXCONN", "TARGET", "LEVELS"):
+                    "GATEWAY_BACKLOG", "GATEWAY_BACKLOG_SOURCE", "SOMAXCONN", "TARGET", "LEVELS",
+                    "MOCKS", "MOCK_BATCH_BEFORE"):
             if key in env:
                 print(f"- {key}: `{env[key]}`")
     print("")
