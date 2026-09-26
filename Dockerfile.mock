@@ -9,6 +9,7 @@ RUN chmod +x ./start_mocks.sh
 ENV MOCK_MODEL=mock \
     MOCK_CHUNKS=20 \
     MOCK_INTERVAL_MS=10 \
-    MOCK_TTFT_MS=0
+    MOCK_TTFT_MS=0 \
+    MOCK_BATCH=1
 EXPOSE 4101-4124
 CMD ["./start_mocks.sh"]
