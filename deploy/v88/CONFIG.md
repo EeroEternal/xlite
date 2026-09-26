@@ -27,6 +27,7 @@
 | HAProxy | `timeout client/server/tunnel` | `600s` | 客户已是对的，别改小 |
 | HAProxy | 粘性 / `stick-table` | **不需要** | 会话是签名 Cookie，任意节点可校验 |
 | k6 | `STREAM_TIMEOUT` | `600000` | 与上游 reqwest 600s 对齐 |
+| k6 | `KEEP_BODY` | 对标 `true`（配 `KEEP_SAMPLE=1`）/ 产能 `false` | 两套试验必须分开跑，见 [`README.md`](README.md) |
 | mock 农场 | `MOCK_BATCH` | 对标 `1` / 产能 `5`·`10` | 口径，不是性能旋钮 |
 
 ---
