@@ -5,11 +5,13 @@ description: 发版（打 tag）：本地门禁全量重跑、版本号与 chang
 
 # Release
 
-xlite 没有 GitHub CI 部署工作流。tag 只是发布标记，不会自动上生产。
+xlite 没有部署自动化：`.github/workflows/ci.yml` 在 tag 上只跑**只读**校验（tier t2），
+tag 只是发布标记，不会自动上生产。
 
 ## Phase 0 门禁
 
-按 skill [`pre-push-local-gates`](../pre-push-local-gates/SKILL.md) 全量执行，或 `scripts/ci_local.sh --full`。
+按 skill [`pre-push-local-gates`](../pre-push-local-gates/SKILL.md) 走全量，或直接
+`scripts/ci_local.sh --tier t2`（= t1 全量 + release sync）。
 
 ## Phase 1 发版三查
 

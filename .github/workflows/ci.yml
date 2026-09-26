@@ -1,0 +1,101 @@
+# xlite CI — the Linux merge gate (tier t1) and the read-only tag gate (tier t2).
+#
+# Tiers are defined once, in scripts/ci_local.sh, and every job below runs that same
+# script with `--only <face>`. CI therefore cannot drift from the local gates.
+#
+#   PR -> main, push -> main : t1  (meta + rust + admin)
+#   push v* tag              : t2  (t1 + release-sync), read-only
+#
+# This workflow never deploys. A tag is a release marker only — see
+# .agents/skills/release/SKILL.md.
+#
+# Actions are pinned by major tag. Pinning to a full commit SHA is stricter and is
+# deliberately left as follow-up work: a SHA must be looked up, never guessed.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    name: meta (changelog / docs lifecycle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The changelog placement check diffs against origin/main; a shallow
+          # clone cannot resolve that ref, so the check would silently degrade.
+          fetch-depth: 0
+      - name: t1 meta face
+        run: bash scripts/ci_local.sh --tier t1 --only meta
+        env:
+          # fetch-depth: 0 already resolves the local origin/main baseline. GH_TOKEN
+          # additionally enables the script's contents-API fallback for other base refs.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  rust:
+    name: rust (fmt / clippy / tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: |
+          cargo --version        # rustup installs the pinned toolchain from rust-toolchain.toml
+          rustup component add clippy rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: t1 rust face
+        run: bash scripts/ci_local.sh --tier t1 --only rust
+
+  admin:
+    name: admin (tsc / lint / vitest / build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Must stay in lockstep with .mise.toml: Node 26 breaks 4 vitest cases.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+        working-directory: admin
+      - name: t1 admin face
+        run: bash scripts/ci_local.sh --tier t1 --only admin
+
+  release-sync:
+    name: release-sync (tag only, read-only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: t2 meta face
+        run: bash scripts/ci_local.sh --tier t2 --only meta

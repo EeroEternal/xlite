@@ -1,9 +1,9 @@
 ---
 name: git-stash-safe
-description: Safely use git stash in xrouter without stripping feature dependencies or breaking the build. Use when stashing unrelated changes, cleaning the worktree before check/test, or recovering from a stash that may have removed needed files.
+description: Safely use git stash in xlite without stripping feature dependencies or breaking the build. Use when stashing unrelated changes, cleaning the worktree before check/test, or recovering from a stash that may have removed needed files.
 ---
 
-# Safe `git stash` in xrouter
+# Safe `git stash` in xlite
 
 ## Symptom / misjudgment
 Agent stashes "fmt noise" or "unrelated edits", then reports tests green — but `Cargo.toml` / core modules were stashed away and the tree no longer compiles. Phase 4 reviews caught this repeatedly.

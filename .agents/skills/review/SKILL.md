@@ -20,7 +20,9 @@ description: 独立上下文的只读代码评审（critic）：新开会话或�
    ```bash
    bash scripts/check_docs_lifecycle.sh   # 文档类改动
    bash scripts/check_release_sync.sh     # 版本/发版相关改动
-   cargo fmt -p xrouter --check && cargo clippy -p xrouter --lib --tests -- -D warnings
+   cargo fmt -p xlite -p xlite-h2-pool --check
+   cargo clippy -p xlite --lib --tests -- -D warnings
+   cargo clippy -p xlite-h2-pool --lib --tests -- -D warnings
    ```
    门禁红了先修门禁，不要带着红灯读代码。
 4. **对照站立约束逐条问**：夹带无关改动？幻觉能力（有定义无调用 / 文档引用

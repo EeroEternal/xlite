@@ -17,8 +17,9 @@ issue 模板，暂未开放）。当前仅允许 L1 / L2。
 5. **停止条件必须机器可判**：`scripts/check_docs_lifecycle.sh` 与
    `scripts/check_release_sync.sh` 全绿 + diff 不越白名单。无法机器判定的停下开 issue，
    不猜。
-6. **永不进入**：`src/pool/` 参数、`src/adapter/wire/` 协议边界、生产调参、发版流程、
-   数据库迁移内容（迁移文件的新增/修改一律人工）。
+6. **永不进入**：数据面（`src/proxy.rs` 的字节透传与调度）、连接池
+   （`crates/xlite-h2-pool/`）、生产调参、发版流程、数据库迁移内容
+   （迁移文件的新增/修改一律人工）。
 7. **可审计**：每次运行的报告（做了什么、diff 摘要、预算消耗、跳过了什么）写进 PR
    描述；中间产物进本地 `artifacts/`，不入库。
 
