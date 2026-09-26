@@ -29,6 +29,7 @@ services:
       MOCK_CHUNKS: ${MOCK_CHUNKS:-20}
       MOCK_INTERVAL_MS: ${MOCK_INTERVAL_MS:-10}
       MOCK_TTFT_MS: ${MOCK_TTFT_MS:-0}
+      MOCK_BATCH: ${MOCK_BATCH:-1}
       MOCK_LISTEN: ${MOCK_LISTEN:-0.0.0.0}
     ports:
       - "4101-4124:4101-4124"
