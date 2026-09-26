@@ -52,7 +52,7 @@ docker run -d --name xlite-gw --network host --ulimit nofile=1048576:1048576 \
   -e TOKIO_WORKER_THREADS=8 -e REDIS_URL=redis://10.56.88.22:6379 \
   -e XLITE_UPSTREAM_H2C=1 -e XLITE_UPSTREAM_MAX_CONNS_PER_HOST=32 \
   -e ADMIN_PASSWORD='<自己定>' -e LISTEN_HOST=0.0.0.0 -e PORT=8080 \
-  xlite:0.4.0
+  xlite:0.5.0
 ```
 
 ## 4. HAProxy（两个 xlite）
