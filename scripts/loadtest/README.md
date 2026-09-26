@@ -63,9 +63,27 @@ k6 run --compatibility-mode=base \
   scripts/loadtest/k6/k6.js
 ```
 
-与客户原件的差异只有三处，都不改 `ttft / dur / fail / qps` 的口径：
+与客户原件的差异只有四处，都不改 `ttft / dur / fail / qps` 的口径：
 `ERR_SAMPLE` 429 归因计数、`x-xlite-upstream-ttft-ms` / `retry-after` 响应头采集、
-`KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）—— **正因为这一处不同，喂法必须显式传**。
+`KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）—— **正因为这一处不同，喂法必须显式传** ——
+以及下面的 `CHUNK_MAX` 有界采样。
+
+### `CHUNK_MAX` / `CHUNK_SAMPLE`：`chunk_interval_ms` 的有界采样（治 k6 OOM）
+
+`chunk_interval_ms` 原本**每次迭代给每个 chunk 加一个样本**：客户 B 组（`out=500`）是 499 个、
+**D 组（`out=6000`）是 5999 个**。k6.js 自己的头注释就写着「6000 Trend 样本/迭代，**实测最大
+内存黑洞**」—— 这是 k6 在高 VU 下 OOM / 打不出汇总的主因（现场"k6 经常崩"）。
+
+| env | 默认 | 含义 |
+| --- | ---: | --- |
+| `CHUNK_MAX` | `64` | 每次迭代最多加多少个 `chunk_interval_ms` 样本；`0` = 不设上限（复刻客户原版） |
+| `CHUNK_SAMPLE` | `1` | 抽取比例（`0.1` = 每 10 个取 1） |
+
+**不影响的**：`ttft_ms`（首字节，解析 body **之前**就记录）、`http_req_duration`、`fail`、
+`qps`、`gateway_overhead_ms`（每次迭代本来就只 1 个样本）、`checks` 比（仍 2.00）。
+**受影响的**：`chunk_interval_ms` 的分位来自更少样本 ⇒ 有效样本数由 `chunk_samples_added`
+（Counter）上报，**报告里必须写出来**。附带的一个好处：全量解析 5999 个样本会把
+`iteration_duration` 拉到 10s~98s（k6 自锁），有界之后闭式活跃流 `VUS × dur/iter` 更准。
 
 ## mock 的 chunk 合批（`MOCK_BATCH`）
 
@@ -87,6 +105,25 @@ k6 run --compatibility-mode=base \
 （= 完全不动农场配置，保持原行为），给值才下发**并回读校验**。数据见
 [`docs/dev/loadtest-newapi-controlled-2026-09.md`](../../docs/dev/loadtest-newapi-controlled-2026-09.md) §14。
 
+**四条硬约束**（`batch` 是口径，不是性能旋钮；完整版见
+[`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) §4）：
+
+1. **同一张表 / 同一批数据里严禁混 batch** —— 不能拼在一起算比值（跨口径混算已犯过三次）。
+2. **要改就两侧同口径重跑** —— 否则比的是两种农场成本，不是两个网关。
+3. **batch≠1 的结论必须标「台架口径」** —— 真实上游是每 chunk 一次 flush = `batch=1`，
+   所以**产品相关的绝对核数永远是 batch=1 那一组**。
+4. **报告上看不到 batch 就不许进对标表** —— `env.txt` 记 `MOCK_BATCH` / `MOCK_BATCH_BEFORE`，
+   `report.py` 把它打在**报告正文第一段**（≠1 时标 🧪 台架口径 + 首字代价）。
+
+> **1 GbE 现场：改 batch 换不来档位。** 链路容量 ≈5900 活跃流先绑死，而 4000 VU 下农场
+> batch=1 只要 ~24 核。batch 的收益只在**把链路拿掉的台架**（同机 loopback / 10 GbE）兑现。
+> 想保口径又不够 CPU ⇒ **加农场机器**（`MOCKS=` 收 `host:port` 列表），别改 batch。
+>
+> ⚠️ **现场实况更新**：客户现场是 **10 GbE + 32 核 mock**（不是 1 GbE）⇒ 上面这段**不适用**：
+> 链路不再是墙（10 GbE ≈45000 流容量），**农场就是墙**，于是 `batch` 成了一个**真实可用**的杠杆
+> （32 核：batch=1 ≈5000 流 / batch=5 ≈1.3 万流 / batch=10 也不到 3.1 万流 ⇒ 该扩机器）。
+> 但它同时把口径换成**台架口径**、首字 +（batch−1)×21ms —— 所以仍按上面四条硬约束走：
+> **先实测上限**（`deploy/v88/farm_ceiling_scan.sh`）再决定「扩机器」还是「改 batch」。
 > **`batch=1` 不是我们的选择，是客户口径**：客户的 driver 自己就写死它 ——
 > `bench/0924/deploy_origin/loadtest/run_full_88.sh:68` 每组开跑前
 > `POST /_config?ttft=500&token_interval=$TI&out_tokens=$OUT&mix=0&mode=2&batch=1`。

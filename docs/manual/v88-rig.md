@@ -220,6 +220,21 @@ k6 TTFT 是 `timings.waiting`（第一个字节）。空头会把排队从 waiti
 才用大值 —— 实测 `batch=10` 下 31000 VU 能跑完且 fail 0.00%（同条件 batch=1 的 16000 档就跑不完）。
 详见 [`docs/dev/loadtest-newapi-controlled-2026-09.md`](../dev/loadtest-newapi-controlled-2026-09.md) §14。
 
+#### `MOCK_BATCH` 是**口径**，不是可以随手调的性能旋钮 —— 四条硬约束
+
+| # | 约束 | 为什么 |
+| --- | --- | --- |
+| 1 | **同一张表 / 同一批数据里严禁混 batch** | 不同 batch 的档位不能拼在一起算比值或画曲线。§13.3 的注里，「跨口径混算」这个错已经犯过**三次** |
+| 2 | **要改就两侧同口径重跑** | batch 改的是**台架自身**每 chunk 成本（农场 −69%、网关 −65%）。New API 侧不同 batch 重跑，比的就是两种农场成本，不是两个网关 |
+| 3 | **batch≠1 的结论必须标「台架口径」** | 真实上游按 token 推送 = 每 chunk 一次 flush = `batch=1`（§14.5）。`batch=10` 测的是一个**不存在的上游** ⇒ **产品相关的绝对核数永远是 batch=1 那一组** |
+| 4 | **报告上看不到 batch 就不许进对标表** | `run_levels.sh` 把生效值与农场原值写进 `env.txt`（`MOCK_BATCH` / `MOCK_BATCH_BEFORE`），`report.py` 把它打在**报告正文第一段**（≠1 时标 🧪 台架口径并给出首字代价）—— 只躺进 `meta.json` 不够，别人是**复制那张表**去比对的 |
+
+**现场是 1 GbE 时，改 batch 换不来档位**：链路容量 ≈**5900 活跃流**先绑死（§9），而 4000 VU 下
+农场 batch=1 只要 **~24 核**（128 核机上绰绰有余）。batch 的收益（16000/31000 档从跑不完到跑得完）
+只在**把链路拿掉的台架**（同机 loopback / 10 GbE）上才兑现。⇒ **想保口径又不够 CPU，优先加农场机器**
+（[`../../deploy/README.md`](../../deploy/README.md) §9「mock 在另一台机器」；`run_levels.sh MOCKS=`
+收逗号分隔的 `host:port`），**而不是改 batch**。
+
 实验室同一 xlite、同一 31000 VU（组 B）只改喂法（A/B/C 是实验室 xlite；最后一行是**客户 V88 日志里的 New API**，列在这里只为对照喂法差异）：
 
 | 臂 | 喂法 | 活跃流 | TTFT p50 | dur p50 | fail |
