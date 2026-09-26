@@ -63,9 +63,27 @@ k6 run --compatibility-mode=base \
   scripts/loadtest/k6/k6.js
 ```
 
-与客户原件的差异只有三处，都不改 `ttft / dur / fail / qps` 的口径：
+与客户原件的差异只有四处，都不改 `ttft / dur / fail / qps` 的口径：
 `ERR_SAMPLE` 429 归因计数、`x-xlite-upstream-ttft-ms` / `retry-after` 响应头采集、
-`KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）—— **正因为这一处不同，喂法必须显式传**。
+`KEEP_SAMPLE` 默认 1（客户 memopt 版默认 0.1）—— **正因为这一处不同，喂法必须显式传** ——
+以及下面的 `CHUNK_MAX` 有界采样。
+
+### `CHUNK_MAX` / `CHUNK_SAMPLE`：`chunk_interval_ms` 的有界采样（治 k6 OOM）
+
+`chunk_interval_ms` 原本**每次迭代给每个 chunk 加一个样本**：客户 B 组（`out=500`）是 499 个、
+**D 组（`out=6000`）是 5999 个**。k6.js 自己的头注释就写着「6000 Trend 样本/迭代，**实测最大
+内存黑洞**」—— 这是 k6 在高 VU 下 OOM / 打不出汇总的主因（现场"k6 经常崩"）。
+
+| env | 默认 | 含义 |
+| --- | ---: | --- |
+| `CHUNK_MAX` | `64` | 每次迭代最多加多少个 `chunk_interval_ms` 样本；`0` = 不设上限（复刻客户原版） |
+| `CHUNK_SAMPLE` | `1` | 抽取比例（`0.1` = 每 10 个取 1） |
+
+**不影响的**：`ttft_ms`（首字节，解析 body **之前**就记录）、`http_req_duration`、`fail`、
+`qps`、`gateway_overhead_ms`（每次迭代本来就只 1 个样本）、`checks` 比（仍 2.00）。
+**受影响的**：`chunk_interval_ms` 的分位来自更少样本 ⇒ 有效样本数由 `chunk_samples_added`
+（Counter）上报，**报告里必须写出来**。附带的一个好处：全量解析 5999 个样本会把
+`iteration_duration` 拉到 10s~98s（k6 自锁），有界之后闭式活跃流 `VUS × dur/iter` 更准。
 
 ## mock 的 chunk 合批（`MOCK_BATCH`）
 
