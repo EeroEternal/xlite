@@ -3,20 +3,19 @@
 # run_full_88_xg.sh —— 客户 `run_full_88.sh` 的 **xg 版**（deploy/v88 框架的驱动器）
 #
 # 与客户原版的差异（**全部不改 ttft / dur / fail / qps 的口径**）：
-#   1. preflight：本框架 lint + 副本与规范源逐字节一致 + 农场可达 + 路数一致
+#   1. preflight：lint + 封条 + k6 镜像在本机存在 + 农场可达 + 路数一致
 #      （客户原版只认挂载路径 ⇒ §1.1 那次「同名不同内容」事故）
 #   2. MOCK_BATCH **参数化** + 下发 + **回读校验** + 收尾还原
 #      （客户原版第 68 行写死 `batch=1`；手工改过的 batch 会被它静默改回）
 #   3. mock 路数**显式**且与 `MOCKS` 展开数一致
 #      （客户包自相矛盾：`deploy88/start-mocks.sh` 起 12 口，driver 却按 24 口配）
-#   4. **农场产能预算闸门**：超出农场能力的档位直接拒绝，不靠 k6 硬顶到崩
-#   5. **k6 内存护栏 + 崩溃可续**：`--summary-export` 落盘、每档独立；k6 非零退出时
-#      自动降采样重试一次**并把它记成口径变更**，而不是丢整轮
-#   6. 每档写 ledger（生效 batch / 路数 / k6 镜像 ID / 脚本 sha256 / 采样参数）
+#   4. **k6 内存护栏 + 崩溃可续**：`--summary-export` 落盘、每档独立；k6 非零退出时
+#      自动降采样重试一次**并把它记成口径变更**；容器没起来（镜像缺失等）给真实原因，不装 OOM
+#   5. 每档写 ledger（生效 batch / 路数 / k6 镜像 ID / 脚本 sha256 / 采样参数）
 #
 # 用法（**不读任何配置文件**：口径全部走环境变量，未给的用保守默认）：
 #   TARGET=http://<入口>/v1/chat/completions TOKEN=<key> deploy/v88/run_full_88_xg.sh
-#   deploy/v88/run_full_88_xg.sh --dry-run          # 只打印计划 + 预算，不碰农场
+#   deploy/v88/run_full_88_xg.sh --dry-run          # 只打印计划，不碰农场
 #   deploy/v88/run_full_88_xg.sh --preflight-only   # 只跑前置检查
 #   deploy/v88/run_full_88_xg.sh                    # 真跑
 #   deploy/v88/run_full_88_xg.sh --combo B --levels 1000,4000
@@ -65,13 +64,11 @@ GRACEFUL_STOP=${GRACEFUL_STOP:-600s}
 STREAM_TIMEOUT=${STREAM_TIMEOUT:-600000}
 START_VUS=${START_VUS:-1000}
 STEP=${STEP:-1000}
-MAX_VUS=${MAX_VUS:-31000}
+MAX_VUS=${MAX_VUS:-60000}
 WARMUP=${WARMUP:-30}
 STABLE_SHORT=${STABLE_SHORT:-300s}
 STABLE_LONG=${STABLE_LONG:-640s}
-FARM_CORES=${FARM_CORES:-32}
 COMBOS=${COMBOS:-"B D E F A C"}
-ALLOW_OVER_FARM=${ALLOW_OVER_FARM:-0}
 RESULT_DIR=${RESULT_DIR:-$V88_DIR/results/$(date -u +%Y%m%dT%H%M%SZ)}
 FARM_MEM_BEFORE=""
 
@@ -112,13 +109,23 @@ trap on_exit EXIT
 v88_lint_expansions
 v88_check_bundle
 
+# k6 镜像必须**本机已在**：现场驱动机多半拉不动 docker.io（本轮实测：DNS 对
+# registry-1.docker.io 直接 refused），而 `docker run` 对缺失镜像是 rc=125 秒挂，
+# 之前被台架误报成「OOM」排查了半天。fail-closed，三选一给出路。
+if ! docker image inspect "$K6_IMAGE" >/dev/null 2>&1; then
+  v88_die "k6 镜像 ${K6_IMAGE} 本机不存在，而 docker run 会直接 rc=125（现场拉 docker.io 大概率不通）
+   ⇒ 三选一：
+     docker tag <镜像源全名> ${K6_IMAGE}      # 例：docker tag docker.m.daocloud.io/grafana/k6:latest ${K6_IMAGE}
+     K6_IMAGE=<本机已有的 k6 镜像全名> 重跑（ledger 会记实际镜像）
+     docker load -i <k6.tar> 后重跑"
+fi
+
 FARM_HOSTS=$(v88_farm_hosts "$MOCKS")
 FARM_N=$(printf '%s\n' "$FARM_HOSTS" | grep -c .)
 [ "$FARM_N" -gt 0 ] || v88_die "MOCKS=$MOCKS 展开后一个口都没有"
 
 v88_log "目标 $TARGET  模型 $MODEL"
 v88_log "农场 ${MOCKS}（$FARM_N 口）  batch=$MOCK_BATCH  ttft=$MOCK_TTFT  interval=$MOCK_INTERVAL"
-v88_print_farm_budget "$MOCK_BATCH" "$FARM_CORES" 500 "$MOCK_INTERVAL"
 
 # 农场可达性 + 口径回读（客户原版完全没有这层）
 unreachable=0
@@ -145,7 +152,6 @@ LEDGER="$RESULT_DIR/env.txt"
 {
   printf 'GENERATED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'TARGET=%s\nMODEL=%s\nMOCKS=%s\nMOCK_FARM_PORTS=%s\n' "$TARGET" "$MODEL" "$MOCKS" "$FARM_N"
-  printf 'FARM_CORES=%s\n' "$FARM_CORES"
   printf 'KEEP_BODY=%s\nKEEP_SAMPLE=%s\nCHUNK_MAX=%s\n' "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX"
   printf 'GRACEFUL_STOP=%s\nSTREAM_TIMEOUT=%s\n' "$GRACEFUL_STOP" "$STREAM_TIMEOUT"
   printf 'GW_HOST=%s\nBASELINE_CONN=%s\nMAX_WAIT_SEC=%s\n' "$GW_HOST" "$BASELINE_CONN" "$MAX_WAIT_SEC"
@@ -208,6 +214,13 @@ run_k6_once() { # <combo> <vus> <stable> <out> <ti> <keep_sample> <chunk_max> �
   printf '%s' "$log"
 }
 
+# 「容器根本没起来」的特征行（docker run 自身失败，rc=125）：镜像缺失 / daemon 拒绝。
+# 与 OOM（容器被 kill，rc=137，且 k6 已产出部分输出）是两回事 —— 本轮现场把 125
+# 当 OOM 排查了一圈，其实日志第一行就是 Unable to find image。
+v88_k6_startup_failure() { # <log> → docker 错误行（非空 = 容器没起来）
+  grep -m1 -E "Unable to find image|Error response from daemon" "$1" 2>/dev/null || true
+}
+
 # 客户原版那套 `tail -50 | grep` 解析（保持同形，便于与历史日志对齐），
 # 另加 `chunk_samples_added`（有界采样的有效样本数，必须报出来）。
 parse_log() { # <log> <out> → 一行摘要
@@ -265,21 +278,6 @@ run_group() { # <combo> <out> <ti> <stable>
       continue
     fi
 
-    # 农场产能预算闸门：撑不住就拒绝这一档（客户原版会一路顶到 k6 崩）
-    local cap
-    cap=$(v88_farm_vu_cap "$MOCK_BATCH" "$FARM_CORES" "$out" "$ti" 2>/dev/null || echo "")
-    if [ -n "$cap" ] && v88_over_farm_budget "$vus" "$cap"; then
-      if [ "$ALLOW_OVER_FARM" = "1" ]; then
-        v88_warn "组 $combo VUS=$vus 超出农场预算（上限≈${cap}）—— ALLOW_OVER_FARM=1，继续但结果不可作网关结论"
-        printf '[%s] ⚠️ %s VUS=%s 超农场预算(≈%s)，已放行\n' "$(date +%H:%M:%S)" "$combo" "$vus" "$cap" >>"$PROGRESS"
-      else
-        v88_log "组 $combo VUS=$vus 超出农场预算（batch=$MOCK_BATCH / $FARM_CORES 核 ⇒ 上限≈${cap}）：**到此为止**"
-        printf '[%s] ■ %s VUS=%s 超农场预算(≈%s) STOP（要往上打请加 mock 机器）\n' \
-          "$(date +%H:%M:%S)" "$combo" "$vus" "$cap" >>"$PROGRESS"
-        break
-      fi
-    fi
-
     wait_drain   # 客户原版同形：每档开跑前排空残余连接
     v88_log "组 $combo VUS=$vus 开始"
     local log rc
@@ -287,6 +285,18 @@ run_group() { # <combo> <out> <ti> <stable>
     rc=$(cat "$RESULT_DIR/${combo}_${vus}.rc" 2>/dev/null || echo 1)
 
     if [ "$rc" != "0" ]; then
+      # 先分清两种失败：容器**没起来**（docker rc=125：镜像缺失/daemon 拒绝）与
+      # 真跑起来后被 kill（OOM ⇒ rc=137）。前者降采样救不了，直说原因并 INVALID；
+      # 后者才是下面的降采样重试路径。
+      local startfail
+      startfail=$(v88_k6_startup_failure "$log")
+      if [ -n "$startfail" ]; then
+        v88_warn "k6 rc=${rc}：容器没起来（非 OOM）—— ${startfail}"
+        v88_warn "完整日志在 ${log}；修好镜像/daemon 后重跑本档"
+        printf '[%s] ✗ %s VUS=%s k6 容器未启动：%s ⇒ INVALID\n' \
+          "$(date +%H:%M:%S)" "$combo" "$vus" "$startfail" >>"$PROGRESS"
+        break
+      fi
       # k6 崩溃不是"这一轮废了"，而是**台架侧的信号**。降采样重试一次，
       # 并把降级**记为口径变更**（checks 比会从 2.00 变 1.10），不静默。
       v88_warn "k6 退出码 ${rc}（疑似 OOM/被 kill）⇒ 降采样重试一次：KEEP_SAMPLE=0.1 CHUNK_MAX=16"
@@ -336,14 +346,13 @@ printf '口径：KEEP_BODY=%s KEEP_SAMPLE=%s CHUNK_MAX=%s gracefulStop=%s | k6.j
   "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX" "$GRACEFUL_STOP" "$K6_SHA" | tee -a "$PROGRESS"
 
 if [ "$DRY_RUN" = "1" ]; then
-  v88_log "dry-run：计划与预算如上；**未下发农场、未跑 k6**"
+  v88_log "dry-run：计划如上；**未下发农场、未跑 k6**"
   for c in $COMBOS; do
     [ -z "$ONLY_COMBO" ] || [ "$c" = "$ONLY_COMBO" ] || continue
     row=$(combo_row "$c")
     [ -n "$row" ] || v88_die "未知组 $c"
-    printf '  组 %s: out=%s interval=%sms ⇒ 预算 VU 上限 %s\n' "$c" \
-      "${row%%|*}" "$(printf '%s' "$row" | cut -d'|' -f2)" \
-      "$(v88_farm_vu_cap "$MOCK_BATCH" "$FARM_CORES" "${row%%|*}" "$(printf '%s' "$row" | cut -d'|' -f2)" 2>/dev/null || echo n/a)"
+    printf '  组 %s: out=%s interval=%sms\n' "$c" \
+      "${row%%|*}" "$(printf '%s' "$row" | cut -d'|' -f2)"
   done
   trap - EXIT
   exit 0
