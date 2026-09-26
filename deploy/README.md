@@ -150,6 +150,17 @@ docker build -t xlite:0.5.0 .
 docker build -f Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
+> `Dockerfile` 默认用**与 `rust-toolchain.toml` 同版本**的 base 镜像（不触发 rustup 下载工具链），
+> 并拷 `.cargo/` + `vendor/` 走 **`--offline`**（不访问 crates.io）。镜像源里没有那个 tag、或 npm 慢时：
+>
+> ```bash
+> docker build -t xlite:0.5.0 \
+>   --build-arg RUST_IMAGE=rust:1.93-bookworm \
+>   --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+> ```
+>
+> `Dockerfile.lab` 是另一条路（用预构建的 `admin/dist` + 本机已有的 base 镜像），见其头注释。
+
 ---
 
 ## 4. 导入 24 路目录
