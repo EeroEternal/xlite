@@ -28,10 +28,10 @@ const SCANNED_EXTENSIONS = [".ts", ".tsx"]
 /** Locale bundles embed changelog prose that legitimately quotes brand hex values. */
 const EXCLUDED_DIRECTORIES = [join(SRC_ROOT, "lib", "i18n", "locales")]
 /**
- * Marketing surfaces are allowed the heavier weights; docs/design/typography.md
- * caps product UI at 400/500/600.
+ * The login surface is allowed the heavier weights; docs/design/typography.md
+ * caps the rest of the product UI at 400/500/600.
  */
-const MARKETING_FILES = [join(SRC_ROOT, "pages", "landing.tsx"), join(SRC_ROOT, "pages", "login.tsx")]
+const MARKETING_FILES = [join(SRC_ROOT, "pages", "login.tsx")]
 
 const PALETTE =
   "(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)"
