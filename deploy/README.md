@@ -77,7 +77,16 @@ sysctl -w net.ipv4.tcp_max_syn_backlog=65535
 sysctl -w net.ipv4.ip_local_port_range="1024 65535"
 ```
 
-不要设 `XLITE_MAX_IN_FLIGHT`。容器 `ulimit nofile` 至少 1048576（compose 外手跑 docker 时加 `--ulimit nofile=1048576:1048576`）。HAProxy 健康检查用 `GET /health`，不是 New API 的 `/api/status`。
+不要设 `XLITE_MAX_IN_FLIGHT`。HAProxy 健康检查用 `GET /health`，不是 New API 的 `/api/status`。
+
+**容器 `ulimit nofile` 至少 1048576，compose 已给 `mocks` / `xlite` / `xlite-2` 写死 `soft = hard = 1048576`**（不要依赖 daemon 默认值）。这个上限被封顶是**静默**的：4000 VU 下 nofile=1024 只跑到 **147 qps**、1048576 是 **621 qps（4.2×）**，而 `fail=0.00%`、`vus_max`、`iteration_duration` 全部正常 —— 同机理的实测与排查经过见 [`../docs/dev/loadtest-newapi-controlled-2026-09.md`](../docs/dev/loadtest-newapi-controlled-2026-09.md) §13.6 第 0a 条。起服务后核对：
+
+```bash
+docker compose exec xlite sh -c "grep -i 'open files' /proc/1/limits"   # 期望 1048576
+docker compose exec mocks sh -c "grep -i 'open files' /proc/1/limits"
+```
+
+若 `docker compose up` 报 hard limit 超过 daemon 限制，把宿主机 `dockerd` 的 `LimitNOFILE` 提上去（systemd：`LimitNOFILE=infinity`），或把 compose 里两档一起调低到 daemon 允许的上限 —— 但**不要只改 soft**。compose 外手跑 `docker run` 时加 `--ulimit nofile=1048576:1048576`（见 §8）。
 
 h2c 池：对端 `SETTINGS_MAX_CONCURRENT_STREAMS` 满了会再拨一条连接，直到 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`。24 个 mock × 32 条约 768 条连接、按对端 250 流/连接估算约 19 万流上限，一般够本机压测。
 
@@ -244,6 +253,7 @@ docker network create xlite-net
 docker run -d --name xlite-redis --network xlite-net -p 6379:6379 redis:7-alpine
 
 docker run -d --name xlite-mocks --network xlite-net --network-alias mocks \
+  --ulimit nofile=1048576:1048576 \
   -p 4101-4124:4101-4124 \
   -e MOCK_MODEL=mock -e MOCK_CHUNKS=20 -e MOCK_INTERVAL_MS=10 -e MOCK_LISTEN=0.0.0.0 \
   xlite-mock:0.1.0
@@ -252,7 +262,9 @@ docker run --rm --network xlite-net \
   -e REDIS_URL=redis://xlite-redis:6379 \
   xlite:0.4.0 import /opt/xlite/examples/mock-24.docker.yaml --replace
 
-docker run -d --name xlite-gw --network xlite-net -p 8080:8080 \
+docker run -d --name xlite-gw --network xlite-net \
+  --ulimit nofile=1048576:1048576 \
+  -p 8080:8080 \
   -e REDIS_URL=redis://xlite-redis:6379 \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD=admin \
@@ -260,7 +272,7 @@ docker run -d --name xlite-gw --network xlite-net -p 8080:8080 \
   xlite:0.4.0
 ```
 
-`--network-alias mocks` 不能省，否则 YAML 里的主机名 `mocks` 解析不到。
+`--network-alias mocks` 不能省，否则 YAML 里的主机名 `mocks` 解析不到。`--ulimit nofile=1048576:1048576` 同样不能省（理由见 §2.1），核对：`docker exec xlite-gw sh -c "grep -i 'open files' /proc/1/limits"`。
 
 ---
 
@@ -295,6 +307,7 @@ xlite 启动日志应含 `catalog backend redis` 且 `h2c=true`。
 | Admin 空白 | 镜像没打进 `admin/dist` | 在仓库根用 `Dockerfile` 重新 `--build` |
 | 第二台没有模型 | 快照未 reload | 等 5 秒；两台 `REDIS_URL` 必须相同 |
 | 401 | YAML 没写 `key` 或和请求不一致 | 示例用 `sk-loadtest`；改 YAML 后重新 import |
+| 吞吐只有 1/4，但 `fail` / `vus_max` / `iteration_duration` 全部正常 | 容器 `nofile` 被封顶（静默） | 按 §2.1 核对 `/proc/1/limits`；compose 已写死 1048576，手跑 docker 要带 `--ulimit` |
 
 ---
 

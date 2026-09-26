@@ -33,6 +33,12 @@ services:
       MOCK_LISTEN: ${MOCK_LISTEN:-0.0.0.0}
     ports:
       - "4101-4124:4101-4124"
+    # 24 个 Node 进程同时持有大量上游连接。**不要依赖 daemon 默认值**：nofile 被封顶时
+    # 吞吐会静默掉到 1/4，而 fail / vus_max / iteration_duration 全部正常（见 README §2.1）。
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     healthcheck:
       test:
         [
@@ -61,6 +67,10 @@ services:
       TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-8}
     ports:
       - "8080:8080"
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     depends_on:
       redis:
         condition: service_healthy
@@ -80,6 +90,10 @@ services:
       TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-8}
     ports:
       - "8081:8080"
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     depends_on:
       redis:
         condition: service_healthy
