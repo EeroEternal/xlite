@@ -87,6 +87,19 @@ k6 run --compatibility-mode=base \
 （= 完全不动农场配置，保持原行为），给值才下发**并回读校验**。数据见
 [`docs/dev/loadtest-newapi-controlled-2026-09.md`](../../docs/dev/loadtest-newapi-controlled-2026-09.md) §14。
 
+**四条硬约束**（`batch` 是口径，不是性能旋钮；完整版见
+[`docs/manual/v88-rig.md`](../../docs/manual/v88-rig.md) §4）：
+
+1. **同一张表 / 同一批数据里严禁混 batch** —— 不能拼在一起算比值（跨口径混算已犯过三次）。
+2. **要改就两侧同口径重跑** —— 否则比的是两种农场成本，不是两个网关。
+3. **batch≠1 的结论必须标「台架口径」** —— 真实上游是每 chunk 一次 flush = `batch=1`，
+   所以**产品相关的绝对核数永远是 batch=1 那一组**。
+4. **报告上看不到 batch 就不许进对标表** —— `env.txt` 记 `MOCK_BATCH` / `MOCK_BATCH_BEFORE`，
+   `report.py` 把它打在**报告正文第一段**（≠1 时标 🧪 台架口径 + 首字代价）。
+
+> **1 GbE 现场：改 batch 换不来档位。** 链路容量 ≈5900 活跃流先绑死，而 4000 VU 下农场
+> batch=1 只要 ~24 核。batch 的收益只在**把链路拿掉的台架**（同机 loopback / 10 GbE）兑现。
+> 想保口径又不够 CPU ⇒ **加农场机器**（`MOCKS=` 收 `host:port` 列表），别改 batch。
 > **`batch=1` 不是我们的选择，是客户口径**：客户的 driver 自己就写死它 ——
 > `bench/0924/deploy_origin/loadtest/run_full_88.sh:68` 每组开跑前
 > `POST /_config?ttft=500&token_interval=$TI&out_tokens=$OUT&mix=0&mode=2&batch=1`。
