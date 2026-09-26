@@ -77,6 +77,10 @@ mock 自己的 `ttft = 500ms`。**xlite 加 2ms，New API 加 4ms。**
    错误分布变成 `failed to connect to postgres` ×**12207**。根因是架构性的：**New API 每个请求的结算
    （billing settlement）都要和 Postgres 往返一次**，所以它的吞吐天花板 = DB 层的吞吐天花板，而不是网关自身的转发能力。
    这一条（每请求打 DB）由失败签名与 `pg_stat_activity` 直接支持，不依赖第 1 条的因果。
+    **§15 把它落到了代码行上，并补上了本节要的 ledger**（两轮反序、客户配置 2000/2000：New API
+    4000 VU **52.67% / 51.85%** 失败、dur p50 **41s**；xlite 同条件 **643.1 / 643.7** qps、0.00%）。
+    §15 同时**收窄本节这句**：结算是「每次 DB 操作借还连接」，**不是**「每个在途请求独占一条连接」
+    （`service/billing_session.go` 里没有长事务），撞的是**池上限 = PG 上限、零余量**。
 3. 31000 VU 时 PG 直接不响应（`server closed the connection unexpectedly`），整个栈挂死。
 
 ### 3.2 能说与不能说
@@ -1632,3 +1636,196 @@ mock 写、**网关读+转发**、k6 读。而 `src/proxy.rs` 的转发确实是
 > 独占 PG、真实上游按 token 推送），本轮只测了"网关本身在这台架子上"。
 > ③`A0` 在这三档上跑的是 **`backlog=128`** 却仍然 0.00% 失败 —— 这条线索直接引出了
 > §13.6 0a 那个 `nofile`/`backlog` 的 2×2（**fd 上限才是根因**）。
+
+---
+
+## 15. New API 的并发天花板 = **结算（settlement）**：落到代码行的机制 + 客户协议下的两轮反序复现
+
+§3 把「New API 每请求打一次 DB」记为**架构性**观察，但当时明确写着「归因待补 ledger」。
+本节补上那份 ledger（`~/labtest/ledger.tsv`），并把机制落到**代码行**上。
+
+⚠️ 本节口径与前几节**有三处不同**，先列清楚，否则数据不可比：
+
+| 项 | §1–§3 那几轮 | 本节 |
+| --- | --- | --- |
+| xlite 臂 | 客户 `0.2.0`（`xlite:0.2.0-inflight`） | **今天 `main`**（v0.4.0，sha256 `bcf67dcf…`） |
+| k6 采样 | 不传 `KEEP_SAMPLE`（指纹 2.00） | 显式 `KEEP_SAMPLE=1`（2.00）与 **`=0.1`（1.10）** 两档 |
+| PG / 池上限 | §5 配方写的是 `max_connections=**4000**` | **客户配置 2000 / 2000**（部署脚本默认值，ledger `sql_maxconn=2000`） |
+| 顺序 | 单轮 | **只有 4000 VU（sample=0.1）那一档是两轮反序**；1000 / 4000(sample=1) / 5000 三档每臂各 1 轮、无对调 |
+
+与客户 `run_full_88.sh` 一致的部分：网关 101、k6 + 24×mock 在 102、`ttft=500 / 500 chunks × 10ms`、
+`KEEP_BODY=true`、`WARMUP=30`、稳态 **300s**、`docker grafana/k6 -m 45g`；body 逐字节一致
+（502 个 `data:` 行 / 100736 字节，两侧指纹见上表）。
+
+### 15.1 ledger（§3.1 点名要的那张表）
+
+| 时刻 | 臂 | VU | sample | 指纹 | fail | TTFT p50 | dur p50 | qps | 客户端占用 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 01:19 | xlite | 1000 | 1 | 2.00 | 0.00% | 501.7ms | 5.89s | 160.3 | 94% |
+| 01:24 | New API | 1000 | 1 | 2.00 | 0.00% | 504.1ms | 5.84s | 159.9 | 94% |
+| 01:30 | xlite | 4000 | 1 | 2.00 | 0.00% | 502.2ms | 5.86s | 326.0 | 48% |
+| 01:37 | New API | 4000 | 1 | 2.00 | **32.79%** | 511.9ms | 6.03s | 102.2 | 15% |
+| 01:43 | xlite | 4000 | 0.1 | 1.10 | 0.00% | 512.7ms | 5.87s | **643.1** | 94% |
+| 01:50 | New API | 4000 | 0.1 | 1.10 | **52.67%** | 1241ms | **41.0s** | 70.9 | 72% |
+| 01:57 | New API | 4000 | 0.1 | 1.10 | **51.85%** | 1049ms | **41.4s** | 75.9 | 78% |
+| 02:02 | xlite | 4000 | 0.1 | 1.10 | 0.00% | 511.9ms | 5.87s | **643.7** | 95% |
+| 02:14 | New API | 5000 | 0.1 | 1.10 | **64.32%** | 1964ms | **51.5s** | 69.9 | 72% |
+| 02:54 | xlite | 5000 | 0.1 | 1.10 | 0.00% | 513.8ms | 5.89s | **799.3** | 94% |
+
+（01:57 与 02:02 是**反序轮**：先 New API 后 xlite —— 全表只有这一档做了反序。02:07:33 那行是**失败行**：
+xlite@5000 的 k6 容器被另一个 inline 脚本 `docker rm -f` 误杀（它没走台架锁，正是 §13.5 那类坑），
+该行只剩下 `ts/gw/vus/sample/checks`、占用槽位写着 `0`；同刻还有两行 `02:07:34 n-cap10k 4000 0.1 1.10`
+的 5 字段占位行（§15.5 ③ 一并记了）。补测即 02:54 那行 —— **但那一行的列也错位**（§15.5 ③），
+本表取的是它的**语义值**。`占用%` = 客户端 qps ÷ (VUs ÷ dur p50)，公式见 §13.6。）
+
+**两轮反序都复现**：xlite 643.1 / 643.7（差 **0.1%**）、New API 52.67% / 51.85%。
+⇒ 4000 VU 这一档的差异**不是顺序/时间伪影**。
+
+### 15.2 机制：结算为什么把并发钉在 PG 上（源码级）
+
+计费是**两段**，两段都跑在请求自己的 goroutine 里。⚠️ 压测打的是 **chat/streaming** 路径，
+所以下面的锚点取的是那条路：
+
+| 阶段 | chat 路径（上游 `QuantumNous/new-api@c2b7a9a9`） | 做什么 |
+| --- | --- | --- |
+| **预扣** | `controller/relay.go:141 relay.PrepareRequestBilling` → `relay/request_billing.go:24`（定义）/`:66 service.PreConsumeBilling` → `service/billing.go:20 PreConsumeBilling` → `NewBillingSession`（`service/billing_session.go:379`）→ `BillingSession.preConsume`（`:198`） | 转发**前**按预估额度占住（`reserveFunding` → `DecreaseUserQuota` / `PostConsumeUserSubscriptionDelta`；`reserveToken` → token 额度） |
+| **结算** | `service/quota.go:229` / `:362`（另有 `service/text_quota.go:460`）→ `service.SettleBilling`（`service/billing.go:51`）→ `BillingSession.Settle`（`service/billing_session.go:45`；`:58 funding.Settle`、`:67/:69 Decrease/IncreaseTokenQuota`） | 响应**结束后**算 delta；旧路径 `service/quota.go:420 PostConsumeQuota` 另有 `UpdateUserUsedQuotaAndRequestCount` / `UpdateChannelUsedQuota` / `RecordConsumeLog` |
+
+⇒ **每请求 2~4 次短 DB 写，全部同步、全部在请求路径内**；没有任何一步是后台批处理。
+
+**两个容易挂错的锚点**（本 PR 初稿挂了，已改）：
+
+- `controller/relay.go:602-609` / `:691-693` 属于 **task 提交路径**（`executeTaskSubmissionWith` 起于 `:472`），
+  那里的报错文本是 `reserve adjusted task billing error` / `task_billing_settlement_failed` —— **压测没有走这条路**；
+- `BillingSession.Reserve`（`service/billing_session.go:156`）**不是** chat 的预扣：它只被 task（`relay.go:603`）、
+  `service/image_billing.go:81`、`service/tiered_settle.go:194` 调用，chat 用的是 `preConsume`。
+
+**失败签名能钉在这条路上**：`error settling billing: ` 正是 `service/quota.go:229` / `:362` 打印的
+（`logger.LogError(ctx, "error settling billing: "+err.Error())`）。
+
+**但「每个在途请求独占一条连接」是错的**（本仓早先那句话要收窄）：`service/billing_session.go`
+里**没有任何事务原语**（`begin|commit|rollback|transaction|tx` 忽略大小写，只剩标识符
+`rollbackFundingReserve`，`:293`；`Transaction(` 在 `service/{quota,billing,billing_session,text_quota,tiered_settle,billing_usage}.go`
+**零命中**）⇒ 连接是**每次 DB 操作借还**，不是整请求持有。
+
+**池与上限**：
+
+- `model/main.go:211-212`（主库池）与 `:258-259`（日志库池）**读同一个** `SQL_MAX_OPEN_CONNS`（默认 1000）；
+- `model/main.go:231-232`：`LOG_SQL_DSN` **未设**时 `LOG_DB = DB` ⇒ **只有一个池**。
+  §5 的配方与本节用的 `newapi_up.sh` **都没有** `LOG_SQL_DSN` ⇒ 单池、上限 2000。
+
+**压测期间观测（留存工件：101 上 `~/labtest/pg-sample.tsv`）**：该采样 4s 一次，第 2 列是
+`select count(*) from pg_stat_activity` —— 即**总行数**（含 PG 自己的后台/辅助进程与采样者本人，
+所以它**不是**"应用连接数"，而是它的**上界**，应用连接 ≈ 它 − 基线）。按 ledger 的**完成时刻**回溯
+各轮窗口（每段饱和都在对应 `ts` 之前一分钟内收敛 —— 这就是对齐依据，本身是一步推断），
+**每分钟峰值**：
+
+| 窗口 | 采样峰值 | 形状 |
+| --- | ---: | --- |
+| New API@4000 首轮（≈01:45:20–01:50:51） | **2005** | 01:45–01:49 每分钟都是 **2005**（整段顶住） |
+| New API@4000 反序轮（≈01:51:40–01:57:14） | **2005** | 01:52–01:56 每分钟 2004–2005 |
+| New API@5000（≈02:09:10–02:14:42） | **2005** | 02:09–02:13 每分钟都是 **2005** |
+| xlite@4000 反序轮（01:58–02:06 段） | **9** | 平直 |
+| xlite@5000（02:15–02:19 段） | **9** | 平直 |
+| New API · cap10k（02:21 起） | **3907** | 抬上限后连接确实更多（仍 98%+ 失败，见 §15.4） |
+
+⇒ **空闲基线 9**；New API 三轮**全部顶到 2005**，而同机的 xlite 两段**平直 9**。
+`SQL_MAX_OPEN_CONNS=2000` 与 PG `max_connections=2000` 是同一个量级，而 PG 这边还要站
+后台/辅助进程与采样者（基线 9 行）⇒ **可用槽位被池上限吃满、余量为零**，池拿不满自己的 2000。
+（`superuser_reserved_connections` 默认 3、基线里后台进程占几行 —— 这两个数**本轮都没有留存工件**，
+属配置/默认值层面的**算术推断**，不是采样结论。）
+
+这也解释了池侧为什么不断撞出 **591× `too many clients already` + 591× `failed to connect`**
+（抓取自拆栈前的 `docker logs newapi-bench`；**容器已拆，该日志未留工件** —— 留存下来的只有上面那份
+PG 采样），其中 `failed to connect` 与应用自己的 `error settling billing: failed to connect`
+（§5 排障表记过同一条）是同一件事；而 `too many clients already` 是 **PG 服务端**的字符串 ——
+它在应用二进制里 **0 命中**（见 §15.5）。
+
+⇒ 形态：**DB 一慢，连接池就成了没有超时的排队区，请求停在池里等**，而不是"转发变慢"。
+证据是同一档位下 dur p50 从 5.87s 涨到 **41s**、qps 从 643 掉到 **70.9**，而 xlite 两个数都不动。
+
+### 15.3 对照：xlite 为什么不站在这堵墙前面
+
+xlite **在请求路径上没有任何逐请求持久化** —— 不是"批量写"，而是**根本不写**（以下按本仓 v0.4.0 枚举）：
+
+- keys/models/channels 被编译成**内存快照**（`src/store.rs:1-2` 的模块注释；
+  `:75 inner: Arc<ArcSwap<Snapshot>>`），由后台刷新循环每 `catalog_reload_secs`（默认 5s）整体换入
+  （`src/main.rs:141-153`）；`ArcSwap` 让读者继续用旧 `Arc`、不被换入者阻塞（`src/store.rs:61-65`，§12.6）。
+- **chat 请求路径只查这份内存快照**：`src/proxy.rs:103 state.store.authenticate(token)`、
+  `:140 state.store.channels_for(&key, model)`。
+- `src/` 共 **14** 个文件（`admin` / `auth` / `catalog/{mod,redis,sqlite,types,yaml}` / `config` / `hash` /
+  `lib` / `main` / `proxy` / `store` / `upstream`），**没有** request log、用量、计费模块，也没有 metrics 模块
+  （`metrics` 在整个 `src` **0 命中**）；`migrations/001_init.sql` 只有 `providers` / `models` / `channels` /
+  `api_keys` / `api_key_models` 五张**目录**表，**没有** `request_logs` 之类的用量表。
+- 目录后端的写路径（`src/catalog/sqlite.rs` 的 `INSERT`/`UPDATE`/`DELETE`，`:198`/`:220`/`:237`…）只服务
+  Admin 的目录 CRUD 与快照刷新；**`src/proxy.rs` 对这些写函数零调用**。
+- 唯一在服务进程里碰 catalog 后端的是 `/ready` 探针（`src/proxy.rs:72 state.store.catalog().ping()`），
+  **不在** chat 路径上。
+
+⇒ **每请求 DB 往返 0 次**（对照 New API 的 2~4 次）。所以 §15.2 那堵墙在 xlite 这侧**没有对应物**：
+不是"xlite 把逐请求写入优化掉了"，而是**这一版 xlite 没有这项写入**。
+
+这条对照的取向和 §14.6 **正好相反**，值得放在一起记：**省系统调用**（转发合批）没测到收益，
+而**请求路径上有没有一次 DB 往返**是结构性差别 —— 本节就是后者的反证。
+可带走的是**护栏**而非"xlite 更优"：**将来给 xlite 加计量/结算时，别把它放进请求路径**，
+否则就会长成 §15.2 那堵墙。
+
+### 15.4 「把连接数放开」不是药
+
+在客户配置之上继续放（`SQL_MAX_OPEN_CONNS=8000` + PG `max_connections=10000`）：
+4000 VU 两轮 **98.30% / 100.00% 失败**（ledger `02:33` / `02:44`）。留存工件
+（102 上 `~/labtest/cmp-n-cap10k-r1.log` / `-r2.log`）显示**两轮的客户端签名并不相同**：
+
+| 轮 | `unexpected EOF` | `request timeout` | fail |
+| --- | ---: | ---: | ---: |
+| r1（`02:33`） | **974** | 3641 | 98.30% |
+| r2（`02:44`） | **0** | **4000** | 100.00% |
+
+（r2 里另有 **317** 条 k6 自身的 `TypeError: Cannot read property 'indexOf' of undefined` ——
+是客户端侧的次生噪声，不是网关返回。）
+PG 侧另有 `FATAL: canceling authentication due to timeout`（抓取自容器日志，**未留工件**）；
+同期 PG 采样（§15.2 表末行）峰值 **3907**，**远低于**抬高后的 `max_connections=10000`
+⇒ 不是"连接数不够"。机器 1 TB 内存只用了 25 GB ⇒ **不是 OOM**。
+⇒ 墙不在"额度"，在**建连/认证能力**：上限抬得越高，认证排队越先成为瓶颈。
+
+### 15.5 边界与自曝
+
+- **不可外推**：本节是 bench（单副本、本地 PG、无 HAProxy）；客户现场是 2 副本 + HAProxy + 独占
+  host 22 ⇒ §3.2 的"不能说"在这里同样成立。
+- **采样口径**：`~/labtest/pg-sample.tsv` 第 2 列是 `pg_stat_activity` 的**总行数**，因此它包含
+  **采样者自己**与 PG 的后台/辅助进程（空闲基线 **9** 行）⇒ 表里那几个 `2005` **不是**"应用连接数"，
+  应用连接 ≈ 2005 − 9 ≈ **1996**（这步减法**是推断**，不是采样结论）。
+- **ledger 自己的三处缺陷**（§3.1 要 ledger 就是为了防这个，所以缺陷也得记）：
+  ① `pg_maxconn` 列在**所有 15 字段的规范行里都是 `n/a`**（short 行根本没有这一列）—— PG 侧
+  `max_connections=2000` 这个值出自部署脚本默认值与 §3 的现场记录，**本轮没有任何采样或工件记录过它**；
+  ② `cap10k` 那两行**列错位**（`dur_p50` 列里写的是 qps）⇒ 那两行**只有 `fail%` 可引用**；
+  ③ §15.1 里 **02:54 那行（补测）同样列错位** —— 它少写了两个 p99 列，于是
+  `dur_p50 5.89` 落在 `ttft_p99` 槽、`qps 799.275861` 落在 `dur_p50` 槽，末尾还多出一个
+  记容器名的列（`x5000-k6`）。**按表头逐列读会读错**；§15.1 引的是它的语义值。
+  ⇒ 这三处都是"临时脚本按自己的口味写 ledger"造成的，已并进 §15.6 第 3 条。
+- **§5 的配方与本节的配置不一致**：§5 写 `max_connections=4000`（`:119`），而 §3 的表头只写
+  「New API · **客户配置**」、`2000` 这个数出自表下那条 bullet（`:57`）；本轮按 **2000** 跑。
+  §3.1 采到 **3919 条连接**这一点**与 2000 的上限不相容** ⇒ 那一轮跑在更大的上限下，
+  而它的 `pg_maxconn` 也没能补进 ledger —— 正是 §3.1 点名的那条例外。
+- **源码版本**：§15.2 的行号对应上游 `QuantumNous/new-api@c2b7a9a9`（main 快照）。现场跑的是
+  `new-api:v8-sentinel`（2026-09-17 构建；客户执行包 `~/new-api-v8.tar.gz` 是 **OCI 镜像存档、无源码**）。
+  对现场那份我**只验了符号存在**（把镜像里的 `/new-api` 二进制 **71 422 136** 字节取出来 `strings`）：
+  `BillingSession` 45、`SettleBilling` 1、`PostConsumeQuota` 1、`RecordConsumeLog` 4、
+  `SQL_MAX_OPEN_CONNS` 1、`LOG_SQL_DSN` 2、`DecreaseTokenQuota` 2 命中。同一份二进制里
+  **`too many clients already` 0 命中**、`canceling authentication` 0 命中、`failed to connect` 4 命中
+  ⇒ 「连接被拒」那句来自 **PG 服务端**，「连不上」才是应用/驱动自己的。
+  （探针在 101 上 `docker create` + `docker cp` 取出二进制，用完即删，**未留工件**。）
+  ⇒ 结构同源，**行号不与现场构建对应**。
+- **`LogConsumeEnabled=false`**（§1 line 19）：`RecordConsumeLog` 首行即 `return`（`model/log.go:340`）
+  ⇒ 本轮**不写日志表**，每请求的 DB 写比默认配置更少。**这对 New API 是有利的**，它仍然撞墙。
+
+### 15.6 能带走的三条
+
+1. **对客户**：New API 的并发天花板由 PG 决定，不由转发决定。请他们给出两轮 v88 压测期间的
+   PG `pg_stat_activity` 峰值与 CPU —— 若峰值贴着 `max_connections`，那套「60000 VU 无失败」
+   也可能停在 DB 墙前面（§3.2 已列这条待验）。
+2. **对产品**：**别把计量/结算放进请求路径**。xlite 这一版在请求路径上**没有任何逐请求写入**
+   （§15.3 的枚举），所以这堵墙它暂时不会有；将来把计量加回来时，通道要留在请求路径**之外**，
+   且要有界（满了宁可丢计量、别把请求挂住）。
+3. **对台架**：ledger 必填 `pg_maxconn` / `sql_maxconn`；临时脚本必须走 `lab_lock`
+   （02:07 那次误杀就是没走锁，见 §13.5）。
