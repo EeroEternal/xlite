@@ -288,6 +288,53 @@ sysctl -n net.core.somaxconn                                          # 期望 6
 | 目录导入 | `docker compose run --rm xlite import <yaml> --replace`；**不要**把 `examples/mock-24.yaml`（`127.0.0.1`）导进容器网关 |
 | 端口 | 容器内 `PORT`；宿主机映射或 `--network host` |
 
+### 4.1 空 Redis 时怎么灌目录
+
+**网关没有目录时每个请求都回 401**（启动不会自动灌入）；现场那台 Redis 里已经有目录的话，
+`redis-cli -h 10.56.88.22 get xlite:catalog` 有内容就跳过本节。
+
+生成 24 条 upstream 指向 mock 机的目录 YAML（`host` 改成你的 mock 机；现场 mock 在 `:8081-8104`）：
+
+```sh
+python3 - <<'PY' > /tmp/mock-24.custom.yaml
+host = "10.56.88.29"          # ← mock 机
+ports = range(8081, 8105)
+print("providers:")
+for p in ports:
+    print(f"  - name: mock-{p}")
+    print(f"    base_url: http://{host}:{p}")
+    print('    api_key: ""')
+    print("    enabled: true")
+print("models:")
+print("  - name: mock")
+print("    enabled: true")
+print("    channels:")
+for p in ports:
+    print(f"      - provider: mock-{p}")
+    print("        upstream_model: mock")   # mock 的模型 id
+    print("        weight: 1")
+    print("        priority: 0")
+    print("        enabled: true")
+print("api_keys:")
+print("  - name: loadtest")
+print("    key: sk-loadtest")
+print("    models: []")
+print("    enabled: true")
+PY
+```
+
+导入（在能连到那台 Redis 的机器上跑；镜像换成本机实际 tag）：
+
+```sh
+docker run --rm --network host \
+  -e REDIS_URL='redis://10.56.88.22:6379' \
+  -v /tmp/mock-24.custom.yaml:/tmp/cat.yaml:ro \
+  xlite:0.4.0 import /tmp/cat.yaml
+```
+
+⚠️ `--replace` 是**先清空整表再导**（已有的 provider / model / key 全没）——只想合并就别加它。
+导入后核对：`docker exec redis redis-cli get xlite:catalog | grep -c mock-` → 期望 `24`。
+
 ---
 
 ## 5. 不要设的东西

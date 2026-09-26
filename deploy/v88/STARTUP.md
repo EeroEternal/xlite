@@ -7,13 +7,19 @@ k6 ──HTTP/1.1──► HAProxy :8005/:8006 ──► xlite ──h2c──�
                                             └─ Redis：目录快照（请求路径不碰）
 ```
 
+| 机器 | 角色 | 端口 |
+| --- | --- | --- |
+| `10.56.88.22` | Redis（现场那台还有 PG / HAProxy） | 6379 / 8005·8006 |
+| `10.56.88.24`、`10.56.88.26` | 网关 xlite（两台各一份） | 8080 |
+| `10.56.88.29` | mock 农场（24 个）+ 压测 | 8081-8104 |
+
 ## 1. mock 农场（8081-8104）
 
 ```sh
-docker load -i bench/0924/deploy_origin/deploy88/mock-llm-h2c.tar.gz
+docker load -i <mock 包>/mock-llm-h2c.tar.gz          # 客户包里的 mock-llm-h2c.tar.gz
 
 mkdir -p /root/loadtest/mock
-cp -f "$(dirname "$0")/mock-llm-linux-usage" /root/loadtest/mock/
+cp -f <mock 包>/mock-llm-linux-usage /root/loadtest/mock/
 chmod +x /root/loadtest/mock/mock-llm-linux-usage
 for p in $(seq 8081 8104); do
   docker rm -f mock51h-$p 2>/dev/null || true
@@ -34,6 +40,12 @@ done
 echo "mock 健康: $OK/24"
 ```
 
+停掉/清理（换镜像或重跑前）：
+
+```sh
+for p in $(seq 8081 8104); do docker rm -f mock51h-$p; done
+```
+
 下发口径 + 自检（单流应得 502 行 `data:` / ≈100 736 B / 500 个 `ts`）：
 
 ```sh
@@ -44,6 +56,8 @@ for p in $(seq 8081 8104); do curl -s -m 3 -X POST \
 ## 2. Redis
 
 用现场 22 上那台（与 New API 共用）：**不要新起、也不要改它的启动参数**，只把网关的 `REDIS_URL` 指过去。xlite 在里面只占 `xlite:catalog`（约 7KB）+ 写入短锁，互不影响；目录数据本来就在里面，不用再导入。
+
+> 现场另有一套**外接哨兵 Redis 集群**（`redis+sentinel://…`）。**当前 xlite 不支持这个 URL** —— 实测报 `parse REDIS_URL` / `Redis URL did not parse - InvalidClientConfig`（连接走 `redis::Client::open`，代码里没有 sentinel）。要用它得先给 xlite 加 sentinel 支持；在那之前只能指单副本那台。
 
 ## 3. 网关
 
@@ -103,3 +117,17 @@ cd deploy/v88
 export TARGET=http://<入口>/v1/chat/completions TOKEN=<key>
 ./run_full_88_xg.sh
 ```
+
+入口填 `:8005`（双节点）或 `:8006`（单节点）；`TOKEN` 会变——在网关网页重置密钥后复制过来（命令行导入的目录默认是 `sk-loadtest`）。
+
+## 6. 核对清单
+
+| # | 机器 | 做什么 | 怎么验证 |
+| --- | --- | --- | --- |
+| 1 | 22 | Redis 在跑（别人的，**别动**） | `redis-cli -h 10.56.88.22 ping` → `PONG`（或在 22 上 `docker exec redis redis-cli ping`） |
+| 2 | 22 | HAProxy 在跑（cfg 见 §4） | `curl -s http://10.56.88.22:8005/health` → `{"status":"ok",…}` |
+| 3 | 24 / 26 | 起 xlite（§3） | `curl -s http://10.56.88.24:8080/health`、`…/ready` |
+| 4 | 29 | 起 24 个 mock（§1） | 脚本打印 `mock 健康: 24/24` |
+| 5 | 29 | 下发口径 + 单流自检（§1） | 502 行 `data:` / ≈100 736 B / 500 个 `ts` |
+| 6 | 29 | 前置检查 | `TARGET=… TOKEN=… ./run_full_88_xg.sh --preflight-only` → `RC=0` |
+| 7 | 29 | 开跑 | `./run_full_88_xg.sh`；结果目录里看 `progress.log`（逐档一行）与 `env.txt`（口径凭据） |
