@@ -58,7 +58,7 @@ MOCK_INTERVAL=${MOCK_INTERVAL:-10}
 K6_IMAGE=${K6_IMAGE:-grafana/k6:latest}
 K6_MEM=${K6_MEM:-45g}
 KEEP_BODY=${KEEP_BODY:-true}
-KEEP_SAMPLE=${KEEP_SAMPLE:-1}
+KEEP_SAMPLE=${KEEP_SAMPLE:-}
 CHUNK_MAX=${CHUNK_MAX:-64}
 GRACEFUL_STOP=${GRACEFUL_STOP:-600s}
 STREAM_TIMEOUT=${STREAM_TIMEOUT:-600000}
@@ -82,6 +82,22 @@ C|1200|50|LONG'
 
 combo_row() { # <组> → out|interval|long/short
   printf '%s\n' "$COMBOS_TABLE" | awk -F'|' -v c="$1" '$1==c{print $2"|"$3"|"$4}'
+}
+
+# 客户原版的分组采样率（v88-dual 口径：body 保留比例，防止超长流打爆 k6 内存）：
+#   A/E 轻短流=100% | B=50%(100%会在58500撞墙) | C/F=10% | D=5%
+combo_sample() { # <组> → 采样率
+  if [ -n "${KEEP_SAMPLE:-}" ]; then
+    printf '%s' "$KEEP_SAMPLE"
+    return
+  fi
+  case "$1" in
+    A|E) printf '1.0' ;;
+    B)   printf '0.5' ;;
+    C|F) printf '0.1' ;;
+    D)   printf '0.05' ;;
+    *)   printf '1.0' ;;
+  esac
 }
 
 TARGET=${TARGET:-}
@@ -139,7 +155,11 @@ done
 [ "$unreachable" -eq 0 ] || v88_die "有 $unreachable/$FARM_N 口读不到口径，先修农场再压（否则静默失效会产出假结论）"
 
 K6_SHA=$(v88_sha256 "$V88_DIR/k6.js")
-v88_log "k6.js sha256=${K6_SHA}  KEEP_BODY=$KEEP_BODY KEEP_SAMPLE=$KEEP_SAMPLE CHUNK_MAX=$CHUNK_MAX"
+if [ -n "${KEEP_SAMPLE:-}" ]; then
+  v88_log "k6.js sha256=${K6_SHA}  KEEP_BODY=${KEEP_BODY} KEEP_SAMPLE=${KEEP_SAMPLE}(全局固定) CHUNK_MAX=${CHUNK_MAX}"
+else
+  v88_log "k6.js sha256=${K6_SHA}  KEEP_BODY=${KEEP_BODY} 采样=客户分组(A/E=100% B=50% C/F=10% D=5%) CHUNK_MAX=${CHUNK_MAX}"
+fi
 if [ "$PREFLIGHT_ONLY" = "1" ]; then
   v88_log "preflight-only：以上全部通过，未开跑"
   trap - EXIT
@@ -152,7 +172,7 @@ LEDGER="$RESULT_DIR/env.txt"
 {
   printf 'GENERATED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'TARGET=%s\nMODEL=%s\nMOCKS=%s\nMOCK_FARM_PORTS=%s\n' "$TARGET" "$MODEL" "$MOCKS" "$FARM_N"
-  printf 'KEEP_BODY=%s\nKEEP_SAMPLE=%s\nCHUNK_MAX=%s\n' "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX"
+  printf 'KEEP_BODY=%s\nKEEP_SAMPLE=%s\nCHUNK_MAX=%s\n' "$KEEP_BODY" "${KEEP_SAMPLE:-A/E=1.0,B=0.5,C/F=0.1,D=0.05}" "$CHUNK_MAX"
   printf 'GRACEFUL_STOP=%s\nSTREAM_TIMEOUT=%s\n' "$GRACEFUL_STOP" "$STREAM_TIMEOUT"
   printf 'GW_HOST=%s\nBASELINE_CONN=%s\nMAX_WAIT_SEC=%s\n' "$GW_HOST" "$BASELINE_CONN" "$MAX_WAIT_SEC"
   printf 'K6_IMAGE=%s\nK6_SCRIPT_SHA256=%s\n' "$K6_IMAGE" "$K6_SHA"
@@ -279,9 +299,11 @@ run_group() { # <combo> <out> <ti> <stable>
     fi
 
     wait_drain   # 客户原版同形：每档开跑前排空残余连接
-    v88_log "组 $combo VUS=$vus 开始"
+    local sample
+    sample=$(combo_sample "$combo")
+    v88_log "组 ${combo} VUS=${vus} 开始（采样=${sample}）"
     local log rc
-    log=$(run_k6_once "$combo" "$vus" "$stable" "$out" "$ti" "$KEEP_SAMPLE" "$CHUNK_MAX")
+    log=$(run_k6_once "$combo" "$vus" "$stable" "$out" "$ti" "$sample" "$CHUNK_MAX")
     rc=$(cat "$RESULT_DIR/${combo}_${vus}.rc" 2>/dev/null || echo 1)
 
     if [ "$rc" != "0" ]; then
@@ -298,11 +320,12 @@ run_group() { # <combo> <out> <ti> <stable>
         break
       fi
       # k6 崩溃不是"这一轮废了"，而是**台架侧的信号**。降采样重试一次，
-      # 并把降级**记为口径变更**（checks 比会从 2.00 变 1.10），不静默。
-      v88_warn "k6 退出码 ${rc}（疑似 OOM/被 kill）⇒ 降采样重试一次：KEEP_SAMPLE=0.1 CHUNK_MAX=16"
-      printf '[%s] ⚠️ %s VUS=%s k6 rc=%s → 降采样重试（口径变更，checks 比将 <2.00）\n' \
-        "$(date +%H:%M:%S)" "$combo" "$vus" "$rc" >>"$PROGRESS"
-      log=$(run_k6_once "$combo" "$vus" "$stable" "$out" "$ti" "0.1" "16")
+      # 并把降级**记为口径变更**，不静默。
+      local down_sample="0.01"
+      v88_warn "k6 退出码 ${rc}（疑似 OOM/被 kill）⇒ 降采样重试一次：KEEP_SAMPLE=${down_sample} CHUNK_MAX=16"
+      printf '[%s] ⚠️ %s VUS=%s k6 rc=%s → 降采样重试（口径变更，KEEP_SAMPLE=%s）\n' \
+        "$(date +%H:%M:%S)" "$combo" "$vus" "$rc" "$down_sample" >>"$PROGRESS"
+      log=$(run_k6_once "$combo" "$vus" "$stable" "$out" "$ti" "$down_sample" "16")
       rc=$(cat "$RESULT_DIR/${combo}_${vus}.rc" 2>/dev/null || echo 1)
       printf 'DOWNGRADED_LEVELS=%s_%s\n' "$combo" "$vus" >>"$LEDGER"
       if [ "$rc" != "0" ]; then
@@ -342,17 +365,22 @@ run_group() { # <combo> <out> <ti> <stable>
 
 printf '[%s] ====== V88 xg 版开始 | 组 %s | batch=%s | 农场 %s 口 | %sVU 起 +%s | 上限 %s ======\n' \
   "$(date +%H:%M:%S)" "$COMBOS" "$MOCK_BATCH" "$FARM_N" "$START_VUS" "$STEP" "$MAX_VUS" | tee -a "$PROGRESS"
-printf '口径：KEEP_BODY=%s KEEP_SAMPLE=%s CHUNK_MAX=%s gracefulStop=%s | k6.js sha256=%s\n' \
-  "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX" "$GRACEFUL_STOP" "$K6_SHA" | tee -a "$PROGRESS"
+if [ -n "${KEEP_SAMPLE:-}" ]; then
+  printf '口径：KEEP_BODY=%s KEEP_SAMPLE=%s(全局固定) CHUNK_MAX=%s gracefulStop=%s | k6.js sha256=%s\n' \
+    "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX" "$GRACEFUL_STOP" "$K6_SHA" | tee -a "$PROGRESS"
+else
+  printf '口径：KEEP_BODY=%s 采样=客户分组(A/E=100%% B=50%% C/F=10%% D=5%%) CHUNK_MAX=%s gracefulStop=%s | k6.js sha256=%s\n' \
+    "$KEEP_BODY" "$CHUNK_MAX" "$GRACEFUL_STOP" "$K6_SHA" | tee -a "$PROGRESS"
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
   v88_log "dry-run：计划如上；**未下发农场、未跑 k6**"
   for c in $COMBOS; do
     [ -z "$ONLY_COMBO" ] || [ "$c" = "$ONLY_COMBO" ] || continue
     row=$(combo_row "$c")
-    [ -n "$row" ] || v88_die "未知组 $c"
-    printf '  组 %s: out=%s interval=%sms\n' "$c" \
-      "${row%%|*}" "$(printf '%s' "$row" | cut -d'|' -f2)"
+    [ -n "$row" ] || v88_die "未知组 ${c}"
+    printf '  组 %s: out=%s interval=%sms sample=%s\n' "$c" \
+      "${row%%|*}" "$(printf '%s' "$row" | cut -d'|' -f2)" "$(combo_sample "$c")"
   done
   trap - EXIT
   exit 0
