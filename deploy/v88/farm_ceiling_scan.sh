@@ -20,9 +20,10 @@
 #
 # ## 用法
 #
-#   deploy/v88/farm_ceiling_scan.sh --env v88.env                 # 默认 group B
-#   deploy/v88/farm_ceiling_scan.sh --env v88.env --combo D
-#   deploy/v88/farm_ceiling_scan.sh --env v88.env --levels 1000,2000,4000,8000,16000
+#   TARGET=http://<入口>/v1/chat/completions TOKEN=<key> deploy/v88/farm_ceiling_scan.sh   # 默认 group B
+#   TARGET=… TOKEN=… deploy/v88/farm_ceiling_scan.sh --combo D
+#   TARGET=… TOKEN=… deploy/v88/farm_ceiling_scan.sh --levels 1000,2000,4000,8000,16000
+#   （**不读任何配置文件**：口径全部走环境变量，未给的用保守默认）
 #
 # 产能扫描的固定口径（与对标**必须分开跑**，见 docs/manual/v88-rig.md §4）：
 #   KEEP_BODY=false（不解析 body，k6 不再自锁）+ 短稳态（默认 60s）
@@ -36,7 +37,6 @@ V88_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib_v88.sh
 . "$V88_DIR/lib_v88.sh"
 
-ENV_FILE="$V88_DIR/v88.env"
 SCAN_COMBO="B"
 LEVELS="1000,2000,4000,8000,16000,31000"
 SCAN_DURATION="60s"
@@ -44,7 +44,6 @@ QPS_GROWTH_MIN="5" # 加了一档 VU，qps 涨幅低于这个百分比就算"涨
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env) ENV_FILE="$2"; shift 2 ;;
     --combo) SCAN_COMBO="$2"; shift 2 ;;
     --levels) LEVELS="$2"; shift 2 ;;
     --duration) SCAN_DURATION="$2"; shift 2 ;;
@@ -53,14 +52,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -f "$ENV_FILE" ] || v88_die "找不到 $ENV_FILE"
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-
 TOKEN=${TOKEN:-}
 TARGET=${TARGET:-}
-[ -n "$TARGET" ] || v88_die "v88.env 里必须写 TARGET"
-[ -n "$TOKEN" ] || v88_die "v88.env 里必须写 TOKEN"
+[ -n "$TARGET" ] || v88_die "必须给 TARGET（环境变量），例：TARGET=http://<入口>/v1/chat/completions TOKEN=<key> $0"
+[ -n "$TOKEN" ] || v88_die "必须给 TOKEN（环境变量），与 TARGET 一起传"
 
 MODEL=${MODEL:-mock-model}
 MOCKS=${MOCKS:-8081-8104}

@@ -14,8 +14,8 @@
 #      自动降采样重试一次**并把它记成口径变更**，而不是丢整轮
 #   6. 每档写 ledger（生效 batch / 路数 / k6 镜像 ID / 脚本 sha256 / 采样参数）
 #
-# 用法：
-#   cp v88.env.example v88.env && $EDITOR v88.env
+# 用法（**不读任何配置文件**：口径全部走环境变量，未给的用保守默认）：
+#   TARGET=http://<入口>/v1/chat/completions TOKEN=<key> deploy/v88/run_full_88_xg.sh
 #   deploy/v88/run_full_88_xg.sh --dry-run          # 只打印计划 + 预算，不碰农场
 #   deploy/v88/run_full_88_xg.sh --preflight-only   # 只跑前置检查
 #   deploy/v88/run_full_88_xg.sh                    # 真跑
@@ -29,7 +29,6 @@ V88_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=lib_v88.sh
 . "$V88_DIR/lib_v88.sh"
 
-ENV_FILE="$V88_DIR/v88.env"
 DRY_RUN=0
 PREFLIGHT_ONLY=0
 ONLY_COMBO=""
@@ -42,7 +41,6 @@ usage() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env) ENV_FILE="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --preflight-only) PREFLIGHT_ONLY=1; shift ;;
     --combo) ONLY_COMBO="$2"; shift 2 ;;
@@ -52,11 +50,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -f "$ENV_FILE" ] || v88_die "找不到 ${ENV_FILE}（从 v88.env.example 复制一份再改）"
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-
-# ---- 默认值（除 TARGET/TOKEN 外都给了保守默认）----
+# ---- 默认值：口径全部来自环境变量，未给的用保守默认；**不读任何文件** ----
 MODEL=${MODEL:-mock-model}
 MOCKS=${MOCKS:-8081-8104}
 MOCK_BATCH=${MOCK_BATCH:-1}
@@ -95,8 +89,13 @@ combo_row() { # <组> → out|interval|long/short
 
 TARGET=${TARGET:-}
 TOKEN=${TOKEN:-}
-[ -n "$TARGET" ] || v88_die "v88.env 里必须写 TARGET"
-[ -n "$TOKEN" ] || v88_die "v88.env 里必须写 TOKEN"
+[ -n "$TARGET" ] || v88_die "必须给 TARGET（环境变量），例：TARGET=http://<入口>/v1/chat/completions TOKEN=<key> $0"
+[ -n "$TOKEN" ] || v88_die "必须给 TOKEN（环境变量），与 TARGET 一起传"
+
+# 档间排空（客户 `run_full_88.sh` 的 wait_drain 口径）：GW_HOST 不给就从 TARGET 里取
+GW_HOST=${GW_HOST:-$(printf '%s' "$TARGET" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#:[0-9]+$##')}
+BASELINE_CONN=${BASELINE_CONN:-300}
+MAX_WAIT_SEC=${MAX_WAIT_SEC:-300}
 
 # ---------------------------------------------------------------- 退出清理
 # 只挂 EXIT：实测 bash 在 `wait` 期间收到 TERM/INT 会执行 EXIT trap（额外的
@@ -149,6 +148,7 @@ LEDGER="$RESULT_DIR/env.txt"
   printf 'FARM_CORES=%s\n' "$FARM_CORES"
   printf 'KEEP_BODY=%s\nKEEP_SAMPLE=%s\nCHUNK_MAX=%s\n' "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX"
   printf 'GRACEFUL_STOP=%s\nSTREAM_TIMEOUT=%s\n' "$GRACEFUL_STOP" "$STREAM_TIMEOUT"
+  printf 'GW_HOST=%s\nBASELINE_CONN=%s\nMAX_WAIT_SEC=%s\n' "$GW_HOST" "$BASELINE_CONN" "$MAX_WAIT_SEC"
   printf 'K6_IMAGE=%s\nK6_SCRIPT_SHA256=%s\n' "$K6_IMAGE" "$K6_SHA"
   printf 'K6_IMAGE_ID=%s\n' "$(docker image inspect "$K6_IMAGE" --format '{{.Id}}' 2>/dev/null || echo unknown)"
   printf 'COMBOS=%s\nSTART_VUS=%s\nSTEP=%s\nMAX_VUS=%s\n' "$COMBOS" "$START_VUS" "$STEP" "$MAX_VUS"
@@ -158,13 +158,36 @@ v88_log "结果目录 $RESULT_DIR"
 
 lab_lock "v88 run_full_88_xg $(hostname)-$$" || v88_die "台架互斥锁被占（见 ${LAB_LOCK}）"
 
+# ---------------------------------------------------------------- 档间排空
+# 客户 `run_full_88.sh` 同形：每档开跑前等网关 ESTAB 回落到基线。
+# `ss` 缺失（macOS 开发机）⇒ 计数为 0 ⇒ 立即返回，与客户脚本行为一致。
+wait_drain() {
+  local waited=0 conns
+  printf '[%s] 等待残余连接清空（基线=%s，最多 %ss）…\n' \
+    "$(date +%H:%M:%S)" "$BASELINE_CONN" "$MAX_WAIT_SEC" | tee -a "$PROGRESS"
+  while [ "$waited" -lt "$MAX_WAIT_SEC" ]; do
+    conns=$(ss -tan 2>/dev/null | grep ESTAB | grep -c "$GW_HOST" || true)
+    conns=${conns:-0}
+    printf '[%s]   网关连接数=%s（已等 %ss）\n' "$(date +%H:%M:%S)" "$conns" "$waited" | tee -a "$PROGRESS"
+    if [ "$conns" -le "$BASELINE_CONN" ]; then
+      v88_log "残余连接已清空 ✓"
+      return 0
+    fi
+    sleep 15
+    waited=$((waited + 15))
+  done
+  v88_warn "超过 ${MAX_WAIT_SEC}s 未清空（连接数=${conns:-?}），继续执行（客户原版同样只告警）"
+  return 0
+}
+
 # ---------------------------------------------------------------- k6 单档
 # 后台跑 + `wait`：前台 `docker run` 期间收到 TERM 时 bash 会把 trap 推迟到它结束，
 # 于是"停不下来、锁不释放"（ab_configs 踩过，见 docs/changelog.md）。`9>&-` 保证
 # 子进程不继承台架锁的 fd。
 run_k6_once() { # <combo> <vus> <stable> <out> <ti> <keep_sample> <chunk_max> → 日志路径
   local combo="$1" vus="$2" stable="$3" out="$4" ti="$5" ks="$6" cm="$7"
-  local stem="${combo}_${vus}" log="$RESULT_DIR/$stem.log"
+  local stem="${combo}_${vus}"
+  local log="$RESULT_DIR/$stem.log"
   docker rm -f "v88_k6_$$" >/dev/null 2>&1
   docker run --rm --name "v88_k6_$$" -m "$K6_MEM" --network=host \
     -v "$V88_DIR:/k6:ro" -v "$RESULT_DIR:/out" \
@@ -222,6 +245,16 @@ run_group() { # <combo> <out> <ti> <stable>
 
   # 每组分发一次（客户原版同形）——参数化 batch + 回读校验 + 记账
   v88_farm_configure "$FARM_HOSTS" "$MOCK_TTFT" "$ti" "$out" "$MOCK_BATCH" "$LEDGER" || return 3
+  sleep 2   # 客户原版同形
+
+  # 客户原版同形的每组冒烟：经网关打一发并数 `data:` 行（只打印，不中止）
+  local sm_log="$RESULT_DIR/${combo}_smoke.log" sm_body="$RESULT_DIR/${combo}_smoke.body" smoke_chunks
+  curl -s -N -m 120 -X POST "$TARGET" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true,\"stream_options\":{\"include_usage\":true}}" \
+    -o "$sm_body" -w 'http=%{http_code} t=%{time_total}s\n' >"$sm_log" 2>&1 || true
+  smoke_chunks=$(grep -c '^data:' "$sm_body" 2>/dev/null || true)
+  printf '  冒烟: %s chunks=%s\n' "$(cat "$sm_log" 2>/dev/null)" "${smoke_chunks:-0}" | tee -a "$PROGRESS"
+  [ "${smoke_chunks:-0}" -gt 0 ] || v88_warn "冒烟拿到 0 个 data: 行（客户原版只打印，这里同样继续）"
 
   vus=$START_VUS
   local failed_prev=0
@@ -247,6 +280,7 @@ run_group() { # <combo> <out> <ti> <stable>
       fi
     fi
 
+    wait_drain   # 客户原版同形：每档开跑前排空残余连接
     v88_log "组 $combo VUS=$vus 开始"
     local log rc
     log=$(run_k6_once "$combo" "$vus" "$stable" "$out" "$ti" "$KEEP_SAMPLE" "$CHUNK_MAX")

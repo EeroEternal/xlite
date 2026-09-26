@@ -78,6 +78,6 @@ backend xlite
 
 ```sh
 cd deploy/v88
-cp v88.env.example v88.env && $EDITOR v88.env
+export TARGET=http://<入口>/v1/chat/completions TOKEN=<key>
 ./run_full_88_xg.sh
 ```
