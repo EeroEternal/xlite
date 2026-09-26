@@ -11,10 +11,11 @@ use serde_json::{Value, json};
 
 use crate::auth::{self, Sessions};
 use crate::catalog::yaml::{self, ImportMode};
+use crate::catalog::{HeaderPair, UpstreamShape};
 use crate::config::Config;
 use crate::hash::{generate_api_key, hash_api_key, key_prefix, mask_api_key};
 use crate::store::Store;
-use crate::upstream::Upstream;
+use crate::upstream::{self, Upstream};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -182,6 +183,38 @@ struct ProviderBody {
     api_key: String,
     #[serde(default = "default_true")]
     enabled: bool,
+    /// `bearer` (default) | `raw` | `none`.
+    #[serde(default = "default_auth_scheme")]
+    auth_scheme: String,
+    /// Credential header name; empty means `authorization`.
+    #[serde(default)]
+    auth_header: String,
+    /// Static extra request headers.
+    #[serde(default)]
+    extra_headers: Vec<HeaderPair>,
+    /// Chat/completions path override; empty keeps the derived default.
+    #[serde(default)]
+    chat_path: String,
+}
+
+fn default_auth_scheme() -> String {
+    "bearer".to_string()
+}
+
+impl ProviderBody {
+    /// Build the upstream shape, rejecting anything the snapshot build would
+    /// refuse (reserved header names, bad values, unknown scheme) with a 400
+    /// instead of letting it reach the catalog.
+    fn upstream(&self) -> std::result::Result<UpstreamShape, String> {
+        let shape = UpstreamShape {
+            auth_scheme: self.auth_scheme.clone(),
+            auth_header: self.auth_header.clone(),
+            extra_headers: self.extra_headers.clone(),
+            chat_path: self.chat_path.clone(),
+        };
+        upstream::validate_upstream(&shape, &self.api_key)?;
+        Ok(shape)
+    }
 }
 
 fn default_true() -> bool {
@@ -206,10 +239,20 @@ async fn create_provider(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
+    let upstream = match body.upstream() {
+        Ok(shape) => shape,
+        Err(message) => return err(StatusCode::BAD_REQUEST, &message).into_response(),
+    };
     match state
         .store
         .catalog()
-        .create_provider(&body.name, &body.base_url, &body.api_key, body.enabled)
+        .create_provider(
+            &body.name,
+            &body.base_url,
+            &body.api_key,
+            body.enabled,
+            &upstream,
+        )
         .await
     {
         Ok(row) => {
@@ -229,10 +272,21 @@ async fn update_provider(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
+    let upstream = match body.upstream() {
+        Ok(shape) => shape,
+        Err(message) => return err(StatusCode::BAD_REQUEST, &message).into_response(),
+    };
     match state
         .store
         .catalog()
-        .update_provider(id, &body.name, &body.base_url, &body.api_key, body.enabled)
+        .update_provider(
+            id,
+            &body.name,
+            &body.base_url,
+            &body.api_key,
+            body.enabled,
+            &upstream,
+        )
         .await
     {
         Ok(Some(row)) => {

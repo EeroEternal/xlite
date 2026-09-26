@@ -28,7 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { t } from "@/lib/i18n"
-import type { Provider } from "@/lib/api-types/providers"
+import type { Provider, ProviderHeader } from "@/lib/api-types/providers"
 import {
   createProvider,
   deleteProvider,
@@ -37,6 +37,24 @@ import {
 } from "@/lib/resources/providers"
 
 type SortKey = "name-asc" | "name-desc"
+
+/** `Name: value` per line, matching the hint shown under the field. */
+function parseHeaders(text: string): ProviderHeader[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const at = line.indexOf(":")
+      if (at < 0) return { name: line, value: "" }
+      return { name: line.slice(0, at).trim(), value: line.slice(at + 1).trim() }
+    })
+    .filter((header) => header.name.length > 0)
+}
+
+function formatHeaders(headers: ProviderHeader[] | undefined): string {
+  return (headers ?? []).map((header) => `${header.name}: ${header.value}`).join("\n")
+}
 
 export function ProvidersPage() {
   const [items, setItems] = useState<Provider[]>([])
@@ -48,6 +66,10 @@ export function ProvidersPage() {
   const [baseUrl, setBaseUrl] = useState("")
   const [apiKey, setApiKey] = useState("")
   const [enabled, setEnabled] = useState(true)
+  const [authScheme, setAuthScheme] = useState("bearer")
+  const [authHeader, setAuthHeader] = useState("")
+  const [headersText, setHeadersText] = useState("")
+  const [chatPath, setChatPath] = useState("")
   const [pendingDelete, setPendingDelete] = useState<Provider | null>(null)
 
   const load = async () => {
@@ -91,6 +113,10 @@ export function ProvidersPage() {
     setBaseUrl("")
     setApiKey("")
     setEnabled(true)
+    setAuthScheme("bearer")
+    setAuthHeader("")
+    setHeadersText("")
+    setChatPath("")
     setOpen(true)
   }
 
@@ -100,12 +126,25 @@ export function ProvidersPage() {
     setBaseUrl(item.base_url)
     setApiKey("")
     setEnabled(item.enabled)
+    setAuthScheme(item.auth_scheme || "bearer")
+    setAuthHeader(item.auth_header ?? "")
+    setHeadersText(formatHeaders(item.extra_headers))
+    setChatPath(item.chat_path ?? "")
     setOpen(true)
   }
 
   const handleSave = async () => {
     try {
-      const payload = { name, base_url: baseUrl, api_key: apiKey, enabled }
+      const payload = {
+        name,
+        base_url: baseUrl,
+        api_key: apiKey,
+        enabled,
+        auth_scheme: authScheme,
+        auth_header: authHeader,
+        extra_headers: parseHeaders(headersText),
+        chat_path: chatPath,
+      }
       if (editing) await updateProvider(editing.id, payload)
       else await createProvider(payload)
       setOpen(false)
@@ -177,11 +216,11 @@ export function ProvidersPage() {
         </Card>
 
         <Dialog open={open} onOpenChange={setOpen}>
-          <DialogContent className="w-full max-w-lg">
+          <DialogContent className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden">
             <DialogHeader>
               <DialogTitle>{editing ? t("providers.edit") : t("providers.create")}</DialogTitle>
             </DialogHeader>
-            <div className="space-y-4">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
               <div className="space-y-2">
                 <Label htmlFor="provider-name">{t("providers.name")}</Label>
                 <Input id="provider-name" value={name} onChange={(e) => setName(e.target.value)} />
@@ -199,6 +238,49 @@ export function ProvidersPage() {
                   onChange={(e) => setApiKey(e.target.value)}
                 />
                 {editing ? <p className="text-meta-sm text-muted-foreground">{t("providers.apiKeyHint")}</p> : null}
+              </div>
+              <div className="space-y-3 rounded-lg bg-muted/30 p-3">
+                <div className="space-y-2">
+                  <Label>{t("providers.authScheme")}</Label>
+                  <Select
+                    value={authScheme}
+                    onChange={setAuthScheme}
+                    options={[
+                      { value: "bearer", label: t("providers.authSchemeBearer") },
+                      { value: "raw", label: t("providers.authSchemeRaw") },
+                      { value: "none", label: t("providers.authSchemeNone") },
+                    ]}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="provider-auth-header">{t("providers.authHeader")}</Label>
+                  <Input
+                    id="provider-auth-header"
+                    value={authHeader}
+                    placeholder="authorization"
+                    onChange={(e) => setAuthHeader(e.target.value)}
+                  />
+                  <p className="text-meta-sm text-muted-foreground">{t("providers.authHeaderHint")}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="provider-headers">{t("providers.extraHeaders")}</Label>
+                  <textarea
+                    id="provider-headers"
+                    value={headersText}
+                    onChange={(e) => setHeadersText(e.target.value)}
+                    className="min-h-20 w-full rounded-lg bg-muted/30 px-3 py-2 font-mono text-xs text-foreground"
+                  />
+                  <p className="text-meta-sm text-muted-foreground">{t("providers.extraHeadersHint")}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="provider-chat-path">{t("providers.chatPath")}</Label>
+                  <Input
+                    id="provider-chat-path"
+                    value={chatPath}
+                    onChange={(e) => setChatPath(e.target.value)}
+                  />
+                  <p className="text-meta-sm text-muted-foreground">{t("providers.chatPathHint")}</p>
+                </div>
               </div>
               <div className="flex items-center justify-between rounded-lg bg-muted/30 px-3 py-2">
                 <Label htmlFor="provider-enabled">{t("common.enabled")}</Label>
