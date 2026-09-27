@@ -21,9 +21,8 @@
 #   scripts/check_changelog_placement.sh --base main     # 分支名或 commit SHA 均可
 #   scripts/check_changelog_placement.sh --self-test     # 夹具自证门禁会拦
 #
-# 基线来源：`--base` / `CI_LOCAL_BASE`，默认 `origin/main`（本地 git 直接解析）。旧 CI 的
-# `github.base_ref` / `github.event.before` 路径已随 GitHub Actions 一起移除；下面的
-# contents API 分支只在外部显式设置了 `GITHUB_REPOSITORY` 时才会走到。
+# 基线来源：`--base` / `CI_LOCAL_BASE`，默认 `origin/main`（本地 git 直接解析；
+# 解析不了就 fetch 一次）。仓库没有 GitHub CI，也不再有 GitHub API 回退。
 # 基线解析顺序：本地可解析为 commit → GitHub contents API（任意 SHA 可用）→ fetch ref → 跳过。
 # 取不到基线时（新分支 / 浅克隆 / 全部策略失败）**明确打印跳过**并只
 # 校验全局不变式，而不是假装通过——门禁的价值在编写阶段，不该因基线取不到而把门禁卡红。
@@ -335,9 +334,10 @@ MD
 }
 
 # ---------------------------------------------------------------- 入口
-# 解析基线内容。策略依次为：本地可作为 commit 解析 → GitHub contents API（对任意 SHA 都可用，
-# 而 GitHub 不允许按 SHA fetch）→ fetch 该 ref 后用 FETCH_HEAD。任何一步拿不到**非空**内容即
-# 返回非零，由调用方明确跳过——绝不能把空基线当成「所有条目都是新增」。
+# 解析基线内容。策略依次为：本地可作为 commit 解析 → fetch 该 ref 后用 FETCH_HEAD。
+# 任何一步拿不到**非空**内容即返回非零，由调用方明确跳过——绝不能把空基线当成
+# 「所有条目都是新增」。（GitHub contents API 回退已随无 CI 化删除：无人再设
+# `GITHUB_REPOSITORY`，本地与 fetch 两条路覆盖纯本地工作流。）
 resolve_base_file() { # <base_ref> <输出文件>
   local ref="$1" out="$2" sha
   : > "$out"
@@ -345,17 +345,6 @@ resolve_base_file() { # <base_ref> <输出文件>
   if sha="$(git rev-parse --verify --quiet "${ref}^{commit}" 2>/dev/null)"; then
     git show "${sha}:${changelog}" > "$out" 2>/dev/null || true
     if [[ -s "$out" ]]; then echo "  （基线来源：本地 commit ${sha:0:10}）"; return 0; fi
-  fi
-
-  local repo="${GITHUB_REPOSITORY:-}"
-  if [[ -z "$repo" ]]; then
-    repo="$(git remote get-url origin 2>/dev/null | sed -E 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#' || true)"
-  fi
-  if [[ -n "$repo" ]] && command -v gh >/dev/null 2>&1; then
-    if gh api "repos/${repo}/contents/${changelog}?ref=${ref}" -q .content 2>/dev/null | base64 -d > "$out" 2>/dev/null && [[ -s "$out" ]]; then
-      echo "  （基线来源：GitHub API ${repo}@${ref}）"
-      return 0
-    fi
   fi
 
   if git fetch --no-tags --depth=1 -q origin "$ref" 2>/dev/null; then
@@ -381,7 +370,7 @@ run_with_base() {
   local base_file
   base_file="$(mktemp)"
   if ! resolve_base_file "$base_ref" "$base_file"; then
-    echo "⚠ 无法取得基线 ${base_ref} 的 ${changelog}（本地不可解析 / API 不可用 / fetch 失败），跳过归属检查"
+    echo "⚠ 无法取得基线 ${base_ref} 的 ${changelog}（本地不可解析 / fetch 失败），跳过归属检查"
     check_unreleased_only "$changelog"
     local rc=$?
     rm -f "$base_file"
