@@ -66,19 +66,29 @@ mock 容器：`mock-llm:h2c`，`network=host`，`nofile=1048576`。`curl http://
 
 ### 上游流闸门（可选：过载段护农场）
 
-mock-llm:h2c 是 Go h2 服务器，对**每条连接**恒定通告 `SETTINGS_MAX_CONCURRENT_STREAMS=250`
-（Go 库默认值；静态分析二进制未见任何改向：启动只有 env `PORT`，运行时 `/_config` 字段
-不含流上限。现场可用下方 h2probe 复核）。网关对每个 mock 的准入流上限：
+mock-llm:h2c 是 Go h2 服务器，对**每条连接**恒定通告 `SETTINGS_MAX_CONCURRENT_STREAMS=250`，
+无任何旋钮可改（已实测：容器内运行该二进制，两条连接均通告 250；`/_config` 运行时回读
+全部 15 个字段无流上限；带 `MAX_CONCURRENT_STREAMS=40` 等 env 重启仍通告 250。证据链见
+issue #45 两条评论）。网关对每个 mock 的准入流上限：
 
 ```text
 min(XLITE_UPSTREAM_STREAM_CAP, 250) × XLITE_UPSTREAM_MAX_CONNS_PER_HOST
 ```
 
-超出部分在 h2 连接池排队（等待计入 TTFT，不产生错误）——例如 `STREAM_CAP=40 ×
-CONNS=25` = 1000 流/mock。这是臂 B 实测否决应用层排队（issue #45）之后规则允许的
-**传输层闸门**形态；注意调低预算会促使池拨更多连接，且有上游首字节尾部回归的先例
-（见 `crates/xlite-h2-pool` `Config::stream_budget_per_conn` 文档），闸门值应按实测农场
-容量定并整轮验证。核对对端通告值：
+超出部分在 h2 连接池排队（等待计入 TTFT，不产生错误）。注意公式里**两个网关侧旋钮任一
+调小都能关小闸门**：`STREAM_CAP` 与「mock 通告更低 SETTINGS」等价（动 per-conn 因子），
+小 `CONNS`（如 4×250）数学上同闸门——差异在副作用：
+
+| | 小 CONNS（如 4×250=1000） | 小 STREAM_CAP（如 40×25=1000） |
+| --- | --- | --- |
+| 闸门随 peer 通告漂移 | 会（通告变 1000 → 闸门静默变 4000） | 不会（min 钉死 per-conn） |
+| 粒度 | 250 的整数倍 | 任意值（实测容量 ~1204 可取 1200） |
+| 低载行为 | 惰性（<闸门流数不咬合） | 始终生效（拨更多连接，且有 p90 ×4–5 首字节尾部回归先例） |
+| 单连接争用 | 250 流挤一条连接（h2 状态锁 + 连接级窗口分摊） | 40 流/条摊薄 |
+
+建议现场同闸门对比一轮（`CONNS=4` vs `CAP=40 CONNS=25`）再定选型；闸门值按实测农场容量
+定（臂 A 实测 ~1200 流/mock 存活）并整轮验证。这是臂 B 实测否决应用层排队（issue #45）
+之后规则允许的**传输层闸门**形态。核对对端通告值：
 
 ```bash
 cargo run -p xlite-h2-pool --example h2probe -- 10.99.255.102:4101
