@@ -23,7 +23,7 @@
 #
 # 基线来源：`--base` / `CI_LOCAL_BASE`，默认 `origin/main`（本地 git 直接解析；
 # 解析不了就 fetch 一次）。仓库没有 GitHub CI，也不再有 GitHub API 回退。
-# 基线解析顺序：本地可解析为 commit → GitHub contents API（任意 SHA 可用）→ fetch ref → 跳过。
+# 基线解析顺序：本地可解析为 commit → `git fetch` ref → 明确跳过。
 # 取不到基线时（新分支 / 浅克隆 / 全部策略失败）**明确打印跳过**并只
 # 校验全局不变式，而不是假装通过——门禁的价值在编写阶段，不该因基线取不到而把门禁卡红。
 #
