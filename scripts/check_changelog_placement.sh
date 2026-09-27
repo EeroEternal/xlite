@@ -21,11 +21,12 @@
 #   scripts/check_changelog_placement.sh --base main     # 分支名或 commit SHA 均可
 #   scripts/check_changelog_placement.sh --self-test     # 夹具自证门禁会拦
 #
-# CI 里的基线：PR 用 `github.base_ref`；push 到 main 用 `github.event.before`（上一个 tip）。
+# 基线来源：`--base` / `CI_LOCAL_BASE`，默认 `origin/main`（本地 git 直接解析）。旧 CI 的
+# `github.base_ref` / `github.event.before` 路径已随 GitHub Actions 一起移除；下面的
+# contents API 分支只在外部显式设置了 `GITHUB_REPOSITORY` 时才会走到。
 # 基线解析顺序：本地可解析为 commit → GitHub contents API（任意 SHA 可用）→ fetch ref → 跳过。
-# 取不到基线时（新分支 / force push 的 all-zero before / 全部策略失败）**明确打印跳过**并只
-# 校验全局不变式，而不是假装通过——门禁的价值在 PR（错误都发生在编写阶段），main 上的这层
-# 是安全网，不该因基础设施取不到基线而把流水线卡红。
+# 取不到基线时（新分支 / 浅克隆 / 全部策略失败）**明确打印跳过**并只
+# 校验全局不变式，而不是假装通过——门禁的价值在编写阶段，不该因基线取不到而把门禁卡红。
 #
 # 归属判定用「加粗标题」而非整行文本：条目被移动段落（标题在 base 里已存在）或只改正文
 # （标题不变）都不算新增，避免误报。
