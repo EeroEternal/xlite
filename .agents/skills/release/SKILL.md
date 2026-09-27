@@ -5,7 +5,7 @@ description: 发版（打 tag）：本地门禁全量重跑、版本号与 chang
 
 # Release
 
-xlite 没有 CI 与部署自动化：tag 只是发布标记，不会自动上生产。发版前的 t2 只读校验（`scripts/check_release_sync.sh` 等）在本机跑，见 Phase 0。
+xlite 没有 CI 与部署自动化：tag 只是发布标记，不会自动上生产。发版前的 t2 只读校验（`scripts/check_release_sync.sh` 等）在 **Linux 机**上跑，见 Phase 0。
 
 ## Phase 0 门禁
 

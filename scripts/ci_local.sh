@@ -2,8 +2,11 @@
 # Local gates for xlite, tiered by risk event (see .agents/skills/ci-local-runner).
 #
 #   t0 (default)  before any push: path-scoped — only the faces your change touches
-#   t1            before merging to main (run locally): every face + admin build + h2-pool integration
-#   t2            before tagging a release (run locally): t1 + release-sync checks
+#   t1            before merging to main (run on the Linux box): every face + admin build + h2-pool integration
+#   t2            before tagging a release (run on the Linux box): t1 + release-sync checks
+#
+# All tiers run on the Linux box. A macOS dev machine does not need to run this: the only
+# face it could run is t0's meta face, which t1 covers anyway.
 #
 # Usage: scripts/ci_local.sh [--tier t0|t1|t2] [--all] [--base <ref>] [--full]
 set -euo pipefail
@@ -120,7 +123,7 @@ else
 fi
 
 # --only overrides path scoping: handy when you want exactly one face (e.g. after a
-# docs-only change). All tiers run on this machine — there is no remote CI.
+# docs-only change). All tiers run on the Linux box — there is no remote CI.
 if [[ -n "$ONLY" ]]; then
   want_rust=0 want_admin=0 want_meta=0
   IFS=',' read -r -a faces <<< "$ONLY"
