@@ -71,11 +71,33 @@ v88_check_bundle() {
 # `10.0.0.2:8081-8104` 或 `10.0.0.2:4101,10.0.0.3:4101`（跨机）。
 # 输出：一行一个 `host:port`。
 v88_farm_hosts() {
-  case "$1" in
-    [0-9]*-[0-9]*) for p in $(expand_ports "$1"); do printf '127.0.0.1:%s\n' "$p"; done ;;
-    *:*) printf '%s' "$1" | tr ',' '\n' | grep -v '^$' ;;
-    *) for p in $(expand_ports "$1"); do printf '127.0.0.1:%s\n' "$p"; done ;;
-  esac
+  # 接受这几种 MOCKS 写法，**逐项**判断（先按逗号拆项，再看该项里有没有主机名）：
+  #   `8081-8104`                            本机端口区间
+  #   `4101,4102`                            本机端口列表
+  #   `10.0.0.2:8081-8104`                   跨机 + 区间
+  #   `10.0.0.2:4101,10.0.0.3:4101`          跨机 + 多主机
+  #   `10.0.0.2:8081-8084,10.0.0.3:8081-8084`  混合
+  #
+  # ⚠️ **必须逐项判断，不能用整串形状选分支**：`case` 取第一个匹配的分支，而
+  # `10.0.0.2:8081-8104` 同时满足「以数字开头且含 `-`」和「含 `:`」—— 旧实现把它
+  # 交给前者，接着 `expand_ports` 去跑 `seq "10.0.0.2:8081" "8104"`，报
+  # `invalid floating point argument`，最后**展开成 0 个口**。
+  # 后果不是静默算错，而是 driver 在 preflight 就 fail-loud 退出，但报错只说
+  # 「展开后一个口都没有」、不解释原因。而「把 driver 挪到非农场机器」时**必须**
+  # 用跨机写法 ⇒ 这条路以前是断的。自证见 `lib/selftest_farm_hosts.sh`。
+  local item host ports p
+  for item in $(printf '%s' "$1" | tr ',' ' '); do
+    case "$item" in
+      *:*)
+        host="${item%%:*}"
+        ports="${item#*:}"
+        for p in $(expand_ports "$ports"); do printf '%s:%s\n' "$host" "$p"; done
+        ;;
+      *)
+        for p in $(expand_ports "$item"); do printf '127.0.0.1:%s\n' "$p"; done
+        ;;
+    esac
+  done
 }
 
 v88_farm_count() { v88_farm_hosts "$1" | grep -c . ; }
