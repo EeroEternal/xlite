@@ -25,7 +25,7 @@ Usage: scripts/ci_local.sh [--tier t0|t1|t2] [--all] [--base <ref>] [--full]
   --full      alias for --tier t1
   --all       ignore path scoping; run every face
   --only F    force faces (comma-separated: rust,admin,meta); overrides path scoping.
-              CI uses this to run one face per job from this same script.
+              Run a single face at a time (manual use; nothing calls it automatically).
               Given together with --all, --only wins (a narrower forced set).
   --base REF  base ref for path scoping (default: origin/main; env CI_LOCAL_BASE)
 
@@ -212,6 +212,6 @@ else
 fi
 
 if [[ "$TIER" == "t0" ]]; then
-  printf '\ntier t0 is a push gate, not a merge gate: CI runs tier t1 on every PR to main.\n'
+  printf '\ntier t0 is a push gate, not a merge gate: run tier t1 locally before merging to main (there is no GitHub CI).\n'
 fi
 ok "ci_local done (tier $TIER)"

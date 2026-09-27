@@ -1,6 +1,6 @@
 ---
 name: ci-local-runner
-description: Run the tiered local gates (scripts/ci_local.sh) for xlite. Covers t0 push / t1 PR-to-main / t2 release, path scoping, and the --only face selector that CI itself calls.
+description: Run the tiered local gates (scripts/ci_local.sh) for xlite. Covers t0 push / t1 PR-to-main / t2 release, path scoping, and the --only single-face selector.
 ---
 
 # 本地门禁 runner（t0 / t1 / t2）
@@ -41,7 +41,7 @@ Node 22（`.mise.toml`）、`admin/node_modules`。
 `cargo test --lib` 用内存 SQLite，不需要 Postgres。`sqlx` 的 `sqlite` feature 会传递启用
 `libsqlite3-sys/bundled`，SQLite **由源码内联编译**（`cargo tree -e features -i libsqlite3-sys`
 可见 `feature "bundled"`；注意 `-p <包名>` 得到的是非反向树，看不到这个结论），
-因此 Linux 上**不需要**系统 sqlite 开发库 —— CI 里没有 apt 步骤。
+因此 Linux 上**不需要**系统 sqlite 开发库 —— `bundled` 会把 SQLite 一起编译，不需要任何系统包。
 单机启动默认 `sqlite:xlite.db`；压测 `DATABASE_URL=memory`；集群设 `REDIS_URL`。
 
 ## 已知偶发（不是本次改动引入）
@@ -50,7 +50,7 @@ Node 22（`.mise.toml`）、`admin/node_modules`。
 `a_raised_settings_cap_is_used_without_dialling_again`（`native_pool.rs:660` 的第一次断言）
 是**时序型偶发**：对端 `spawn_settings_changing_peer`（`native_pool.rs:568`）先发
 `MAX_CONCURRENT_STREAMS=1`、**睡 150 ms** 再发 4，而该用例要求「此刻读到的仍是 1」。
-机器一忙（CI runner 比本机常见）`acquire` 路径超过 150 ms，新上限先落地，断言就得到
+机器一忙、`acquire` 路径超过 150 ms 时，新上限先落地，断言就得到
 `left: 4, right: 1`。这是**用例的墙钟假设**，不是产品竞态 —— 产品「热更新上限」正是它要测的能力。
 
 遇到它先复跑一次区分偶发与真回归，别直接当成自己的改动坏了。根治办法是让对端等一个显式

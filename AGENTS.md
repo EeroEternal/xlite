@@ -39,7 +39,7 @@
 1. **禁止夹带**：commit/PR 不得夹带无关改动；生产调参、整库 fmt、无说明的 `#[allow]`、跨模块顺手 refactor 一律违规；违规则 `git reset --mixed HEAD~1` 拆分。
 2. **禁止幻觉代码**：有定义必有调用；cache 字段必有 store；新增 metric 才需正反双向；`TODO` 必挂 issue。设计文档、**规则与技能文档**均严禁把仅有骨架的实现、不存在的字段、**不存在的脚本/命令/CI** 当作既有能力引用。
 3. **安全 stash**：诚实命名；stash 前 `git diff --stat`；stash 后必 `cargo check --tests`；严禁 stash `Cargo.toml` / `Cargo.lock` / 构建脚本。
-4. **变更履历同步**：新增能力/关键修复必须同步 `docs/changelog.md` 的 `[Unreleased]` 区（归属与重复标题由 `scripts/check_changelog_placement.sh` 在本地 t0 与 CI 的 meta job 双重机械拦截）。
+4. **变更履历同步**：新增能力/关键修复必须同步 `docs/changelog.md` 的 `[Unreleased]` 区（归属与重复标题由 `scripts/check_changelog_placement.sh` 在本地 t0 机械拦截）。
 5. **发布护栏**：本地闭环验证后向用户说明；**未经用户明确批准，严禁合并 main 分支或发版打 Tag**。
 6. **UI 技术栈与弹窗视口规范**：Admin 只在 `admin/`（React + `components/ui`），**禁止**另起 HTML/JS 页面；弹窗稳定宽度（`w-full max-w-*` 禁止 shrinkwrap 抖动）+ 高度紧凑优先无滚动条 + 底部操作按钮始终直观可见 + `max-h-[85vh]` 兜底；禁止冗余副标题。全局配置只进「设置」。**表面层级**：一级卡片/面板/表格 = `bg-card` + `shadow-card` 无描边浮于 `bg-canvas`；二级分组（卡片/弹窗内部）= `bg-muted/30` 色调，禁止描边、禁止卡中卡叠阴影（详见 [`docs/design/surfaces.md`](docs/design/surfaces.md)，`npm run lint` 已机械拦截）。
 7. **Admin i18n 与语言纯洁性**：用户可见文案全部走 `t('namespace.key')` 并同步写入 `zh.ts` 与 `en.ts`；**严禁中英混杂**（除标准术语如 API Key / HTTP / JSON 外，禁止在中文后附加括号英文）。

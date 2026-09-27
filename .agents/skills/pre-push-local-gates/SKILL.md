@@ -1,14 +1,14 @@
 ---
 name: pre-push-local-gates
-description: Push 前必须跑本地门禁 scripts/ci_local.sh（t0，按改动路径裁剪），禁止把 CI 当本地沙盒。Use before every git push.
+description: Push 前必须跑本地门禁 scripts/ci_local.sh（t0，按改动路径裁剪），禁止把「推送后再发现」当常态（仓库无 CI）。Use before every git push.
 ---
 
 # Pre-push local gates（推送前本地门禁）
 
 ## Symptom / misjudgment
-把 CI 当本地沙盒:推送后才发现 eslint 未用导入、rustfmt 残差、ENOSPC、测试失败,
-形成「推 → 挂 → 本地修 → 再推」的慢循环——污染提交历史、烧掉 runner 配额、
-还可能在失败窗口内阻塞他人合入。
+把「推送后再发现」当常态:推完才想起 eslint 未用导入、rustfmt 残差、ENOSPC、测试失败,
+形成「推 → 挂 → 本地修 → 再推」的慢循环——污染提交历史；而仓库没有 CI，这类失败没有
+第二条兜底线（旧文里的「烧 runner 配额 / 阻塞他人合入」已随 GitHub Actions 移除）。
 
 ## Rule
 `git push` 之前必须跑：
