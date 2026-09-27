@@ -179,6 +179,30 @@ ladder_levels() {
 }
 NEWCOL_CHECKED=0
 
+# `--levels` 是**阶梯的过滤器**，不是在阶梯之外另开档位：值不在阶梯上会被静默跳过
+# （实测：默认阶梯下 `--levels 44000` 一档都不跑；`--levels 11000,31000,55000` 只跑 55000 ——
+# 因为默认阶梯是 1000 起 +1000、且 VU ≥ 10000 改 5000 步进，11000/31000 根本不在上面）。
+# 这类静默跳过会产出「看起来跑完了一轮、其实只跑了几档」的结果目录 —— 而档位值最容易
+# 从**旧结果的文件名**（如 `B_11000.log`）抄来，旧轮次的阶梯与当前未必一样。
+# 所以这里 fail-loud，并把当前阶梯列出来供直接复制。
+if [ -n "$ONLY_LEVELS" ]; then
+  ladder_csv=",$(ladder_levels | tr '\n' ',' | sed 's/,$//'),"
+  ladder_show=${ladder_csv#,}; ladder_show=${ladder_show%,}
+  levels_bad=""
+  for want in $(printf '%s' "$ONLY_LEVELS" | tr ',' ' '); do
+    case "$ladder_csv" in
+      *",$want,"*) ;;
+      *) levels_bad="$levels_bad $want" ;;
+    esac
+  done
+  if [ -n "$levels_bad" ]; then
+    v88_die "--levels 里的这些档位不在当前阶梯上：${levels_bad# }
+   当前阶梯：${ladder_show}
+   取值只能从上面这一串里选。提示：档位值如果是照旧结果的文件名（如 B_11000.log）抄的，
+   旧轮次的阶梯与当前未必一样（见 STARTUP.md §5.1）。"
+  fi
+fi
+
 # 客户原版的分组表（out|token_interval|稳态）。**不要改**：它是对标口径的一部分。
 COMBOS_TABLE='B|500|10|SHORT
 D|6000|10|LONG
@@ -516,11 +540,30 @@ run_group() { # <combo> <out> <ti> <stable>
 }
 
 # ---- 计划：档数与墙钟先摆出来，别让人跑到四十小时才发现 ----------------------
-ladder_n=$(ladder_levels | wc -l | tr -d '[:space:]')
-group_n=$(printf '%s\n' $COMBOS | wc -l | tr -d '[:space:]')
+# 按**实际会跑的**组与档算：`--combo` 只跑那一组、`--levels` 只跑命中的档。
+# （此前这两处都按完整集合算，于是 `--combo B --levels 1000,5000,10000` 会打印
+#  “组 B D E F A C 各 20 档 ⇒ 共 120 档”，而实际是 1 组 3 档。）
+effective_combos=""
+for c in $COMBOS; do
+  [ -z "$ONLY_COMBO" ] || [ "$c" = "$ONLY_COMBO" ] || continue
+  effective_combos="$effective_combos $c"
+done
+effective_combos=${effective_combos# }
+if [ -n "$ONLY_LEVELS" ]; then
+  effective_levels=""
+  for v in $(ladder_levels); do
+    printf ',%s,' "$ONLY_LEVELS" | grep -q ",$v," && effective_levels="$effective_levels $v"
+  done
+  effective_levels=${effective_levels# }
+  ladder_n=$(printf '%s\n' $effective_levels | grep -c .)
+else
+  effective_levels=""
+  ladder_n=$(ladder_levels | wc -l | tr -d '[:space:]')
+fi
+group_n=$(printf '%s\n' $effective_combos | grep -c .)
 total_n=$((ladder_n * group_n))
 nominal_s=0
-for c in $COMBOS; do
+for c in $effective_combos; do
   row=$(combo_row "$c")
   [ -n "$row" ] || continue
   len=$(printf '%s' "$row" | cut -d'|' -f3)
@@ -531,10 +574,16 @@ for c in $COMBOS; do
 done
 {
   printf 'LADDER_LEVELS_PER_GROUP=%s\nLADDER_LEVELS_TOTAL=%s\n' "$ladder_n" "$total_n"
+  printf 'ONLY_COMBO=%s\nONLY_LEVELS=%s\n' "${ONLY_COMBO:-}" "${ONLY_LEVELS:-}"
+  printf 'EFFECTIVE_COMBOS=%s\nEFFECTIVE_LEVELS_PER_GROUP=%s\n' "$effective_combos" "$effective_levels"
 } >>"$LEDGER"
 printf '[%s] 阶梯计划：组 %s 各 %s 档 ⇒ 共 %s 档；载荷窗口合计 ≈ %s 小时（真实墙钟更长：每档还要加排空与农场配置）\n' \
-  "$(date +%H:%M:%S)" "$COMBOS" "$ladder_n" "$total_n" \
+  "$(date +%H:%M:%S)" "$effective_combos" "$ladder_n" "$total_n" \
   "$(awk -v s="$nominal_s" 'BEGIN{printf "%.1f", s/3600}')" | tee -a "$PROGRESS"
+if [ -n "$ONLY_LEVELS" ]; then
+  printf '[%s] --levels 生效：只跑 %s（共 %s 档；已记入 env.txt）\n' \
+    "$(date +%H:%M:%S)" "$effective_levels" "$ladder_n" | tee -a "$PROGRESS"
+fi
 if [ "$STEP_COARSE_ABOVE" -gt 0 ]; then
   printf '[%s] ⚠️ 口径变更：VU ≥ %s 起用步进 %s（比客户阶梯稀疏，已记入 env.txt）\n' \
     "$(date +%H:%M:%S)" "$STEP_COARSE_ABOVE" "$STEP_COARSE" | tee -a "$PROGRESS"
@@ -544,7 +593,7 @@ if [ "$RESUME" = "1" ]; then
 fi
 
 printf '[%s] ====== V88 xg 版开始 | 组 %s | 农场 %s 口 | %sVU 起 +%s | 上限 %s ======\n' \
-  "$(date +%H:%M:%S)" "$COMBOS" "$FARM_N" "$START_VUS" "$STEP" "$MAX_VUS" | tee -a "$PROGRESS"
+  "$(date +%H:%M:%S)" "$effective_combos" "$FARM_N" "$START_VUS" "$STEP" "$MAX_VUS" | tee -a "$PROGRESS"
 if [ -n "${KEEP_SAMPLE:-}" ]; then
   printf '口径：KEEP_BODY=%s KEEP_SAMPLE=%s(全局固定) CHUNK_MAX=%s gracefulStop=%s | k6.js sha256=%s\n' \
     "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX" "$GRACEFUL_STOP" "$K6_SHA" | tee -a "$PROGRESS"
