@@ -17,5 +17,5 @@ tracing = "0.1"
 arc-swap = "1.7"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 futures-util = "0.3"

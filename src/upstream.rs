@@ -146,7 +146,7 @@ impl Upstream {
         });
         let pool = Pool::new(PoolConfig {
             max_conns_per_host: cfg.max_conns_per_host.max(1),
-            stream_budget_per_conn: usize::MAX,
+            stream_budget_per_conn: cfg.upstream_stream_cap,
             pinned_poll: true,
             dial,
             idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,

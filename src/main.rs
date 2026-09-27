@@ -119,6 +119,12 @@ async fn run_server() -> Result<()> {
         redis = config.redis_url.is_some(),
         database = %config.database_url,
         max_conns = config.max_conns_per_host,
+        // `peer` = 未设 STREAM_CAP：按对端通告的 SETTINGS_MAX_CONCURRENT_STREAMS 执行
+        stream_cap = if config.upstream_stream_cap == usize::MAX {
+            "peer".to_string()
+        } else {
+            config.upstream_stream_cap.to_string()
+        },
         upstream_ttft_header = config.upstream_ttft_header,
         "starting"
     );

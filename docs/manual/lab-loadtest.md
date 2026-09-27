@@ -58,10 +58,31 @@ k6 / curl
 - `network=host`，`ulimit nofile=1048576`
 - `REDIS_URL=redis://127.0.0.1:6379`，`XLITE_UPSTREAM_H2C=1`
 - `XLITE_UPSTREAM_MAX_CONNS_PER_HOST=32`，`TOKIO_WORKER_THREADS=8`（与 `deploy/env.example` 的默认一致；**别留运行时默认**，那等于按核数起）
+- 可选 `XLITE_UPSTREAM_STREAM_CAP`（默认不设 = 按对端通告值执行，见下文「上游流闸门」）
 - 目录：24 provider / 1 model `mock` / 24 channel / 1 key `loadtest`
 - 压测前 Redis `connected_clients` 应为 2，`MEMORY USAGE xlite:catalog` 约 7KB
 
 mock 容器：`mock-llm:h2c`，`network=host`，`nofile=1048576`。`curl http://127.0.0.1:4101/health` → `{"status":"ok"}`。
+
+### 上游流闸门（可选：过载段护农场）
+
+mock-llm:h2c 是 Go h2 服务器，对**每条连接**恒定通告 `SETTINGS_MAX_CONCURRENT_STREAMS=250`
+（Go 库默认值；静态分析二进制未见任何改向：启动只有 env `PORT`，运行时 `/_config` 字段
+不含流上限。现场可用下方 h2probe 复核）。网关对每个 mock 的准入流上限：
+
+```text
+min(XLITE_UPSTREAM_STREAM_CAP, 250) × XLITE_UPSTREAM_MAX_CONNS_PER_HOST
+```
+
+超出部分在 h2 连接池排队（等待计入 TTFT，不产生错误）——例如 `STREAM_CAP=40 ×
+CONNS=25` = 1000 流/mock。这是臂 B 实测否决应用层排队（issue #45）之后规则允许的
+**传输层闸门**形态；注意调低预算会促使池拨更多连接，且有上游首字节尾部回归的先例
+（见 `crates/xlite-h2-pool` `Config::stream_budget_per_conn` 文档），闸门值应按实测农场
+容量定并整轮验证。核对对端通告值：
+
+```bash
+cargo run -p xlite-h2-pool --example h2probe -- 10.99.255.102:4101
+```
 
 网关机内核：
 

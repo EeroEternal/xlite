@@ -9,6 +9,17 @@ pub struct Config {
     pub admin_password: String,
     pub session_secret: Option<String>,
     pub max_conns_per_host: usize,
+    /// Client-side cap on concurrent streams per upstream HTTP/2 connection:
+    /// a connection is full at `min(this, the peer's live
+    /// SETTINGS_MAX_CONCURRENT_STREAMS)`. `usize::MAX` (the default, from an
+    /// unset/invalid/zero env) means "let the peer decide" — the Go
+    /// `mock-llm:h2c` farm advertises the Go-library default 250 on every
+    /// connection, so per-mock admission capacity is
+    /// `max_conns_per_host × 250` unless this is lowered. Lowering it turns the
+    /// pool into a transport-level admission gate: excess streams queue at the
+    /// pool (wait lands in TTFT, never an error) while the pool dials more
+    /// connections, up to `max_conns_per_host`.
+    pub upstream_stream_cap: usize,
     /// Catalog snapshot reload period. `0` disables the background loop (load test).
     pub catalog_reload_secs: u64,
     /// Diagnostic-only: stamp `x-xlite-upstream-ttft-ms` (time from sending the
@@ -16,6 +27,15 @@ pub struct Config {
     /// default, and never used for the V88 comparison table: New API emits no
     /// equivalent header, so the column would be one-sided.
     pub upstream_ttft_header: bool,
+}
+
+/// Parse a positive-integer env value. `None`/invalid/`0` fall back to
+/// `default` — the silent-fallback shape rig scripts guard against by
+/// validating values up front (`scripts/loadtest/ab_configs.sh`).
+fn positive_or(raw: Option<String>, default: usize) -> usize {
+    raw.and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(default)
 }
 
 impl Config {
@@ -35,11 +55,14 @@ impl Config {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let max_conns_per_host = std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n: &usize| n > 0)
-            .unwrap_or(32);
+        let max_conns_per_host = positive_or(
+            std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST").ok(),
+            32,
+        );
+        let upstream_stream_cap = positive_or(
+            std::env::var("XLITE_UPSTREAM_STREAM_CAP").ok(),
+            usize::MAX,
+        );
         let catalog_reload_secs = std::env::var("XLITE_CATALOG_RELOAD_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -53,6 +76,7 @@ impl Config {
             admin_password,
             session_secret,
             max_conns_per_host,
+            upstream_stream_cap,
             catalog_reload_secs,
             upstream_ttft_header,
         })
@@ -92,6 +116,20 @@ mod tests {
         assert!(parse_flag(" yes "));
         assert!(!parse_flag("0"));
         assert!(!parse_flag("false"));
+    }
+
+    #[test]
+    fn stream_cap_defaults_to_peer_decides() {
+        // Unset / invalid / 0 all mean "let the peer decide" (usize::MAX):
+        // the pool then executes the peer's advertised
+        // SETTINGS_MAX_CONCURRENT_STREAMS as-is.
+        assert_eq!(positive_or(None, usize::MAX), usize::MAX);
+        assert_eq!(positive_or(Some("0".into()), usize::MAX), usize::MAX);
+        assert_eq!(positive_or(Some("abc".into()), usize::MAX), usize::MAX);
+        assert_eq!(positive_or(Some("40".into()), usize::MAX), 40);
+        assert_eq!(positive_or(Some("-1".into()), usize::MAX), usize::MAX);
+        // Same helper backs MAX_CONNS_PER_HOST's default of 32.
+        assert_eq!(positive_or(None, 32), 32);
     }
 
     #[test]
