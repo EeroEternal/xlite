@@ -5,21 +5,21 @@ description: Run the tiered local gates (scripts/ci_local.sh) for xlite. Covers 
 
 # 本地门禁 runner（t0 / t1 / t2）
 
-门禁按**风险事件**分层，不按平台分层。命令只有一处实现 —— `scripts/ci_local.sh`；
-CI（`.github/workflows/ci.yml`）用 `--only <face>` 调同一个脚本，所以 CI 与本地不会漂移。
+门禁按**风险事件**分层，全部在本机跑 —— `scripts/ci_local.sh` 是唯一实现，仓库没有
+GitHub CI；验证责任在推送者。
 
 | Tier | 事件 | 跑什么 | 平台 |
 | --- | --- | --- | --- |
 | **t0** | 任意分支 push | **按改动路径裁剪**：只跑被改到的面 | 本机（含 macOS） |
-| **t1** | PR → main / push main | 全部面 + admin build + h2-pool 集成测试 | **Linux**（CI） |
-| **t2** | 打 tag / 发版 | t1 + `check_release_sync.sh` | **Linux**（CI） |
+| **t1** | 合入 main 前 | 全部面 + admin build + h2-pool 集成测试 | 本机 |
+| **t2** | 打 tag / 发版前 | t1 + `check_release_sync.sh` | 本机 |
 
 ```bash
 scripts/ci_local.sh              # t0：按改动路径裁剪
 scripts/ci_local.sh --all        # t0 但强制所有面
 scripts/ci_local.sh --tier t1    # t1 全量（旧写法 --full 仍等价）
 scripts/ci_local.sh --tier t2    # t2：t1 + release sync
-scripts/ci_local.sh --only rust  # 只跑一个面：rust | admin | meta（CI 的用法）
+scripts/ci_local.sh --only rust  # 只跑一个面：rust | admin | meta
 ```
 
 ## 三个面与路径路由

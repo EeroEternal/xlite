@@ -46,7 +46,7 @@
 8. **列表排序与检索一致性**：实体列表排序选项必须标明方向（如「名称（A→Z）」）；检索框 placeholder 必须真实准确说明可搜字段。
 9. **数据面保持空管**：`src/proxy.rs` 只做鉴权、选通道、字节透传；调度仅加权随机 + 优先级 failover。禁止组织/项目/智能路由/策略枚举；**通道级上游形状（鉴权头、静态附加头、chat 路径）属快照预计算数据，不是策略**。压测可 `DATABASE_URL=memory` 或冻结 Redis 快照、探 `/health`；请求路径仍不碰库。禁止为刷 TTFT 做准入排队或提前写 200。
 10. **发版 promoter 流程**：打 tag / 发版必须走 skill [`release`](.agents/skills/release/SKILL.md)。
-11. **分层门禁**：推送前跑 `scripts/ci_local.sh`（t0，按改动路径只跑被改到的面，全绿才推）；**合入 main 由 CI 跑 t1 全量**（`.github/workflows/ci.yml`），发版跑 t2。禁止把 CI 当本地沙盒；细则见 skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md)。
+11. **分层门禁（全本地，无 GitHub CI）**：推送前跑 `scripts/ci_local.sh` t0（按改动路径只跑被改到的面，全绿才推）；**合入 main 前本机跑 t1 全量**，发版/打 tag 前本机跑 t2（t1 + release sync）。仓库没有 GitHub Actions，验证责任在推送者；禁止把「反正没 CI」当跳过门禁的理由。细则见 skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md)。
 
 ## Skills 索引
 

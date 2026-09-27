@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Local gates for xlite, tiered by risk event (see .agents/skills/ci-local-runner).
 #
-#   t0 (default)  push, any platform: path-scoped — only the faces your change touches
-#   t1            PR -> main (Linux CI): every face + admin build + h2-pool integration
-#   t2            release / tag: t1 + release-sync checks
+#   t0 (default)  before any push: path-scoped — only the faces your change touches
+#   t1            before merging to main (run locally): every face + admin build + h2-pool integration
+#   t2            before tagging a release (run locally): t1 + release-sync checks
 #
 # Usage: scripts/ci_local.sh [--tier t0|t1|t2] [--all] [--base <ref>] [--full]
 set -euo pipefail
@@ -19,9 +19,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/ci_local.sh [--tier t0|t1|t2] [--all] [--base <ref>] [--full]
 
-  --tier t0   push, any platform: path-scoped, only the faces you changed (default)
-  --tier t1   PR -> main (Linux CI): every face + admin build + h2-pool integration tests
-  --tier t2   release / tag: t1 + release-sync checks
+  --tier t0   before any push: path-scoped, only the faces you changed (default)
+  --tier t1   before merging to main (run locally): every face + admin build + h2-pool integration tests
+  --tier t2   before tagging a release (run locally): t1 + release-sync checks
   --full      alias for --tier t1
   --all       ignore path scoping; run every face
   --only F    force faces (comma-separated: rust,admin,meta); overrides path scoping.
@@ -119,8 +119,8 @@ else
   fi
 fi
 
-# --only overrides path scoping: CI runs one face per job through this same script,
-# so the CI commands and the local commands cannot drift apart.
+# --only overrides path scoping: handy when you want exactly one face (e.g. after a
+# docs-only change). All tiers run on this machine — there is no remote CI.
 if [[ -n "$ONLY" ]]; then
   want_rust=0 want_admin=0 want_meta=0
   IFS=',' read -r -a faces <<< "$ONLY"
