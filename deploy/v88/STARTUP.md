@@ -176,35 +176,47 @@ E 组 37000 被外部中断，F/A/C 从未开始。
 
 ## 6. 下次现场怎么开（建议）
 
-目标：**上界保持 60000，任何一轮被打断都能续**。默认两段步进（§5.1）把每组压到 20 档，
-按每档 ~9 分钟 ≈ **3 小时/组**，六组分成六个时间窗。
+目标：**上界保持 60000；任何一组被打断，重跑同一组就能从断点接上**。默认两段步进（§5.1）把每组压到 20 档，按每档 ~9 分钟 ≈ **3 小时/组**，六组分成六个时间窗。
 
 ```sh
 cd deploy/v88                                    # 现场是整目录拷过来的
 export TARGET=http://10.56.88.22:8005/v1/chat/completions
 export TOKEN=<在网关网页重置后复制>
-export RESULT_DIR=/root/v88-run1                 # ★ 所有轮次共用，续跑全靠它
+export RESULT_DIR=/root/v88-run1                 # ★ 一张阶梯一个目录，六组都落这里
 
 # 只做前置检查（不起 k6）：封条 / k6 镜像 / 农场可达 / 路数一致
 ./run_full_88_xg.sh --preflight-only
 
-# 1) 第 1 轮
+# 一张阶梯 = 六轮，每轮一个组。**每组只跑一次时不需要 RESUME**
 ./run_full_88_xg.sh --combo B
+./run_full_88_xg.sh --combo D
+./run_full_88_xg.sh --combo E
+./run_full_88_xg.sh --combo F
+./run_full_88_xg.sh --combo A
+./run_full_88_xg.sh --combo C
 
-# 2~6) 每轮一个组，**同一个 RESULT_DIR** + RESUME=1
-RESUME=1 ./run_full_88_xg.sh --combo D
-RESUME=1 ./run_full_88_xg.sh --combo E
-RESUME=1 ./run_full_88_xg.sh --combo F
-RESUME=1 ./run_full_88_xg.sh --combo A
-RESUME=1 ./run_full_88_xg.sh --combo C
+# 某一组被打断（或想补齐漏档）→ 加 RESUME=1 **重跑那一组**：组内已完成且 rc=0 的档
+# 直接复用旧日志、不再跑 k6，从断点继续。例：B 组跑到 23000 被打断：
+RESUME=1 ./run_full_88_xg.sh --combo B
 ```
+
+**`RESUME` 管的是「组内」，不是「跨组」** —— 这一点很容易读反：
+
+| 想做的事 | 靠什么 | 需要 `RESUME=1` 吗 |
+| --- | --- | --- |
+| 接着跑**另一个组** | `--combo <组>`（`run_group` 只枚举那一组的档） | **不需要**：`--combo D` 根本不会去看 `B_*.log`（复用判据的 key 是 `${combo}_${vus}`；实测：同一目录里只有 B 的结果时，`--combo B` 复用、`--combo D` 重跑） |
+| 接着跑**同一个组**剩下的档 | `RESUME=1` + 同一个 `RESULT_DIR` | **需要**：否则从 `START_VUS` 整组重来 |
+
+`RESULT_DIR` 的作用是「一张阶梯的所有结果放一处 + 让 `RESUME` 有地方找旧日志」，它本身不会替你记进度。
 
 阶梯形状与停测规则**取脚本默认**（`STEP_COARSE_ABOVE=10000` / `STEP_COARSE=5000` /
 `STOP_ON_FAIL=0`，含义见 §5.1），所以上面没有 export 它们。**要改就必须 `export`**：
 写成前缀形式（`STEP_COARSE_ABOVE=20000 ./run_full_88_xg.sh --combo B`）**只对那一条命令生效，
 下一轮会静默退回默认**——同一份数据就混了两种口径（实测：前缀形式第 1 轮 28 档、第 2 轮 20 档）。
-实际生效值一律以结果目录的 `env.txt` 为准（它记 `STEP_COARSE_ABOVE` / `STEP_COARSE` /
-`STABLE_SHORT` / `STABLE_LONG` / `RESUME` / `STOP_ON_FAIL` / `LADDER_LEVELS_*`）。
+
+⚠️ **`env.txt` 是每轮覆盖写的**，所以多轮跑完之后它只反映**最后一轮**的设置（只有
+`DOWNGRADED_LEVELS=` 与 `LADDER_LEVELS_*` 是追加的）。跨轮核对口径要看每轮 `progress.log`
+开头那三行——这正是「跨轮别改口径」这条要求得人自己守的原因。
 
 把 `STEP_COARSE_ABOVE` 调到 `20000` 会把 10000–20000 也留成密档，每组 28 档；想更短就往下调
 （`=5000` ⇒ 16 档）。**但不要动 `MAX_VUS`**。
