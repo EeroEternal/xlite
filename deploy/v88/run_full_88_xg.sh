@@ -351,7 +351,12 @@ run_k6_once() { # <combo> <vus> <stable> <out> <ti> <keep_sample> <chunk_max> �
   local stem="${combo}_${vus}"
   local log="$RESULT_DIR/$stem.log"
   docker rm -f "v88_k6_$$" >/dev/null 2>&1
+  # `--ulimit nofile`：k6 是这条链路上**唯一**要从一台机同时持住 6 万 socket 的进程，
+  # 不设时它继承 docker daemon 的默认（可能低到 1024 / 65536）⇒ 连接接不完或持不住。
+  # 签名是 `dial: i/o timeout` 或吞吐静默掉一截，而 `fail` / `vus_max` /
+  # `iteration_duration` 全都正常（网关那侧踩过同一个坑，见 advanced/CONFIG.md §3）。
   docker run --rm --name "v88_k6_$$" -m "$K6_MEM" --network=host \
+    --ulimit nofile=1048576:1048576 \
     -v "$V88_DIR:/k6:ro" -v "$RESULT_DIR:/out" \
     -e "TARGET_URL=$TARGET" -e "TOKEN=$TOKEN" -e "MODEL=$MODEL" \
     -e STREAM=true -e IN_TOKENS=100 -e "OUT_TOKENS=$out" \

@@ -110,6 +110,16 @@ backend xgw_single
 
 `:8005` 打两台（`n24`+`n26`），`:8006` 只打 `n24`（单节点对照口）；两个 `server` 就是两个 xlite 的 `IP:PORT`（客户现场 `PORT=8080`）。
 
+**`maxconn 200000` 要它的 fd 上限配合**：`maxconn` 只是 HAProxy 的**内部计数**，真正的 fd 上限由启动它的环境给（systemd / 容器 / 父 shell），HAProxy 会自己按 `maxconn` 去抬、但**抬不过 hard 上限**。抬不上去时它不报错，客户端只看到 **RST** 和 **`dial: i/o timeout`**。上 `.22` 对一次账：
+
+```sh
+pid=$(pgrep -f haproxy | head -1)
+grep -i 'open files' /proc/$pid/limits                                    # soft 要 ≥ 210000
+journalctl -u haproxy -b --no-pager | grep -iE 'ulimit|open files' | tail -3
+```
+
+不够就按 `advanced/CONFIG.md` §3.2 改（**必须 `restart`，`reload` 不重读 `LimitNOFILE`**）；链路上其余五处上限（网关 / k6 / conntrack / somaxconn / 出站端口）见同文件 §3.1。
+
 ## 5. 跑
 
 ```sh
@@ -259,3 +269,4 @@ RESUME=1 ./run_full_88_xg.sh --combo B
 | 5 | 29 | 下发口径 + 单流自检（§1） | 502 行 `data:` / ≈100 736 B / 500 个 `ts` |
 | 6 | 29 | 前置检查 | `TARGET=… TOKEN=… ./run_full_88_xg.sh --preflight-only` → `RC=0` |
 | 7 | 29 | 开跑（分轮跑见 §6） | `./run_full_88_xg.sh`；结果目录里看 `progress.log`（逐档一行）与 `env.txt`（口径凭据） |
+| 8 | 22 / 24 / 26 / 29 | 链路上的 fd / 表项上限一次查完（`advanced/CONFIG.md` §3.1） | 逐项对照期望值；**只有低于期望的才改** |

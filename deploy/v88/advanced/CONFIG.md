@@ -246,7 +246,7 @@ curl -N -sS -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' 
 
 ---
 
-## 3. 内核与 fd（每台网关机 + mock 机）
+## 3. 内核与 fd（链路上**每一环**都要查：HAProxy / 网关 / mock / k6）
 
 ```sh
 # 客户包里已有一份：bench/0924/deploy_origin/deploy88/sysctl-loadtest.conf
@@ -275,6 +275,59 @@ sysctl --system
 docker compose exec xlite sh -c "grep -i 'open files' /proc/1/limits"   # 期望 1048576
 sysctl -n net.core.somaxconn                                          # 期望 65535
 ```
+
+### 3.1 一次查完链路上的六处上限
+
+`maxconn` / `--ulimit` / `sysctl` 分布在**四台机**上，任何一层小一个量级都会造出**同一种签名**：RST 暴涨、`dial: i/o timeout`，或者吞吐静默掉一截而 `fail` 与延迟指标全都正常。
+
+| # | 在哪台 | 上限 | 期望 |
+| --- | --- | --- | --- |
+| 1 | 22 | **HAProxy 进程 `nofile`**（`maxconn` 的兑现能力，见 §3.2） | ≥ 210000 |
+| 2 | 24 / 26 | 网关容器 `nofile` | 1048576 |
+| 3 | 29 | **k6 容器 `nofile`** —— driver 已代设，手工起 k6 才要自己加 `--ulimit` | 1048576 |
+| 4 | 22 / 29 | `nf_conntrack_max`（表满即丢包 → RST / 超时） | ≥ 2~4× 峰值连接数 |
+| 5 | 22 | `somaxconn` / `tcp_max_syn_backlog`（SYN / accept 队列） | 65535 |
+| 6 | 29 | `ip_local_port_range` / `tcp_tw_reuse`（k6 的**出站**端口） | `1024 65535` / `1` |
+| + | 全部 | `systemctl show docker -p LimitNOFILE` —— 它封顶**任何**容器能拿到的上限，所以上面 2 / 3 两项不可能超过它 | 1048576 |
+
+```sh
+hc=$(pgrep -f haproxy | head -1)                                    # 22
+grep -i 'open files' /proc/$hc/limits                               # ①
+docker exec xlite-gw sh -c "grep -i 'open files' /proc/1/limits"    # ②（24 / 26）
+k6p=$(pgrep -f ' k6$' | head -1)                                    # 29
+grep -i 'open files' /proc/$k6p/limits                              # ③
+sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max   # ④
+sysctl net.core.somaxconn net.ipv4.tcp_max_syn_backlog              # ⑤
+sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse           # ⑥
+```
+
+**先测再改**：已经是指望值的就别动它 —— 改不必要的变量只会让下一轮更难归因。只有看到 1024 / 4096 / 65536 这种量级才改。
+
+### 3.2 HAProxy 的 `maxconn` 必须与它的 fd 上限对账
+
+`global maxconn 200000` 只是 HAProxy 的**内部计数**；真正的 fd 上限由**启动它的环境**给（systemd `LimitNOFILE` / 容器 `--ulimit` / 父 shell 的 `ulimit -Hn`）。HAProxy 默认会按 `maxconn` **自动算出**所需 fd 数并自己 `setrlimit` 去抬（等价于配置里的 `global ulimit-n`，所以 §2.3 那份 cfg **不需要**额外写它），**但抬不过 hard 上限**；抬不上去时它只在启动日志里留一条 warning，**不影响启动**。
+
+所以判据是运行时的数，而不是配置文件：
+
+```sh
+pid=$(pgrep -f haproxy | head -1)
+grep -i 'open files' /proc/$pid/limits                                    # soft 是它真正拿到的
+ls /proc/$pid/fd | wc -l                                                  # 此刻已用
+journalctl -u haproxy -b --no-pager | grep -iE 'ulimit|open files' | tail -3
+# 开了 stats socket 之后（§2.6 第 2 条）最权威：
+echo 'show info' | socat stdio /run/haproxy/admin.sock | grep -iE 'Maxconn|Maxsock|CurrConns'
+#   Maxsock = HAProxy 按 maxconn 算出的需求；它 > soft 就是被封顶了
+```
+
+**`maxconn 200000` 却只拿到 1024 / 4096 / 65536 fd 时会发生什么**：已接受的连接持不住（客户端看到 **RST**）、SYN 接不住（→ **`dial: i/o timeout`**），而 HAProxy 自己不报错。入口机有 128G，给 21 万 fd 毫无代价（内核侧每 socket 几 KB）：
+
+```sh
+mkdir -p /etc/systemd/system/haproxy.service.d
+printf '[Service]\nLimitNOFILE=210000\n' > /etc/systemd/system/haproxy.service.d/nofile.conf
+systemctl daemon-reload && systemctl restart haproxy    # ★ reload 不重读 LimitNOFILE
+```
+
+**对标时的披露要求**：两侧各自的入口 HAProxy 都要按 §3.1 核同一张表；只调一侧**必须在报告里写明** —— 这是**基础设施不对称**，不是口径造假，但不说清就没法解释数字差。
 
 ---
 

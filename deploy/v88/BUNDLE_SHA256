@@ -1,6 +1,6 @@
 # deploy/v88 自封条 —— 由 seal_bundle.sh 生成，不要手改
-# sealed_at: 2026-09-27T05:05:30Z
-# from_commit: c7c1848（记录用，不参与校验）
+# sealed_at: 2026-09-27T13:34:02Z
+# from_commit: 7e22f3e（记录用，不参与校验）
 8aa196a2e72de11660041485cac3befcf4dd37e7d707cefa546853935c80dea4  k6.js
-a35e94afde129ebe77bdf88d4bb95e5c6ad3d680a14103f6b3f0c75574b68d71  advanced/ab_topology.sh
+3de43c7609c903830b2d7dea0c1252f90c919a7e33379ae803eb70ccba604aca  advanced/ab_topology.sh
 04d1bc93add880e253aae175cbf92127654a587dc51ee8f2246855c44ca794a4  lib/lib_rig.sh
