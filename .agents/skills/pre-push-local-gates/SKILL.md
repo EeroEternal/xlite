@@ -18,7 +18,8 @@ scripts/ci_local.sh          # t0：只跑被改动路径命中的面
 ```
 
 t0 是**推送门禁，不是合入门禁**：它按改动路径裁剪（只改 `docs/**` 就只跑 meta，秒级完成），
-合入 main 的严格度由**本机 t1 全量**承担，发版由**本机 t2** 承担（仓库没有 GitHub CI）。分层只有一处实现，
+合入 main 的严格度由 **Linux 机上的 t1 全量**承担，发版由 **Linux 机上的 t2** 承担（仓库没有 GitHub CI；
+**macOS 开发机不必跑 `ci_local.sh`**）。分层只有一处实现，
 见 skill [`ci-local-runner`](../ci-local-runner/SKILL.md)。
 
 t0 各面等价于手动逐条跑（想强制所有面用 `scripts/ci_local.sh --all`）：

@@ -5,14 +5,15 @@ description: Run the tiered local gates (scripts/ci_local.sh) for xlite. Covers 
 
 # 本地门禁 runner（t0 / t1 / t2）
 
-门禁按**风险事件**分层，全部在本机跑 —— `scripts/ci_local.sh` 是唯一实现，仓库没有
-GitHub CI；验证责任在推送者。
+门禁按**风险事件**分层，**三层都在 Linux 机上跑** —— `scripts/ci_local.sh` 是唯一实现，仓库没有
+GitHub CI；**macOS 开发机不必跑 `ci_local.sh`**（能跑的只有 t0 的 meta 面，Linux 的 t1 会覆盖到）。
+验证责任在推送者与合入者。
 
 | Tier | 事件 | 跑什么 | 平台 |
 | --- | --- | --- | --- |
-| **t0** | 任意分支 push | **按改动路径裁剪**：只跑被改到的面 | 本机（含 macOS） |
-| **t1** | 合入 main 前 | 全部面 + admin build + h2-pool 集成测试 | 本机 |
-| **t2** | 打 tag / 发版前 | t1 + `check_release_sync.sh` | 本机 |
+| **t0** | 任意分支 push | **按改动路径裁剪**：只跑被改到的面 | **Linux 机** |
+| **t1** | 合入 main 前 | 全部面 + admin build + h2-pool 集成测试 | **Linux 机** |
+| **t2** | 打 tag / 发版前 | t1 + `check_release_sync.sh` | **Linux 机** |
 
 ```bash
 scripts/ci_local.sh              # t0：按改动路径裁剪
@@ -56,12 +57,17 @@ Node 22（`.mise.toml`）、`admin/node_modules`。
 遇到它先复跑一次区分偶发与真回归，别直接当成自己的改动坏了。根治办法是让对端等一个显式
 信号而不是 `sleep(150ms)`；那属于独立的测试修复，不要夹带进无关改动。
 
-## 为什么不按平台放宽
+## 为什么门禁放在 Linux 机上
 
-静态门禁（fmt/clippy/tsc/lint/vitest）与平台无关，在 macOS 上跳过不会省下任何正确性，
-只会把失败推迟到没有 CI 兜底的地方。真正只能 Linux 做的是产物、集成与部署，那些属于 t2。
+三层都跑在 Linux 机上——那是部署与压测机器所在的环境，也是“产物、集成与部署只能在那里做”的地方。
+**macOS 开发机不必跑 `ci_local.sh`**：它上面能跑的只有 t0 的 meta 面（changelog 归属 / 文档生命周期 /
+`bash -n`），而 Linux 的 t1 会覆盖到这一面——不跑只是把检查推到合入前，不会漏掉检查。
 
-**但 shell 脚本要反过来小心**：macOS 自带 bash 3.2，仓内脚本被打死过一次（`declare -A`
-在 3.2 上直接 `invalid option`）。注意 meta 面的 `bash -n` **只验语法**，抓不到这类差异 ——
-实测 `declare -A m=([a]=1)` 在 bash 3.2 下 `bash -n` 仍返回 0。所以改 `scripts/**` 时要在
-本机 macOS 上**实跑**一次，或避开 bash 4+ 构造（`declare -A` / `mapfile` / `${v,,}`）。
+静态门禁（fmt/clippy/tsc/lint/vitest）本身与平台无关，所以“在哪个平台跑”只影响**什么时候**发现
+失败，不影响会不会发现。
+
+**但 shell 脚本有一条遗留约束**：仓内脚本曾在 macOS 自带的 bash 3.2 上被打死过（`declare -A`
+在 3.2 上直接 `invalid option`），而 meta 面的 `bash -n` **只验语法**、抓不到这类差异 ——
+实测 `declare -A m=([a]=1)` 在 bash 3.2 下 `bash -n` 仍返回 0。所以：**只要你还可能在任何一台
+macOS 上实跑仓内脚本，就避开 bash 4+ 构造**（`declare -A` / `mapfile` / `${v,,}`）。若已确定
+仓内脚本只在 Linux 上执行，这一条可以不再守——但那是显式决定，别默默不守。
