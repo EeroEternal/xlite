@@ -141,7 +141,7 @@ FARM_N=$(printf '%s\n' "$FARM_HOSTS" | grep -c .)
 [ "$FARM_N" -gt 0 ] || v88_die "MOCKS=$MOCKS 展开后一个口都没有"
 
 v88_log "目标 $TARGET  模型 $MODEL"
-v88_log "农场 ${MOCKS}（$FARM_N 口）  batch=$MOCK_BATCH  ttft=$MOCK_TTFT  interval=$MOCK_INTERVAL"
+v88_log "农场 ${MOCKS}（$FARM_N 口）  ttft=$MOCK_TTFT  interval=$MOCK_INTERVAL"
 
 # 农场可达性 + 口径回读（客户原版完全没有这层）
 unreachable=0
@@ -168,6 +168,7 @@ fi
 
 # ---------------------------------------------------------------- 结果目录与 ledger
 mkdir -p "$RESULT_DIR"
+chmod 777 "$RESULT_DIR"
 LEDGER="$RESULT_DIR/env.txt"
 {
   printf 'GENERATED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -273,11 +274,11 @@ run_group() { # <combo> <out> <ti> <stable>
   local combo="$1" out="$2" ti="$3" stable="$4"
   local row vus
   v88_log ">>>>>> 组 $combo 开始（out=$out interval=${ti}ms 稳态=${stable}）"
-  printf '[%s] >>>>>> 组 %s (out=%s ti=%s 稳态=%s) batch=%s\n' \
-    "$(date +%H:%M:%S)" "$combo" "$out" "$ti" "$stable" "$MOCK_BATCH" >>"$PROGRESS"
+  printf '[%s] >>>>>> 开始 %s 组 (out=%s ti=%s 稳态=%s, 起点=%sVU) <<<<<<\n' \
+    "$(date +%H:%M:%S)" "$combo" "$out" "$ti" "$stable" "$START_VUS" >>"$PROGRESS"
 
-  # 每组分发一次（客户原版同形）——参数化 batch + 回读校验 + 记账
-  v88_farm_configure "$FARM_HOSTS" "$MOCK_TTFT" "$ti" "$out" "$MOCK_BATCH" "$LEDGER" || return 3
+  # 每组分发一次（客户原版同形）——参数化 batch + 回读校验
+  v88_farm_configure "$FARM_HOSTS" "$MOCK_TTFT" "$ti" "$out" "$MOCK_BATCH" "" || return 3
   sleep 2   # 客户原版同形
 
   # 客户原版同形的每组冒烟：经网关打一发并数 `data:` 行（只打印，不中止）
@@ -363,8 +364,8 @@ run_group() { # <combo> <out> <ti> <stable>
   v88_log ">>>>>> 组 $combo 完成"
 }
 
-printf '[%s] ====== V88 xg 版开始 | 组 %s | batch=%s | 农场 %s 口 | %sVU 起 +%s | 上限 %s ======\n' \
-  "$(date +%H:%M:%S)" "$COMBOS" "$MOCK_BATCH" "$FARM_N" "$START_VUS" "$STEP" "$MAX_VUS" | tee -a "$PROGRESS"
+printf '[%s] ====== V88 xg 版开始 | 组 %s | 农场 %s 口 | %sVU 起 +%s | 上限 %s ======\n' \
+  "$(date +%H:%M:%S)" "$COMBOS" "$FARM_N" "$START_VUS" "$STEP" "$MAX_VUS" | tee -a "$PROGRESS"
 if [ -n "${KEEP_SAMPLE:-}" ]; then
   printf '口径：KEEP_BODY=%s KEEP_SAMPLE=%s(全局固定) CHUNK_MAX=%s gracefulStop=%s | k6.js sha256=%s\n' \
     "$KEEP_BODY" "$KEEP_SAMPLE" "$CHUNK_MAX" "$GRACEFUL_STOP" "$K6_SHA" | tee -a "$PROGRESS"
