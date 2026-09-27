@@ -64,6 +64,18 @@ var cntConcurrency = new metricsMod.Counter('err_api_key_concurrency_exceeded');
 var cntKeyRate = new metricsMod.Counter('err_api_key_rate_limit_exceeded');
 var cntGlobalRate = new metricsMod.Counter('err_rate_limit_exceeded');
 var cntOther = new metricsMod.Counter('err_other');
+// 失败按「谁拒绝的」分类。**为什么必须拆开**：内置 `http_req_failed` 把**传输错误**与
+// **非 2xx 响应**混进同一个数，而这两件事的修法完全不同 —— 前者是链路/资源被打爆
+// （nofile / conntrack / accept 队列 / 农场抢不到 CPU），后者是网关真的返回了错误响应。
+// 全是 Counter，不参与 `k6mod.check`，所以**不改变 `checks_total/http_reqs` 指纹**。
+//   status_0_transport  k6 对传输错误把 status 记为 0（RST / dial 超时 / 连接被关）
+//   status_502          xlite：该 model 的所有通道都失败
+//   status_503          HAProxy：后端节点被健康检查判 DOWN（与上面是两个独立故障）
+//   non2xx_other        其它非 200
+var cntTransport = new metricsMod.Counter('status_0_transport');
+var cnt502 = new metricsMod.Counter('status_502');
+var cnt503 = new metricsMod.Counter('status_503');
+var cntNon2xxOther = new metricsMod.Counter('non2xx_other');
 // 与客户原件同构: 只有 KEEP_BODY 才注册 chunk 指标 (KEEP_BODY=false 时完全不解析 body,
 // checks 比 1.00 —— 满负荷"3 万连接"那一臂就是这一档)。
 var chunkIntervalMs = KEEP_BODY ? new metricsMod.Trend('chunk_interval_ms') : null;
@@ -162,6 +174,13 @@ function doRequest() {
   ttftMs.add(res.timings.waiting);
   addHeaderTrend(upstreamTtftMs, res, 'x-xlite-upstream-ttft-ms');
   addHeaderTrend(retryAfterS, res, 'retry-after');
+
+  // 失败分类：**每个请求各计一次**，刻意不放进 `analyze` / `errSample` 分支 ——
+  // 否则高 VU 档降采样之后这几个 Counter 会静默变小，读数就失去意义。
+  if (res.status === 0) cntTransport.add(1);
+  else if (res.status === 502) cnt502.add(1);
+  else if (res.status === 503) cnt503.add(1);
+  else if (res.status !== 200) cntNon2xxOther.add(1);
 
   if (res.status !== 200 && errSample && res.body) {
     countReject(res.body);

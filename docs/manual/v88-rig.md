@@ -18,7 +18,7 @@
 | `KEEP_SAMPLE` | **driver 不传**。对标那轮的挂载版没有采样 ⇒ `KEEP_BODY=true` 时**每次迭代都解析 body**（checks 比 2.00）。包里的 `loadtest/k6/k6.js`（v3.2-memopt）默认 0.1（→1.10）；`deploy88/k6.js` 没有这个变量（→2.00） |
 | think-time / `PICK_INTERVAL` | **不传**。k6 默认走进 `sleep(0)`，没有 30s 睡眠 |
 | VU | **1000 起，+1000**，上限 60000 |
-| 停测 | 连续两档 `http_req_failed > 1%` |
+| 停测 | 连续两档 `http_req_failed > 1%`（客户原版）。本仓 `deploy/v88` driver 默认 **不停**（`STOP_ON_FAIL=0`，跑到 `MAX_VUS`），`=1` 恢复原版 |
 | 稳态 | 短流 300s / 长流 640s |
 | 收尾 | 对标那轮用 `GRACEFUL_STOP` 默认 **600s**（日志 header 实测 `10m0s`）；包里的 `deploy88/k6.js` 硬编码 **`10s`**，**不是对标那版** |
 | 流 | `STREAM=true`，`stream: true` |
