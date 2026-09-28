@@ -184,14 +184,14 @@ backend xgw_dual
     balance roundrobin
     option httpchk GET /health
     http-check expect status 200
-    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
-    server n26 10.56.88.26:8080 check inter 5s fall 3 rise 2
+    server n24 10.56.88.24:8080 check inter 5s fall 5 rise 2
+    server n26 10.56.88.26:8080 check inter 5s fall 5 rise 2
 
 backend xgw_single
     balance roundrobin
     option httpchk GET /health
     http-check expect status 200
-    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
+    server n24 10.56.88.24:8080 check inter 5s fall 5 rise 2
 ```
 
 **可选增强**（未在本仓测过，按需自行评估，别当既有结论）：

@@ -98,14 +98,14 @@ backend xgw_dual
     balance roundrobin
     option httpchk GET /health
     http-check expect status 200
-    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
-    server n26 10.56.88.26:8080 check inter 5s fall 3 rise 2
+    server n24 10.56.88.24:8080 check inter 5s fall 5 rise 2
+    server n26 10.56.88.26:8080 check inter 5s fall 5 rise 2
 
 backend xgw_single
     balance roundrobin
     option httpchk GET /health
     http-check expect status 200
-    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
+    server n24 10.56.88.24:8080 check inter 5s fall 5 rise 2
 ```
 
 `:8005` 打两台（`n24`+`n26`），`:8006` 只打 `n24`（单节点对照口）；两个 `server` 就是两个 xlite 的 `IP:PORT`（客户现场 `PORT=8080`）。

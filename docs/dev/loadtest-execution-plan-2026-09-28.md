@@ -81,20 +81,21 @@ backend xgw_dual
     balance roundrobin
     option httpchk GET /health
     http-check expect status 200
-    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
-    server n26 10.56.88.26:8080 check inter 5s fall 3 rise 2
+    server n24 10.56.88.24:8080 check inter 5s fall 5 rise 2
+    server n26 10.56.88.26:8080 check inter 5s fall 5 rise 2
 
 # 单节点后端（仅转发至 10.56.88.24 单台）
 backend xgw_single
     balance roundrobin
     option httpchk GET /health
     http-check expect status 200
-    server n24 10.56.88.24:8080 check inter 5s fall 3 rise 2
+    server n24 10.56.88.24:8080 check inter 5s fall 5 rise 2
 ```
 
 > **从客户原版 New API 切换时必改要点**：
-> 1. **探活必须改用 `GET /health`**：客户原版配的是 `option httpchk GET /api/status`。XG 没有 `/api/status`，若不改，HAProxy 探活连续 3 次失败会把网关全判定为宕机，导致压测直接出 **100% 503 错误**！
-> 2. **长连接超时（600s）严禁改小**：`timeout client/server/tunnel` 必须与压测脚本的 `STREAM_TIMEOUT=600000`（10分钟）严格对齐。
+> 1. **探活必须改用 `GET /health`**：客户原版配的是 `option httpchk GET /api/status`。XG 没有 `/api/status`，若不改，HAProxy 探活连续失败会把网关全判定为宕机，导致压测直接出 **100% 503 错误**！
+> 2. **探活容错建议设为 `fall 5`**：容错窗口由原版的 15s（$5\text{s}\times 3$）放宽到 25s（$5\text{s}\times 5$），避免 50k+ 极端并发下由于网关瞬时排队造成探活毛刺而发生误判摘除（消灭 503 节点摘除风暴）。
+> 3. **长连接超时（600s）严禁改小**：`timeout client/server/tunnel` 必须与压测脚本的 `STREAM_TIMEOUT=600000`（10分钟）严格对齐。
 
 ### 2.3 启动核验
 ```bash
