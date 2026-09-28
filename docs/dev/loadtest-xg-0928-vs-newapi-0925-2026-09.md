@@ -1,14 +1,14 @@
-# 0928 轮 XG（新 rig 单节点）vs 0924 轮 New API 双节点：B 组四档对照
+# 0928 轮 XG（新 rig 单节点）vs 0925~0928 轮 New API 双节点：B 组对照
 
 - **状态**：实测分析（已完成）
 - **日期**：2026-09-28
 - **一句话结论**：同载荷四档（15k/30k/45k/55k VU，B 组短流），**XG 单节点吞吐比 New API 双节点高 37%~42%（qps 1088~1179 vs 775~813）、真实在途流 2 倍（~10.6k vs ~5.0k）**；双方 fail 均 ≈0（本 rig 农场未受压，fail 列无区分度）；过载形态分化出现在 **duration 尾部**——New API 在 45k+ 出现 p90=34~41s 的排队重尾，XG 保持单峰公平稀释（p90=17~18s）。
 - **数据来源**：
   - XG：`/Users/xinference/Downloads/20260928T025721Z`（`progress.log` + `env.txt` + 4 份 summary；GENERATED_AT=2026-09-28T02:57:22Z）
-  - New API：`0928NA/results/v88-dual/`（0924 双节点密阶梯，`B_{VU}_300s.log` k6 原始输出）
+  - New API：`0928NA/results/v88-dual/`（0925 17:24 起跑、0928 09:41 收官的六组密阶梯 campaign，B 组跑于 0925 晚 17:24~23:50；`all_progress.log` 与 0924 轮数据比对确认为**另一轮独立 run**）
   - 压测宿主证据：`top` 快照（11:17:42，B_45000 起步段）
 - **关联文档**：
-  - 前一轮干净 rig 的对照：[`loadtest-dual-0927-vs-0924-2026-09.md`](loadtest-dual-0927-vs-0924-2026-09.md)（同一份 0924 NA 数据的另一侧对照）
+  - 前一轮干净 rig 的对照：[`loadtest-dual-0927-vs-0924-2026-09.md`](loadtest-dual-0927-vs-0924-2026-09.md)（用的另一轮 0924 NA 数据，与本轮非同批）
   - 压测台架规范：[`../manual/v88-rig.md`](../manual/v88-rig.md)
   - 准入闸门背景：issue #45 / PR #46（`docs/manual/lab-loadtest.md`「上游流闸门」）
 
@@ -16,7 +16,9 @@
 
 ## 1. 两轮的口径与差异（读数前必读）
 
-| | XG（0928） | New API（0924 v88-dual） |
+| | XG（0928） | New API（0925~0928 campaign） |
+| --- | --- | --- |
+| 运行时间 | 0928 10:57（NA 收官后 1 小时起跑，同日同农场） | 0925 17:24 ~ 0928 09:41（B 组跑于 0925 晚，停测规则 `>1%两档停` 开启但 B 组未触发，`K6_MEM=90g`） |
 | --- | --- | --- |
 | 网关拓扑 | **单节点** `10.56.88.22:8005` | **双节点**（32+33 核，`:8005` 入口） |
 | 驱动 | 仓库封条版 `run_full_88_xg.sh`（k6.js sha `8aa196a2…`） | 客户 v3.2-memopt 脚本 |
@@ -54,7 +56,7 @@
 11:17:42 `top`（B_45000 起步段）：32 核虚机，`load 51.7/32.7/32.1`，`63.7us + 9.0ni + 8.7sy + 5.2si + 1.3hi + 4.1st`，idle 17.2%；**k6 806%（8 核，RES 26.5G）与 24 个 mock-llm（合计 ≈15.6 核）同宿主**。推论：
 
 1. 30k 档 qps 低谷（935）与 15k/45k/55k 的 ±15% 摆动是**宿主噪声带**，不是容量曲线；该带宽内两侧差异不下结论；
-2. k6 被挤会抬高 XG 侧实测 ttft（k6 侧调度延迟计入 waiting）——**XG 的 ttft p50（827~1136ms）是上界读数**；干净 rig 历史对照（0927-vs-0924 文档：XG p50 555~637ms，快 New API 100~150ms）才是该列的公平口径；
+2. k6 被挤会抬高 XG 侧实测 ttft（k6 侧调度延迟计入 waiting）——**XG 的 ttft p50（827~1136ms）是上界读数**；低载段公平区（XG 12:03 全量轮 7k~9k 截图读数：p50 **620~663ms** vs NA 719~739ms，XG 快 60~100ms）与 0927-vs-0924 干净 rig 结论（快 100~150ms）一致；
 3. 每 VU 周期拆解（55k 档）：周期 50.5s 中 HTTP 仅 9.8s，**其余 ~41s 在 k6 非 HTTP 段**——"55k VU" 名义值的大头是压测端等待室，真实并发见 §3。
 
 ## 5. 结论
@@ -80,6 +82,6 @@
 TARGET=http://10.56.88.22:8005/v1/chat/completions TOKEN=sk-loadtest K6_MEM=80g \
   STEP=1000 STEP_COARSE_ABOVE=0 MOCK_BATCH=1 \
   ./run_full_88_xg.sh --combo B --levels 15000,30000,45000,55000
-# New API 侧：0924 v88-dual 密阶梯（B_{VU}_300s.log，客户脚本）
+# New API 侧：0925~0928 campaign v88-dual 密阶梯（B_{VU}_300s.log，客户脚本，停测规则开启但 B 组未触发）
 # 对照表生成：两侧 progress.log / k6 summary 按本文 §2/§3 口径解析（在途= qps×dur p50）
 ```
