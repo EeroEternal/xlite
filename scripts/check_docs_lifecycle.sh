@@ -32,7 +32,13 @@ standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 # docs/manual/xlite.md ("完整数据见…"); its durable conclusions already live in
 # the released changelog, but the measurement detail is not duplicated anywhere
 # and the manuals point readers to it. Delete only after that data is relocated.
-keep=" loadtest-newapi-controlled-2026-09.md "
+#
+# v0.5.1 promotion (2026-09-28): six loadtest analysis/measurement drafts were
+# adjudicated the same way — their conclusions landed in the released changelog
+# [0.5.1] section, but the per-run data tables / affinity SOP / execution plan
+# remain referenced from docs/README.md and each other and are not duplicated
+# elsewhere. Retained as data appendices; prune after relocating the detail.
+keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md "
 
 findings=0
 for f in docs/dev/*; do
