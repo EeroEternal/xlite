@@ -27,17 +27,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Same dance as the pool's `read_peer_stream_cap`: drive the connection
     // until the peer's first SETTINGS lands, then report the advertised cap.
-    let cap = tokio::time::timeout(Duration::from_secs(2), poll_fn(|cx| {
-        let known = conn.max_concurrent_send_streams();
-        if known != usize::MAX {
-            return Poll::Ready(Some(known));
-        }
-        match Pin::new(&mut conn).poll(cx) {
-            // Closed before advertising anything: the pool falls back to 250.
-            Poll::Ready(_) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }))
+    let cap = tokio::time::timeout(
+        Duration::from_secs(2),
+        poll_fn(|cx| {
+            let known = conn.max_concurrent_send_streams();
+            if known != usize::MAX {
+                return Poll::Ready(Some(known));
+            }
+            match Pin::new(&mut conn).poll(cx) {
+                // Closed before advertising anything: the pool falls back to 250.
+                Poll::Ready(_) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            }
+        }),
+    )
     .await
     .map_err(|_| format!("{addr}: no SETTINGS frame within 2s"))?;
     match cap {

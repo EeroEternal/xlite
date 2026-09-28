@@ -55,14 +55,10 @@ impl Config {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let max_conns_per_host = positive_or(
-            std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST").ok(),
-            32,
-        );
-        let upstream_stream_cap = positive_or(
-            std::env::var("XLITE_UPSTREAM_STREAM_CAP").ok(),
-            usize::MAX,
-        );
+        let max_conns_per_host =
+            positive_or(std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST").ok(), 32);
+        let upstream_stream_cap =
+            positive_or(std::env::var("XLITE_UPSTREAM_STREAM_CAP").ok(), usize::MAX);
         let catalog_reload_secs = std::env::var("XLITE_CATALOG_RELOAD_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
