@@ -108,11 +108,14 @@ docker run -d \
   -e TOKIO_WORKER_THREADS=16 \
   -e XLITE_UPSTREAM_H2C=1 \
   -e XLITE_UPSTREAM_MAX_CONNS_PER_HOST=64 \
-  -e XLITE_UPSTREAM_STREAM_CAP=250 \
   xlite:0.5.0
 ```
 > **注意**：
-> - `TOKIO_WORKER_THREADS=16` 与分配的 16 个核心精准 1:1 匹配，避免 Tokio 默认按机器物理总核数（32）创建工作线程而在 16 个 CPU 上发生时间片争抢。
+> - `TOKIO_WORKER_THREADS` 与 cpuset 1:1 只是起点：XG 实测满载 1.5~2.6 核，
+>   「小 cpuset（4-8 核）+ 小 TWT、把核让给软中断/农场」可能更优，待 A/B 后再定稿。
+> - 若要启用 h2 连接池准入闸门，见 `docs/manual/lab-loadtest.md`「上游流闸门」：
+>   闸门 = `min(XLITE_UPSTREAM_STREAM_CAP, 通告 250) × MAX_CONNS_PER_HOST`，
+>   注意 `STREAM_CAP=250` 与通告值相等时 min 不起作用（等于没设防）。
 
 #### 方式 B：对已有运行中的进程动态绑核（`taskset`）
 若网关进程已经在运行（例如 PID 为 `176843`）：
