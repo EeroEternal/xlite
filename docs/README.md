@@ -17,6 +17,7 @@
 | [dev/loadtest-report-2026-09-28.md](dev/loadtest-report-2026-09-28.md) | 现场压测与性能天花板对标实测报告（0.5.1 + STREAM_CAP=50，45k 吞吐 2.13×，农场 48k 饱和） |
 | [dev/loadtest-report-2026-09-29.md](dev/loadtest-report-2026-09-29.md) | 现场全量压测基准与深度性能分析报告（6 大场景 110 组阶梯全量数据，组 A 顶出 3,355 QPS / 112 万请求，长短流优化空间剖析） |
 | [dev/performance-tuning-guide.md](dev/performance-tuning-guide.md) | Xlite 高并发与极限负载调优实战指南（参数矩阵、长短流策略、四层链路协同与打擂话术） |
+| [dev/rfc-adaptive-h2-pool-architecture.md](dev/rfc-adaptive-h2-pool-architecture.md) | RFC: HTTP/2 自适应最小负载连接池架构设计方案（P2C 调度、Soft-Cap 异步预热、长短流隔离，供外部专家审计） |
 | [../deploy/README.md](../deploy/README.md) | 24 mock + Redis，Docker 镜像启动 |
 
 Agent rules live in the repo-root `AGENTS.md`.
