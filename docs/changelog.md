@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **新增 `docs/dev/loadtest-report-2026-09-29.md`：0929 现场全量压测基准与深度性能分析报告（6 大场景 110 组阶梯全量数据横评、组 A 冲出 3,355 QPS / 112 万请求交付巅峰、长短流优化空间剖析）**。基于跨夜 16.7 小时全量实测数据（A/B/C/D/E/F 组，1k~60k VU）：(1) **极高吞吐巅峰**：组 A（短流 `out=100`）在 50k VU 满载下冲破 **3,355.2 req/s** 交付吞吐（单档完成 **112.9 万个请求**，0.00% 失败率），组 E（中短流 `out=250`）在 50k VU 下顶出 **1,552.1 QPS**，TTFT p50 压至 **888.8ms**；(2) **黄金中载区（≤10k VU）**：全组别 TTFT 稳定在 550ms~711ms 之间，100% 成功率；(3) **超长流（组 D/F）瓶颈归因**：单流时长超 60 秒时，并发连接占满触发 HAProxy/系统句柄溢出（D 组 60k 触发熔断）；(4) **四大优化路径提炼**：长短流动态隔离与 Dynamic Stream Cap、连接池无锁化/Thread-Local 架构、上游连接主动预热与保活、入口层连接池与 Overload Shedding 防御调优。同步更新 `docs/README.md`。
+
 - **新增 `docs/dev/loadtest-report-2026-09-28.md`：0928 现场压测与天花板实测全景报告（Xlite 0.5.1 + STREAM_CAP=50 验证、45k 吞吐 2.13× 对标、32 核农场 48k 饱和上限锁定）**。记录现场 5 轮核心实验全景：(1) **黄金业务区（≤10k VU）**：XG TTFT p50 稳定压在 619ms~691ms（领先 New API 30~120ms），10k 时吞吐顶至 1,207 QPS / 60.3 万 Token/s；(2) **45k VU 断层级优势**：XG 完成 59.2 万请求（New API 为 27.7 万，高出 2.13 倍），吐字抖动 `chunk_int` p99 突破至 29ms（New API 恶化至 411ms 卡顿，XG 平滑度领先 14 倍），整请求交付快 1 倍（p90 16.2s vs 33.9s）；(3) **`STREAM_CAP=50` 落地验证**：通过多 TCP 连接分摊消灭 250 流单连接窗口争用，45k TTFT p50 稳步从 1,016ms 降至 931.8ms（距 NA 差距收窄至 163ms，归因于双倍请求灌入下游的排队代价）；(4) **`farm_ceiling_scan.sh` 天花板锁定**：实测 32 核主机极限产能为 ~48,000 VU / 1,482.8 req/s（约 1,500 QPS 封顶），确定算力成本为 21.6 核 / 千请求/秒（batch=1），给出横向扩容标准公式。同步更新 `docs/README.md`。
 
 ## [0.5.1] - 2026-09-28
