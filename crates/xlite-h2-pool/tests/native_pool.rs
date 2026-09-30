@@ -721,8 +721,73 @@ async fn stats_track_connections_in_flight_and_dials() {
             cap_updates: 0,
             stream_budget_per_conn: xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN,
             peer_cap: None,
+            waiting: 0,
+            waiting_max: 0,
+            queued_total: 0,
+            wait_millis: 0,
+            wait_millis_max: 0,
+            wait_buckets: [0; xlite_h2_pool::WAIT_BUCKETS],
         }
     );
+}
+
+/// The queue is where a saturated pool's latency goes, and it used to be invisible:
+/// `in_flight` says the pool is full, but nothing said how many requests were parked
+/// behind it or how long they waited.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saturated_pool_reports_its_queue_depth_and_wait() {
+    // One connection carrying exactly one stream: the second acquirer must park.
+    let (pool, _dials) = test_pool(1, 1, false);
+    let pool = Arc::new(pool);
+
+    let first = pool.acquire("upstream").await.unwrap();
+    let before = pool.stats("upstream");
+    assert_eq!(before.waiting, 0, "nothing parked yet");
+    assert_eq!(before.queued_total, 0);
+
+    let waiter = {
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move { pool.acquire("upstream").await.unwrap() })
+    };
+
+    // The acquirer has to be *parked* before the release, otherwise this test proves
+    // nothing about the counters.
+    for _ in 0..200 {
+        if pool.stats("upstream").waiting == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let parked = pool.stats("upstream");
+    assert_eq!(
+        parked.waiting, 1,
+        "a parked acquirer has to show up in the queue depth"
+    );
+    assert!(parked.waiting_max >= 1, "high-water mark has to see it");
+
+    // Hold it a measurable while so the wait timer has something to record.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(first);
+
+    let second = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("a released slot must wake the parked acquirer")
+        .unwrap();
+
+    let after = pool.stats("upstream");
+    assert_eq!(after.waiting, 0, "the queue has to drain");
+    assert_eq!(after.queued_total, 1, "exactly one acquire had to park");
+    assert_eq!(
+        after.wait_buckets.iter().sum::<u64>(),
+        1,
+        "the parked acquire lands in exactly one bucket"
+    );
+    assert!(
+        after.wait_millis_max >= 10,
+        "the wait was ~20ms, so the worst wait has to reflect it (got {})",
+        after.wait_millis_max
+    );
+    drop(second);
 }
 
 /// A deliberately raw h2 peer that changes its stream cap mid-connection.

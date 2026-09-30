@@ -176,6 +176,34 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
     }
 }
 
+/// Coarse percentile out of a wait-time histogram ([`PoolStats::wait_buckets`]).
+///
+/// Returns the **upper edge** of the bucket the percentile lands in, or `None` when
+/// no wait was ever recorded. Upper edge on purpose: the number is then an upper
+/// bound, so a queue's tail is never understated. Bucket `i` holds waits under
+/// `2^(i+1)` ms, so its edge is `2^(i+1)` — except the overflow bucket, which has no
+/// upper edge and therefore reports its own lower edge.
+fn wait_percentile(buckets: &[u64; xlite_h2_pool::WAIT_BUCKETS], pct: u64) -> Option<u64> {
+    let total: u64 = buckets.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let target = (total * pct).div_ceil(100);
+    let mut seen = 0u64;
+    for (i, n) in buckets.iter().enumerate() {
+        seen += n;
+        if seen >= target {
+            let edge = if i + 1 == xlite_h2_pool::WAIT_BUCKETS {
+                1u64 << i
+            } else {
+                1u64 << (i + 1)
+            };
+            return Some(edge);
+        }
+    }
+    None
+}
+
 /// Read-only snapshot of the upstream connection pool: per host, how many
 /// connections are open, how many streams are reserved, and the cumulative
 /// dial/cap bookkeeping.
@@ -209,6 +237,21 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "peer_cap": s.peer_cap,
                 "effective_streams_per_conn": per_conn,
                 "effective_ceiling": per_conn.map(|n| n.saturating_mul(max_conns)),
+                // Queue visibility: `in_flight` says the pool is full; these say how
+                // many requests are parked behind it and how long they wait. That is
+                // the half that used to be invisible — the queue itself has always
+                // been there (the pool waits at its ceiling).
+                "waiting": s.waiting,
+                "waiting_max": s.waiting_max,
+                "queued_total": s.queued_total,
+                "wait_ms_mean": if s.queued_total > 0 {
+                    s.wait_millis / s.queued_total
+                } else {
+                    0
+                },
+                "wait_ms_max": s.wait_millis_max,
+                "wait_ms_p50": wait_percentile(&s.wait_buckets, 50),
+                "wait_ms_p99": wait_percentile(&s.wait_buckets, 99),
                 "dials": s.dials,
                 "reclaimed": s.reclaimed,
                 "settings_fallbacks": s.settings_fallbacks,
@@ -707,5 +750,44 @@ async fn delete_api_key(
             ok(json!({ "id": id })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_percentile_reads_the_bucket_edges() {
+        let mut buckets = [0u64; xlite_h2_pool::WAIT_BUCKETS];
+        assert_eq!(wait_percentile(&buckets, 50), None, "no waits ⇒ no percentile");
+
+        // Bucket 3 holds waits under 2^4 = 16ms; bucket 10 holds waits under 2^11 = 2048ms.
+        buckets[3] = 99;
+        buckets[10] = 1;
+        assert_eq!(
+            wait_percentile(&buckets, 50),
+            Some(16),
+            "the median is in bucket 3 ⇒ its upper edge"
+        );
+        assert_eq!(
+            wait_percentile(&buckets, 99),
+            Some(16),
+            "99 of 100 ⇒ still bucket 3 (the percentile is inclusive)"
+        );
+        assert_eq!(
+            wait_percentile(&buckets, 100),
+            Some(2048),
+            "the last sample is in bucket 10 ⇒ its upper edge"
+        );
+
+        // The overflow bucket has no upper edge, so it reports its lower edge rather
+        // than a number that would overstate the wait.
+        let mut overflow = [0u64; xlite_h2_pool::WAIT_BUCKETS];
+        overflow[xlite_h2_pool::WAIT_BUCKETS - 1] = 1;
+        assert_eq!(
+            wait_percentile(&overflow, 100),
+            Some(1u64 << (xlite_h2_pool::WAIT_BUCKETS - 1))
+        );
     }
 }
