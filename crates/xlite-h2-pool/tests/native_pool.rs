@@ -86,11 +86,142 @@ fn test_pool_budgeted(
     (pool, dials)
 }
 
+/// Like [`test_pool`], but the first `fail_times` dials fail — the shape a
+/// transient upstream outage has (peer restarting, syn-backlog overflow,
+/// momentary fd pressure). Every later dial succeeds.
+fn test_pool_flaky(
+    max_conns: usize,
+    max_streams: u32,
+    fail_times: usize,
+) -> (Pool, Arc<AtomicUsize>) {
+    let dials = Arc::new(AtomicUsize::new(0));
+    let dial: Dial = Arc::new({
+        let dials = dials.clone();
+        move |_host: String| {
+            let dials = dials.clone();
+            Box::pin(async move {
+                let attempt = dials.fetch_add(1, Ordering::SeqCst);
+                if attempt < fail_times {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "transient dial failure",
+                    ));
+                }
+                let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+                spawn_h2_server(server_io, max_streams, false);
+                Ok(Box::new(client_io) as BoxIo)
+            })
+        }
+    });
+    let pool = Pool::new(Config {
+        max_conns_per_host: max_conns,
+        stream_budget_per_conn: xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN,
+        pinned_poll: false,
+        dial,
+        idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
+    });
+    (pool, dials)
+}
+
+/// Like [`test_pool_flaky`], but every dial fails with the given raw OS error —
+/// used to prove that a *persistent* dial failure is not retried. `24` is
+/// `EMFILE` on both Linux and macOS.
+fn test_pool_failing_raw(raw_os_error: i32) -> (Pool, Arc<AtomicUsize>) {
+    let dials = Arc::new(AtomicUsize::new(0));
+    let dial: Dial = Arc::new({
+        let dials = dials.clone();
+        move |_host: String| {
+            let dials = dials.clone();
+            Box::pin(async move {
+                dials.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::from_raw_os_error(raw_os_error))
+            })
+        }
+    });
+    let pool = Pool::new(Config {
+        max_conns_per_host: 4,
+        stream_budget_per_conn: xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN,
+        pinned_poll: false,
+        dial,
+        idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
+    });
+    (pool, dials)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_peer_max_concurrent_streams() {
     let (pool, _) = test_pool(4, 3, false);
     let lease = pool.acquire("upstream").await.unwrap();
     assert_eq!(lease.max_concurrent_streams(), 3);
+}
+
+/// A single transient dial failure must not reach the client as a 502: the
+/// bounded retry in `acquire` recovers it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transient_dial_failure_is_retried_instead_of_returned() {
+    let (pool, dials) = test_pool_flaky(4, 3, 1);
+    let lease = pool
+        .acquire("upstream")
+        .await
+        .expect("one transient dial failure is retried, not surfaced to the client as a 502");
+    assert_eq!(lease.max_concurrent_streams(), 3);
+    assert_eq!(
+        dials.load(Ordering::SeqCst),
+        2,
+        "the failing attempt plus exactly one retry"
+    );
+    drop(lease);
+}
+
+/// The retry is bounded. A persistent failure (fd exhaustion is one) has to give
+/// up and return the error instead of spinning on the failing dial — the spin is
+/// exactly what `DIAL_RETRY_BACKOFF` exists to prevent, because `EMFILE` and
+/// `ECONNREFUSED` both return without ever yielding.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persistent_dial_failure_gives_up_after_bounded_retries() {
+    let (pool, dials) = test_pool_flaky(4, 3, usize::MAX);
+    let started = std::time::Instant::now();
+    let err = match pool.acquire("upstream").await {
+        Ok(_) => panic!("a persistent dial failure has to come back as an error"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, xlite_h2_pool::PoolError::Dial(_)),
+        "the caller has to receive the dial error unchanged: {err:?}"
+    );
+    assert_eq!(
+        dials.load(Ordering::SeqCst),
+        3,
+        "one attempt plus DIAL_RETRIES (2), then stop"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(20),
+        "the backoff has to actually happen: it is what prevents the hot spin"
+    );
+    assert_eq!(pool.connection_count("upstream"), 0);
+}
+
+/// Resource exhaustion is persistent, not transient: `EMFILE` must not be
+/// retried. Retrying it would triple the dial volume in the issue #49 scenario
+/// (22.78M → ~68M) while still returning the same 502 to every client.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resource_exhaustion_dial_error_is_not_retried() {
+    const EMFILE: i32 = 24; // same value on Linux and macOS
+    let (pool, dials) = test_pool_failing_raw(EMFILE);
+    let err = match pool.acquire("upstream").await {
+        Ok(_) => panic!("a persistent dial failure has to come back as an error"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, xlite_h2_pool::PoolError::Dial(_)),
+        "the caller has to receive the dial error unchanged: {err:?}"
+    );
+    assert_eq!(
+        dials.load(Ordering::SeqCst),
+        1,
+        "fd exhaustion must not be retried: one attempt, then surface it"
+    );
+    assert_eq!(pool.connection_count("upstream"), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -17,7 +17,7 @@ use xlite::admin::{self, AppState};
 use xlite::auth::Sessions;
 use xlite::catalog::Catalog;
 use xlite::catalog::yaml::{self, ImportMode};
-use xlite::config::Config;
+use xlite::config::{Config, fd_budget_warning, nofile_soft_limit};
 use xlite::proxy;
 use xlite::store::Store;
 use xlite::upstream::Upstream;
@@ -130,6 +130,14 @@ async fn run_server() -> Result<()> {
     );
     if config.admin_password == "admin" {
         tracing::warn!("ADMIN_PASSWORD is the default; set it before any shared deployment");
+    }
+    // fd budget (issue #49): a low RLIMIT_NOFILE does not make the gateway fail
+    // loudly — it makes it forward 502s at a fraction of the throughput while the
+    // metrics stay green. Say so at startup instead of leaving it to be inferred.
+    if let Some(warning) =
+        nofile_soft_limit().and_then(|limit| fd_budget_warning(limit, config.max_conns_per_host))
+    {
+        tracing::warn!("{warning}");
     }
 
     let catalog = Catalog::connect(&config).await.context("open catalog")?;
