@@ -319,7 +319,7 @@ RESUME=1 ./run_full_88_xg.sh --combo B
 # 0.5.2 起更推荐：给了管理员密码就**优先读 /api/pool**（精确到每条 host 的连接数与在途
 # 流数，不需要 ss / docker；读不到会自动回落到上面那条 ss 路径，并在报告里注明）。
 # 密码走 `ADMIN_PASSWORD` 环境变量（脚本优先读它）—— 用 `--admin-password` 会把明文留在 argv
-ADMIN_PASSWORD="$ADMIN_PASSWORD" ./advanced/pool_sizing_probe.sh --gw-url http://127.0.0.1:8080 --seconds 120
+ADMIN_PASSWORD='<管理员密码>' ./advanced/pool_sizing_probe.sh --gw-url http://127.0.0.1:8080 --seconds 120
 #    只读：不改系统、不重启容器、不写配置。
 
 # ② 看「判定」那一行：
@@ -340,12 +340,14 @@ XLITE_UPSTREAM_MAX_CONNS_PER_HOST                 3        # 3 × 250 = 750，�
 
 **这不是"两全"**：`ttft p50` 预计 **−190~220ms**，代价是 `dur p90` **+~2s**、`qps` **−4~8%**。完整曲线、以及"125 看似折中但有 5% 余量陷阱"的实测见 [`advanced/CONFIG.md`](advanced/CONFIG.md) §5.1。
 
+⚠️ **上面的"预计"是实验室台架外推，客户环境未验证**（现场 A/B 尚未做过，测试环境已不可用）。报告里引用请写「预计」并注明这句。
+
 **探针的边界**（照抄进报告不会被问住）：
 
 | 项 | 说明 |
 | --- | --- |
 | 退出码 | `0` 判定有效 / `2` 负载太低不可信 / `3` 缺工具 / **`4` 每口采样不可用 ⇒ 拒绝给结论** |
-| 在哪跑 | 回落路径（`ss`）必须在**网关机**上：它按"本机到 `8081-8104` 的出站连接"统计；网关与农场同机会把别的进程算进来。**给了 `--admin-password` 走 `/api/pool` 时没有这个限制** |
+| 在哪跑 | 回落路径（`ss`）必须在**网关机**上：它按"本机到 `8081-8104` 的出站连接"统计；网关与农场同机会把别的进程算进来。**用 `ADMIN_PASSWORD` 环境变量走 `/api/pool` 时没有这个限制** |
 | 「在途」口径 | `/api/pool` 模式下是**精确读数**；回落模式下默认用**入站连接数**（上界 —— VU 在两次请求之间也占着连接），给 `--k6-report <k6日志>` 会用 `iterations/s × dur p50` 校准，`--inflight N` 可直接指定 |
 | 自检 | `./advanced/pool_sizing_probe.sh --self-test` |
 
