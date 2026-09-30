@@ -258,6 +258,44 @@ RESUME=1 ./run_full_88_xg.sh --combo B
 - 每轮会**重下发农场配置并打一发冒烟**（`<组>_smoke.log` / `.body`）。冒烟失败只告警、不中止。
 - `--combo` 一次只收一个组；只想抽查几档用 `--levels 1000,5000,10000`。**它是阶梯的过滤器**：值必须正好落在当前阶梯上，否则 driver 直接 `exit 2` 并**打印当前阶梯**供复制（档位值很容易从**旧结果的文件名**加 `B_11000.log` 抄来，而旧轮次的阶梯与当前未必一样——默认阶梯是 1000 起 +1000、且 VU ≥ 10000 改 5000 步进，所以 11000 / 31000 / 44000 都不在上面）。过滤后的实际集合会打进 `progress.log` 与 `env.txt`（`EFFECTIVE_COMBOS` / `EFFECTIVE_LEVELS_PER_GROUP`）。
 
+### 6.1 开跑前先量一次池尺寸（`STREAM_CAP` / `MAX_CONNS_PER_HOST`）
+
+**为什么必须先量**：`XLITE_UPSTREAM_STREAM_CAP` **只在真的绑定**时才有代价。实验室两轮实测（24 口农场 / 16000 VU / `MAX_CONNS=25`，每档都过「`POOL_ERR=0` + 单流预检 200」闸门）：CAP=30 的 `ttft p50` 比"不设"高 **+223~232ms**，换来的是尾部（`dur p90` −2s）与吞吐（+8%）；**没绑定时改它一个数都不会变**。所以"该设几"要在**这台机上**量出来，不能照搬实验室值。
+
+**怎么做**（`.24` / `.26` **各一份**，取更紧的那次）：
+
+```sh
+# ① 用**现状配置**先跑一轮目标档（例如 B/45000）；跑到量之后，在**同一台网关机上**执行：
+./advanced/pool_sizing_probe.sh --container xlite-gateway --gw-port 8080 --seconds 120
+#    只读：不改系统、不重启容器、不写配置。
+
+# ② 看「判定」那一行：
+#      binding / partial ⇒ CAP 不设（跟随对端）+ MAX_CONNS 取探针给的值
+#      not-binding       ⇒ **别动 CAP**：首字问题不在这条轴上，回来查别的原因
+
+# ③ 改完 → 空跑一轮 warmup → 再跑同一档；报告里贴探针最后那段「口径变更」说明。
+#    ⚠️ 两台必须一致（HAProxy 是 dual，配置不同 = 两条延迟曲线被合在一起）；
+#    ⚠️ `docker restart` 不改 env，必须按原命令 / compose 重建容器。
+```
+
+**今天的起点**：`.24` / `.26` 是 `STREAM_CAP=30` + `MAX_CONNS=25`（= 每通道 **750** 流的上界）。若探针判 `binding` / `partial`，标准换法是：
+
+```
+XLITE_UPSTREAM_STREAM_CAP                         不设（跟随对端，常为 250）
+XLITE_UPSTREAM_MAX_CONNS_PER_HOST                 3        # 3 × 250 = 750，上界与今天完全一致
+```
+
+**这不是"两全"**：`ttft p50` 预计 **−190~220ms**，代价是 `dur p90` **+~2s**、`qps` **−4~8%**。完整曲线、以及"125 看似折中但有 5% 余量陷阱"的实测见 [`advanced/CONFIG.md`](advanced/CONFIG.md) §5.1。
+
+**探针的边界**（照抄进报告不会被问住）：
+
+| 项 | 说明 |
+| --- | --- |
+| 退出码 | `0` 判定有效 / `2` 负载太低不可信 / `3` 缺工具 / **`4` 每口采样不可用 ⇒ 拒绝给结论** |
+| 在哪跑 | 必须在**网关机**上：它按"本机到 `8081-8104` 的出站连接"统计；网关与农场同机会把别的进程算进来 |
+| 「在途」口径 | 默认用**入站连接数**（上界 —— VU 在两次请求之间也占着连接）；给 `--k6-report <k6日志>` 会用 `iterations/s × dur p50` 校准；`--inflight N` 可直接指定 |
+| 自检 | `./advanced/pool_sizing_probe.sh --self-test` |
+
 ## 7. 核对清单
 
 | # | 机器 | 做什么 | 怎么验证 |
@@ -270,3 +308,4 @@ RESUME=1 ./run_full_88_xg.sh --combo B
 | 6 | 29 | 前置检查 | `TARGET=… TOKEN=… ./run_full_88_xg.sh --preflight-only` → `RC=0` |
 | 7 | 29 | 开跑（分轮跑见 §6） | `./run_full_88_xg.sh`；结果目录里看 `progress.log`（逐档一行）与 `env.txt`（口径凭据） |
 | 8 | 22 / 24 / 26 / 29 | 链路上的 fd / 表项上限一次查完（`advanced/CONFIG.md` §3.1） | 逐项对照期望值；**只有低于期望的才改** |
+| 9 | 24 / 26 | **先量再部署**：定 `STREAM_CAP` / `MAX_CONNS`（§6.1） | `./advanced/pool_sizing_probe.sh` 退出码 `0` 且「判定」行有值；两台配置一致 |
