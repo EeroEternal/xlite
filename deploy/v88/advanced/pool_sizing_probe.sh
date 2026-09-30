@@ -57,6 +57,14 @@ INFLIGHT_OVERRIDE=""
 K6_REPORT=""
 OUT_TSV=""
 SELF_TEST=0
+# 这三个必须在**任何分支之前**给默认值：(1) `set -u` 下只在某分支赋值的变量会在另一
+# 分支 unbound 崩掉（实测两次：ceiling_min/peer_min（评审修的）、today_cap/today_conns）；
+# (2) 放在聚合之后会把 API 分支刚读到的值抹回 0（同一处踩过第二次）⇒ 只在这里给。
+today_cap=0
+today_conns=0
+# 配置是否**真的读到了**（`/api/pool` 或容器 env）。读不到时不能对外说 "CAP 未设" ——
+# 那是把"看不见"说成"没有"。
+cfg_known=0
 GW_URL=""
 ADMIN_PASSWORD_CLI="${ADMIN_PASSWORD:-}"
 # `UNIT` 是连接数的单位（API 模式是 host，回落模式是口）。**必须在自测之前就有默认值**：
@@ -138,6 +146,18 @@ binding_verdict() {
 recommend() {
     local verdict="$1" today_cap="$2" today_conns="$3" peer="$4" peak_per_port="$5" hr="$6"
     local demand ceiling_from_today
+
+    # 配置未知时**不给出具体建议**：	oday_cap/today_conns 是默认值 0，落到下面的通用路径会算出
+    # “保住今天的上界 0×0”这种假数字，而判定明明说的是“配置未知” —— 把看不见说成有，
+    # 现场还会照抄那段部署块。与 `unusable` 的处理对齐。
+    if [ "${verdict}" = "unknown-config" ]; then
+        RECOMMEND_CAP="（配置未知）"
+        RECOMMEND_CAP_ENV="（配置未知）"
+        RECOMMEND_CONNS="（配置未知）"
+        RECOMMEND_CONNS_ENV="（配置未知）"
+        RECOMMEND_REASON="当前 CAP/CONNS 都没读到（既无 /api/pool 也无容器 env）⇒ 不猜，先恢复配置可见性再采样"
+        return
+    fi
 
     if [ "${verdict}" = "not-binding" ]; then
         RECOMMEND_CAP="保持现状（$( [ "${today_cap}" = 0 ] && echo '未设' || echo "${today_cap}" )）"
@@ -397,6 +417,7 @@ if [ "${api_ok}" = 1 ]; then
     if [ "${api_cap}" = "null" ]; then today_cap=0; else today_cap="${api_cap:-0}"; fi
     today_conns="${api_maxconns:-0}"
     api_cfg=1
+    cfg_known=1
 else
     out_peak=$(awk -F'\t' '{if($2>m)m=$2} END{print m+0}' "${TSV}")
     out_med=$(awk -F'\t' '{print $2}' "${TSV}" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
@@ -411,19 +432,19 @@ else
 fi
 
 # ---- 当前配置（读容器 env；读不到就降级）----
-# ⚠️ 只在**回落路径**里初始化：API 模式下 today_cap/today_conns 已由 /api/pool 填好，
-# 这两行无条件执行会把它们覆盖回 0（实测踩过：配置显示"未设"、判定退化成 peer-limited）。
+# 默认值在文件顶部的默认值区给（那里在 API 与 docker 两条分支**之前**）——
+# 在这里再初始化一次就会抹掉 API 分支刚读到的 today_cap/today_conns（实测踩过）。
 startup=""
 gw_limits=""
 if [ "${api_cfg}" = 1 ]; then
     :  # 配置来自 /api/pool（today_cap/today_conns 已填好，**不要**在这里重置）
 elif command -v docker >/dev/null 2>&1 && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
-    today_cap=0; today_conns=0
     envs=$(docker inspect "${CONTAINER}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null)
     cap_raw=$(printf '%s\n' "${envs}" | sed -n 's/^XLITE_UPSTREAM_STREAM_CAP=//p')
     conns_raw=$(printf '%s\n' "${envs}" | sed -n 's/^XLITE_UPSTREAM_MAX_CONNS_PER_HOST=//p')
     case "${cap_raw}" in ''|*[!0-9]*) today_cap=0 ;; *) today_cap="${cap_raw}" ;; esac
     case "${conns_raw}" in ''|*[!0-9]*) today_conns=0 ;; *) today_conns="${conns_raw}" ;; esac
+    cfg_known=1
     startup=$(docker logs "${CONTAINER}" 2>&1 | grep -m1 'starting' || true)
     gw_limits=$(docker exec "${CONTAINER}" sh -c \
         "grep -i 'open files' /proc/1/limits; printf 'fds_used='; ls /proc/1/fd 2>/dev/null | wc -l" 2>/dev/null || true)
@@ -464,7 +485,12 @@ if [ "${per_port_median:-0}" -le 0 ] || [ "${n_ports:-0}" -lt "${min_ports}" ]; 
     data_ok=0
 fi
 if [ "${data_ok}" = "1" ]; then
-    binding_verdict "${achieved_x10}" "${today_cap}"
+    if [ "${cfg_known}" = 0 ]; then
+        # 连配置都没读到（既没有 /api/pool 也没有容器 env）⇒ 不要猜 CAP 设没设。
+        VERDICT="unknown-config"
+    else
+        binding_verdict "${achieved_x10}" "${today_cap}"
+    fi
     peak_for_sizing=$(( per_port_max > per_port_inflight ? per_port_max : per_port_inflight ))
     peer_for_sizing="${PEER_CAP}"
     if [ -n "${peer_min}" ]; then peer_for_sizing="${peer_min}"; fi
@@ -530,6 +556,7 @@ case "${VERDICT}" in
     partial)      verdict_cn="**部分绑定** —— 改 CAP 会有变化，但幅度小于实验室的满绑定场景" ;;
     not-binding)  verdict_cn="**没绑定** —— 改 CAP 一个数都不会变，去别处找首字" ;;
     peer-limited) verdict_cn="CAP 未设，池子跟随对端通告（这本身是推荐状态）" ;;
+    unknown-config) verdict_cn="**配置未知** —— 既没读到「/api/pool」，也没读到容器 env（需要 docker 或 --admin-password）" ;;
     unusable)     verdict_cn="**拒绝判定** —— 每口连接数不可用，请重采（见下）" ;;
 esac
 
@@ -589,6 +616,7 @@ if [ "${data_ok}" != "1" ]; then
     exit 4
 fi
 
+if [ "${cfg_known}" = 1 ]; then
 cat <<EOF
 
 # ============ 复制到部署（⚠️ .24 与 .26 必须一致）============
@@ -602,6 +630,15 @@ cat <<EOF
 XLITE_UPSTREAM_MAX_CONNS_PER_HOST 由 ${today_conns} 调整为 ${RECOMMEND_CONNS_ENV}；
 依据为只读探针 advanced/pool_sizing_probe.sh 的现场采样（$(basename "${TSV}")），未改动系统配置。
 EOF
+else
+cat <<EOF
+
+# ============ 无从给出部署建议（配置未知）============
+# 本轮既没读到 /api/pool，也没读到容器 env ⇒ 不知道现在的 CAP/CONNS 是多少，
+# 也就无法给出「保住现有上界」的调整建议。请改用 --admin-password（走 /api/pool），
+# 或在有 docker、能看到容器 ${CONTAINER} 的机器上重跑。
+EOF
+fi
 
 # 负载是否"低到不可信"：ss 路径看入站连接（≈ 在途 VU），API 路径看**队列** ——
 # API 模式下 in_med 是"池内在途"，它被上界钉住，饱和的小上界（如 7/口）看起来就像
