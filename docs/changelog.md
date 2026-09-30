@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-30
+
 - **清掉 `crates/xlite-h2-pool` 注释里 4 处指向不存在文档的幽灵引用，并修正一处过时的 env 旋钮名（纯注释，零行为变化）**。`lib.rs` / `pool.rs` / `pump.rs` / `tests/pump_multiplex_bench.rs` 的 rustdoc 分别引用了 `docs/dev/loadtest-ttft-queue-analysis-2026-09.md`、`docs/dev/loadtest-linkbound-2026-09.md`、`docs/dev/h2-pinned-poll-2026-09.md` —— 三个文件在 `git log --all` 全历史里从未存在（与清理 `docs/rules/documentation.md` 同类，均属 `AGENTS.md` 规则 2 禁止的形态）。修法**不伪造替代文档**：实测数字（~30–50% CPU / p90 ×4–5 / ~17% CPU）一字未改，linkbound 那处改指**仓内真实存在**的 `docs/manual/lab-loadtest.md`「上游流闸门」一节，pinned_poll 那处改指 `pump` 模块；同时 `pool.rs` 把改名前旧名 `XROUTER_UPSTREAM_STREAM_CAP` 改为实际读取的 `XLITE_UPSTREAM_STREAM_CAP`（`src/config.rs`）。**验证**：全仓 `.rs` 引用的 `docs/` 路径逐一存在性校验 MISS 清零；两 crate `cargo clippy` 无告警；`ci_local.sh --tier t1 --all` 绿。**边界**：三个缺失的实验文档本身（linkbound / pinned-poll / ttft-queue 三轮测量）仍待补写，本条只记录引用已不再指向空。
 
 - **修掉 `scripts/check_docs_lifecycle.sh` 的 `artifact` 检查盲区：`docs/dev/data/` 被整目录放行后，其**内部**新增文件对门禁不可见**。起因：上一个修复（把 `data` 加进 `keep` 白名单）是按 basename 匹配、且循环只扫 `docs/dev/*`（非递归），于是它在删掉误报的同时，把整个 `docs/dev/data/**` 变成了盲区 —— 往 `data/` 里丢一个 72K 的 JSON 或任何构建产物都不会报 `artifact:`，而门禁的不变式恰恰是「dev 下只应有 Markdown 草稿」。改动：`artifact` 检查改为**递归**（`find docs/dev -mindepth 1 -type f`；只判文件 —— 空目录本就无法提交），白名单改成**相对 `docs/dev/` 的路径**且**逐个文件列出**（`data` 不再作为目录被豁免，改为明确列出 `data/loadtest-metrics-2026-09-29.json`）；因此目录不再是整体豁免，只放行这一个归档文件。副作用（有意）：子目录里的 `.md` 现在会被当作草稿审（仍走 landed/promote 两条检查），而不再因“子目录”本身被报 artifact。**验证**：干净树 `exit 0`；**负向用例（复现上一个修复留下的盲区）** `docs/dev/data/nested-probe.bin` ⇒ 修复前 `exit 0`、修复后 **`exit 1`**；顶层 `docs/dev/stray-probe.json` 仍 `exit 1`；`--links-only` 仍 `exit 0`；`bash -n` 通过。
