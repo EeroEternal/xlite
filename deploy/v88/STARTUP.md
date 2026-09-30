@@ -315,6 +315,10 @@ RESUME=1 ./run_full_88_xg.sh --combo B
 ```sh
 # ① 用**现状配置**先跑一轮目标档（例如 B/45000）；跑到量之后，在**同一台网关机上**执行：
 ./advanced/pool_sizing_probe.sh --container xlite-gateway --gw-port 8080 --seconds 120
+
+# 0.5.2 起更推荐：给了管理员密码就**优先读 /api/pool**（精确到每条 host 的连接数与在途
+# 流数，不需要 ss / docker；读不到会自动回落到上面那条 ss 路径，并在报告里注明）
+./advanced/pool_sizing_probe.sh --gw-url http://127.0.0.1:8080 --admin-password "$ADMIN_PASSWORD" --seconds 120
 #    只读：不改系统、不重启容器、不写配置。
 
 # ② 看「判定」那一行：
@@ -340,8 +344,8 @@ XLITE_UPSTREAM_MAX_CONNS_PER_HOST                 3        # 3 × 250 = 750，�
 | 项 | 说明 |
 | --- | --- |
 | 退出码 | `0` 判定有效 / `2` 负载太低不可信 / `3` 缺工具 / **`4` 每口采样不可用 ⇒ 拒绝给结论** |
-| 在哪跑 | 必须在**网关机**上：它按"本机到 `8081-8104` 的出站连接"统计；网关与农场同机会把别的进程算进来 |
-| 「在途」口径 | 默认用**入站连接数**（上界 —— VU 在两次请求之间也占着连接）；给 `--k6-report <k6日志>` 会用 `iterations/s × dur p50` 校准；`--inflight N` 可直接指定 |
+| 在哪跑 | 回落路径（`ss`）必须在**网关机**上：它按"本机到 `8081-8104` 的出站连接"统计；网关与农场同机会把别的进程算进来。**给了 `--admin-password` 走 `/api/pool` 时没有这个限制** |
+| 「在途」口径 | `/api/pool` 模式下是**精确读数**；回落模式下默认用**入站连接数**（上界 —— VU 在两次请求之间也占着连接），给 `--k6-report <k6日志>` 会用 `iterations/s × dur p50` 校准，`--inflight N` 可直接指定 |
 | 自检 | `./advanced/pool_sizing_probe.sh --self-test` |
 
 ## 7. 核对清单

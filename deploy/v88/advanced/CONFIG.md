@@ -447,6 +447,8 @@ docker run --rm --network host \
 > [`pool_sizing_probe.sh`](pool_sizing_probe.sh)（压测**进行中**在网关机上跑）量出
 > 「每口连接数 / 每口在途流数」，它会直接给出该不该改、以及 `MAX_CONNS` 该设几，
 > 并附一段可贴进报告的「口径变更」说明。
+> **0.5.2 起推荐加 `--admin-password`**：探针会优先读只读端点 `GET /api/pool`（每条 host
+> 的连接数与在途流数是**精确值**，不需要 `ss`/`docker`），读不到再自动回落 `ss`。
 
 ```sh
 docker logs <gw> 2>&1 | head -3 | grep -o 'stream_cap=[^ ]*'         # 期望 "peer"（= 未设）
