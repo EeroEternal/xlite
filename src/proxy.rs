@@ -164,6 +164,20 @@ pub async fn chat_completions(
         .into_response()
 }
 
+/// Render an upstream error together with its full cause chain.
+///
+/// The 502 body carries `try_channel`'s `Err(String)`, and `anyhow::Error`'s
+/// `Display` prints **only the outermost context** — so `map_err(|e|
+/// e.to_string())` threw the real reason away: `failed to open transport to
+/// upstream: …` (fd exhaustion), `HTTP/2 handshake failed: …` and
+/// `h2 send_request: …` all collapsed into the one label `h2 pool acquire`,
+/// indistinguishable from each other both in the client body and in the
+/// load-test log. Report `{:#}` instead — anyhow's chain format, layers joined
+/// by `: `.
+fn err_chain(e: &anyhow::Error) -> String {
+    format!("{e:#}")
+}
+
 async fn try_channel(
     state: &AppState,
     channel: &Channel,
@@ -186,13 +200,12 @@ async fn try_channel(
             body,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| err_chain(&e))?;
     if should_failover(upstream.status, false) {
+        // Read the status before draining: `drain_error_body` consumes `upstream`.
+        let status = upstream.status;
         let _ = drain_error_body(upstream).await;
-        return Err(format!(
-            "upstream {} returned {}",
-            channel.base_url, "retryable status"
-        ));
+        return Err(format!("upstream {} returned {}", channel.base_url, status));
     }
     Ok(forward_response(upstream, started).await)
 }
@@ -292,6 +305,25 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             "/health must carry the build version so a deployed binary can be \
              identified with one unauthenticated curl"
+        );
+    }
+
+    /// Guard against regressing to `to_string()` (issue #49): the cause has to
+    /// survive, otherwise the 502 body carries one label for four different
+    /// failures — fd exhaustion, h2 handshake failure, pool closed, stream error.
+    #[test]
+    fn err_chain_keeps_the_underlying_cause() {
+        let e = anyhow::anyhow!("failed to open transport to upstream: Too many open files")
+            .context("h2 pool acquire");
+        let rendered = err_chain(&e);
+        assert!(
+            rendered.contains("h2 pool acquire"),
+            "the outermost context has to stay: {rendered}"
+        );
+        assert!(
+            rendered.contains("Too many open files"),
+            "the cause chain has to stay, or the 502 body turns four different \
+             failures into one label: {rendered}"
         );
     }
 
