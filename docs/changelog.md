@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **修 `deploy/**` 里漂了很久的镜像 tag / 版本期望（`xlite:0.4.0`、`xlite:0.5.0`），并把它变成 meta 面每次都会拦的机械检查**。起因是 `STARTUP.md` §3 的网关启动命令还写着 `xlite:0.5.0` 而当前发布是 `0.5.2`；顺着扫发现 `deploy/` 下一串同类 pin（`README.md` 7 处、`docker-compose.yml` 2 处、`advanced/README.md` 与 `advanced/CONFIG.md` 各 2 处，最老到 **`0.4.0`**），而 `check_release_sync.sh` **只管 Cargo.toml ↔ changelog、没有任何检查覆盖文档里的 tag** ⇒ 它们只会一直漂。改动：(1) `deploy/**` 全部对齐到 `0.5.2`（依据是仓库自己的规则 `docs/manual/lab-loadtest.md`「镜像应打当前 `Cargo.toml` 版本」）；`CONFIG.md` 里 `/health` 的期望从硬编码 `"version":"0.4.0"` 改为 `"<本轮 tag，如 0.5.2>"`（本来就不该硬编码）。(2) **`check_docs_lifecycle.sh` 新增第 ⑤ 类检查**：`deploy/**` 中的 `xlite:X.Y.Z` 与 `"version":"X.Y.Z"` 必须等于 `Cargo.toml` 版本，否则报 finding —— 该脚本在 t0/t1/t2 的 meta 面**每层都跑** ⇒ 再漂立刻红（**只查 `deploy/`；`docs/dev/**` 是历史记录，不动**）。**验证**：修复前会列出 `deploy/v88/STARTUP.md:69: xlite:0.5.0`；修复后退出码 0；**负向用例**（临时改回 `0.5.0`）复现 finding 且退出码 1；`bash -n` 通过。**边界**：`docs/dev/**` 与 `docs/manual/v88-rig.md` 的历史版本引用**有意保留**（是当时那轮的记录）；`docs/dev/rfc-adaptive-h2-pool-architecture.md` §1.1 的「现状实现（`xlite-h2-pool v0.5.1`）」属于**现状陈述**、会随发版过期，单列出来交人决定。
+
 - **`git-stash-safe` skill 补一条硬约束：`git stash pop` / `apply` 恢复的是**整个 index**（含 `-u` 捞进来的未跟踪路径）**，因此「pop 之后必须 `git diff --cached --stat` 对账」成为提交前的强制动作。来源是一次真实事故：`#50` 里被夹带的 `admin/node_modules` 软链接 —— `git stash -q -u` 把它存进 stash，`git stash pop` 又把它**恢复成已暂存**，而 `git commit` 提交的是**整个 index** ⇒ 它就这样进了 PR（`#58` 撤掉并改了 `.gitignore`）。改动：硬约束新增第 5 条（含事故复盘）、Procedure 新增第 6 步（`git restore --staged <path>` 清掉非预期暂存）、Verification 新增一条（每次提交前对账，pop 之后**必做**）。**验证**：本次提交自己就是第一个用例（`git diff --cached --stat` 逐条核对后再 commit）；纯技能文档改动，无代码影响。
 
 ## [0.5.2] - 2026-09-30
