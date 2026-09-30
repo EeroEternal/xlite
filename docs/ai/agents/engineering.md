@@ -11,6 +11,8 @@
 2. **批量重格式化**：`cargo fmt` / `prettier` / `black` 的结果必须单独 commit，不得与逻辑改动混在同一 commit。
 3. **`#[allow(...)]` 压制**：用 `#[allow(clippy::xxx)]` 让警告消失，但没说明原因。
 4. **跨模块 refactor**：修复 A 模块的 bug 时，不得同时重命名 B 模块的内部结构。
+5. **目录级暂存**：`git add <目录>` / `git add -A` / `git add .` 会把该目录下**未跟踪的无关文件**一并暂存（别人留的临时产物、`stash -u` 恢复出来的路径）。真实事故：`git commit` 提交整个 index，把未跟踪的 `admin/node_modules` 软链接带进 #50（#58 才撤掉）。**只用显式路径暂存**，提交前用 `git diff --cached --stat` 逐条对账（skill
+   [`git-stash-safe`](../../../.agents/skills/git-stash-safe/SKILL.md)）。
 
 违规 commit 一律要求 `git reset --mixed HEAD~1` 重新拆分。
 
@@ -60,6 +62,7 @@
 2. **`re.sub` 失败不抛异常**：不匹配时返回原串。脚本跑完必须对比 diff 或重跑 grep 验证，不得直接 `git commit`。
 3. **多行 regex 特别危险**：空白、引号、拼写的任何偏差都会静默失败。优先用 `StrReplace` 工具而非自写脚本。
 4. **内嵌字符串转义**：Python `'...'` 里含 `"don't"` 这类内容时逃逸容易残留，脚本改完必须人肉 review 生成的代码段。
+5. **shell 变量紧贴标识符字符要加花括号**：`$var` 后紧跟 `[A-Za-z0-9_]` 会被并入变量名（`$rcX` 读的是变量 `rcX`，不是 `rc` 拼 `X`）⇒ 一律写 `${var}`。非 ASCII 字符（中文、全角括号）是合法的变量名终止符、**不会**并入（bash 5.3.15 / UTF-8，双引号、裸词、heredoc、函数体内均已实测）；脚本输出乱码时别默认归因于此，先复现。
 
 ---
 
