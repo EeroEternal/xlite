@@ -6,7 +6,9 @@
 /vendor/
 /deploy/Dockerfile.lab
 .redis-sentinel-lab/
-**/node_modules/
+# matches directories *and* symlinks/files (a trailing slash would miss a symlinked
+# node_modules, which is how one got committed by accident once)
+**/node_modules
 .venv/
 .DS_Store
 .env
