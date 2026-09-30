@@ -276,9 +276,11 @@ docker compose exec xlite sh -c "grep -i 'open files' /proc/1/limits"   # 期望
 sysctl -n net.core.somaxconn                                          # 期望 65535
 ```
 
-### 3.1 一次查完链路上的六处上限
+### 3.1 一次查完链路上的七处上限
 
 `maxconn` / `--ulimit` / `sysctl` 分布在**四台机**上，任何一层小一个量级都会造出**同一种签名**：RST 暴涨、`dial: i/o timeout`，或者吞吐静默掉一截而 `fail` 与延迟指标全都正常。
+
+**网关容器这一层（②）的签名最阴**：2026-09-30 实验室实测（issue #49）——`nofile` 被封在 1024 时它**不报错**，而是**成片 502 且吞吐掉到约 1/10**：池内 2278 万次 `PoolError::Dial` 失败、99.49% 的请求 502、qps 约 155；把 fd 补齐后**同一档** `fail=0.00%`、qps 1,484。而这段时间 `fail` / `vus_max` / `iteration_duration` **全部正常**。⇒「`fail` 是 0，所以环境没问题」这个推理**不成立**，必须按下面这张表逐环核。
 
 | # | 在哪台 | 上限 | 期望 |
 | --- | --- | --- | --- |
@@ -288,7 +290,8 @@ sysctl -n net.core.somaxconn                                          # 期望 6
 | 4 | 22 / 29 | `nf_conntrack_max`（表满即丢包 → RST / 超时） | ≥ 2~4× 峰值连接数 |
 | 5 | 22 | `somaxconn` / `tcp_max_syn_backlog`（SYN / accept 队列） | 65535 |
 | 6 | 29 | `ip_local_port_range` / `tcp_tw_reuse`（k6 的**出站**端口） | `1024 65535` / `1` |
-| + | 全部 | `systemctl show docker -p LimitNOFILE` —— 它封顶**任何**容器能拿到的上限，所以上面 2 / 3 两项不可能超过它 | 1048576 |
+| 7 | 29 | **24 口 mock 容器 `nofile`** —— 每口要持有「在途请求数 ÷ 口数」条**入站**连接；最坏情况按「全部 VU 同时占连接」估：现场 55000 ÷ 24 ≈ **2,292** | 1048576（**1024 / 4096 这类默认值会先把农场压垮**，且它的症状和 ④ 的表满很难区分） |
+| + | 全部 | `systemctl show docker -p LimitNOFILE` —— 它封顶**任何**容器能拿到的上限，所以上面 2 / 3 / 7 三行不可能超过它 | 1048576 |
 
 ```sh
 hc=$(pgrep -f haproxy | head -1)                                    # 22
@@ -299,6 +302,16 @@ grep -i 'open files' /proc/$k6p/limits                              # ③
 sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max   # ④
 sysctl net.core.somaxconn net.ipv4.tcp_max_syn_backlog              # ⑤
 sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse           # ⑥
+for c in $(docker ps --filter name=mock --format '{{.Names}}'); do   # 29：24 口农场
+  echo -n "$c "; docker exec "$c" sh -c "grep -i 'open files' /proc/1/limits"
+done                                                                 # ⑦
+```
+
+`docker inspect` 看的是容器**被要求**的上限（≠ 生效值，后者以 `/proc/1/limits` 为准）：
+
+```sh
+docker inspect xlite-gw --format '{{.HostConfig.Ulimits}}'           # ②：要求了什么
+docker inspect xlite-gw --format '{{.State.Pid}}'                    #    再 grep 它的 /proc/<pid>/limits 才是生效值
 ```
 
 **先测再改**：已经是指望值的就别动它 —— 改不必要的变量只会让下一轮更难归因。只有看到 1024 / 4096 / 65536 这种量级才改。
