@@ -31,7 +31,8 @@
 | `../STARTUP.md` | 启动手册：mock 农场 / Redis / 网关 / HAProxy / 跑 |
 | `../run_full_88_xg.sh` | 客户 `run_full_88.sh` 的 xg 版（主驱动器） |
 | `../k6.js` | 喂负载脚本（现场挂给 k6 的 `/k6/k6.js`）；改它要**重新打封条** |
-| `../lib/lib_v88.sh` / `../lib/lib_rig.sh` | 共用件：lint / 封条自检 / 农场控制 / 产能预算 / 台架互斥锁；改 `lib_rig.sh` 要**重新打封条** |
+| `../lib/lib_v88.sh` / `../lib/lib_rig.sh` | 共用件：lint / 封条自检 / 农场控制 / 产能预算 / 台架互斥锁；改 `lib_rig.sh` 要**重新打封条**（`lib_v88.sh` 不在封条里） |
+| `../lib/selftest_farm_hosts.sh` | 自证 `MOCKS` 的 5 种写法（本机/跨机 × 区间/列表）展开正确（11 项断言）；**手动门禁**，preflight 不跑它 |
 | `../seal_bundle.sh` / `../BUNDLE_SHA256` | 自封条工具与封条本身（preflight 每次校验） |
 
 **本目录 `advanced/`（按需读）**

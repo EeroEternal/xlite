@@ -97,7 +97,7 @@ v88_check_bundle
 
 FARM_HOSTS=$(v88_farm_hosts "$MOCKS")
 FARM_N=$(printf '%s\n' "$FARM_HOSTS" | grep -c .)
-[ "$FARM_N" -gt 0 ] || v88_die "MOCKS=$MOCKS 展开后一个口都没有"
+[ "$FARM_N" -gt 0 ] || v88_die "MOCKS=$MOCKS 展开后一个口都没有（写法：8081-8104 | 4101,4102 | 10.0.0.2:8081-8104 | 10.0.0.2:4101,10.0.0.3:4101）"
 
 mkdir -p "$OUT"
 LEDGER="$OUT/env.txt"
