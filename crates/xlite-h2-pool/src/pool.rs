@@ -184,6 +184,21 @@ pub(crate) struct HostState {
     /// mid-connection. Shared with every [`ConnEntry`] (the connection's driver
     /// task, not the host, is the one that samples it).
     cap_updates: Arc<AtomicU64>,
+    /// Acquirers parked in the slow path right now — **the queue depth**.
+    ///
+    /// `in_flight` says the pool is full; this says how many requests are paying
+    /// for it, which is the part that used to be invisible.
+    waiting: AtomicUsize,
+    /// High-water mark of [`HostState::waiting`].
+    waiting_max: AtomicUsize,
+    /// Acquires that had to park at least once.
+    queued: AtomicU64,
+    /// Total milliseconds parked across those acquires (for the mean).
+    wait_millis: AtomicU64,
+    /// Exact worst wait seen (the histogram's overflow bucket has no resolution).
+    wait_millis_max: AtomicU64,
+    /// Coarse histogram of per-acquire wait times, see [`WAIT_BUCKETS`].
+    wait_buckets: [AtomicU64; WAIT_BUCKETS],
 }
 
 impl HostState {
@@ -197,6 +212,12 @@ impl HostState {
             reaper_started: AtomicBool::new(false),
             dials: AtomicU64::new(0),
             ceiling_logged: AtomicBool::new(false),
+            waiting: AtomicUsize::new(0),
+            waiting_max: AtomicUsize::new(0),
+            queued: AtomicU64::new(0),
+            wait_millis: AtomicU64::new(0),
+            wait_millis_max: AtomicU64::new(0),
+            wait_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             reclaimed: AtomicU64::new(0),
             settings_fallbacks: AtomicU64::new(0),
             cap_updates: Arc::new(AtomicU64::new(0)),
@@ -255,6 +276,18 @@ pub struct PoolStats {
     /// the peer never advertised one: then it is the shared fallback (see
     /// [`PoolStats::settings_fallbacks`] for how often that happened on this host).
     pub peer_cap: Option<usize>,
+    /// Acquirers parked in the slow path right now — the queue depth.
+    pub waiting: usize,
+    /// High-water mark of [`PoolStats::waiting`].
+    pub waiting_max: usize,
+    /// Acquires that had to park at least once (the rest were served immediately).
+    pub queued_total: u64,
+    /// Mean wait across those acquires, in milliseconds (`wait_millis / queued_total`).
+    pub wait_millis: u64,
+    /// Exact worst wait seen, in milliseconds.
+    pub wait_millis_max: u64,
+    /// Wait-time histogram, see [`WAIT_BUCKETS`] (bucket `i` = `[2^i, 2^(i+1))` ms).
+    pub wait_buckets: [u64; WAIT_BUCKETS],
 }
 
 impl PoolStats {
@@ -357,12 +390,20 @@ impl Pool {
     pub async fn acquire(&self, host: &str) -> Result<Lease, PoolError> {
         let state = self.host_state(host);
         let mut dial_failures: u8 = 0;
+        // Set the first time this acquire has to park. The total parked time is
+        // recorded exactly once, on the way out (see `record_wait`) — a request can
+        // visit the slow path several times, and counting each visit would inflate
+        // both the count and the mean.
+        let mut parked_since: Option<Instant> = None;
 
         loop {
             // Hot path: fully lock-free — a snapshot load, a `&str`-free scan
             // and one CAS on the connection's in-flight counter. No host mutex,
             // no watch lock.
             if let Some(entry) = Self::reserve_existing(&state, self.stream_budget_per_conn) {
+                if let Some(start) = parked_since {
+                    record_wait(&state, start.elapsed());
+                }
                 return Ok(Lease::new(entry));
             }
 
@@ -387,6 +428,9 @@ impl Pool {
                         // the connection was still invisible to other acquirers, so a
                         // waiter woken by the insert can never take the last free slot
                         // before us (which is what produced `old == cap` here).
+                        if let Some(start) = parked_since {
+                            record_wait(&state, start.elapsed());
+                        }
                         return Ok(Lease::new(entry));
                     }
                     Err(err) => {
@@ -411,6 +455,9 @@ impl Pool {
                         // without ever yielding).
                         dial_failures += 1;
                         if dial_failures > DIAL_RETRIES || !is_retryable_dial_error(&err) {
+                            if let Some(start) = parked_since {
+                                record_wait(&state, start.elapsed());
+                            }
                             return Err(err);
                         }
                         tracing::debug!(
@@ -429,12 +476,24 @@ impl Pool {
             // release that raced the first scan is caught by the re-scan, and
             // anything after it bumps the generation this receiver observes — so
             // no wakeup is lost while the hot path pays for no watch lock.
+            if parked_since.is_none() {
+                parked_since = Some(Instant::now());
+            }
+            // Queue depth, counted only here: the hot path never touches it, and the
+            // RAII slot keeps it honest if this acquire is dropped mid-wait.
+            let _wait_slot = WaitSlot::new(&state);
             let mut generation = state.generation_tx.subscribe();
             if let Some(entry) = Self::reserve_existing(&state, self.stream_budget_per_conn) {
+                if let Some(start) = parked_since {
+                    record_wait(&state, start.elapsed());
+                }
                 return Ok(Lease::new(entry));
             }
             if generation.changed().await.is_err() {
                 // Sender dropped: the pool is gone.
+                if let Some(start) = parked_since {
+                    record_wait(&state, start.elapsed());
+                }
                 return Err(PoolError::Closed);
             }
         }
@@ -635,6 +694,12 @@ impl Pool {
                 cap_updates: 0,
                 stream_budget_per_conn: self.stream_budget_per_conn,
                 peer_cap: None,
+                waiting: 0,
+                waiting_max: 0,
+                queued_total: 0,
+                wait_millis: 0,
+                wait_millis_max: 0,
+                wait_buckets: [0; WAIT_BUCKETS],
             };
         };
         let (connections, in_flight, peer_cap) = {
@@ -658,6 +723,14 @@ impl Pool {
             cap_updates: state.cap_updates.load(Ordering::Relaxed),
             stream_budget_per_conn: self.stream_budget_per_conn,
             peer_cap,
+            waiting: state.waiting.load(Ordering::Relaxed),
+            waiting_max: state.waiting_max.load(Ordering::Relaxed),
+            queued_total: state.queued.load(Ordering::Relaxed),
+            wait_millis: state.wait_millis.load(Ordering::Relaxed),
+            wait_millis_max: state.wait_millis_max.load(Ordering::Relaxed),
+            // Settled reads are not atomic as a set (they never are); each bucket is
+            // independent, which is fine for a rate/percentile view.
+            wait_buckets: std::array::from_fn(|i| state.wait_buckets[i].load(Ordering::Relaxed)),
         }
     }
 
@@ -742,6 +815,56 @@ fn reap_idle(state: &HostState, idle_timeout: Duration) {
     state.reclaimed.fetch_add(removed as u64, Ordering::Relaxed);
     bump(&state.generation_tx);
     tracing::debug!(removed, remaining, "reclaimed idle upstream h2 connections");
+}
+
+/// Number of buckets in the per-host wait-time histogram ([`PoolStats::wait_buckets`]).
+///
+/// Bucket `i` counts waits in `[2^i, 2^(i+1))` milliseconds; the last bucket is the
+/// overflow (`>= 2^(WAIT_BUCKETS-1)` ms, i.e. >= 65.5s here). Coarse on purpose: it
+/// makes a queue's tail visible without dragging a metrics dependency into the pool,
+/// and it is written only on the (cold) waiting path.
+pub const WAIT_BUCKETS: usize = 17;
+
+/// Bucket index for a wait of `ms` milliseconds.
+fn wait_bucket(ms: u64) -> usize {
+    if ms == 0 {
+        return 0;
+    }
+    let floor_log2 = 63 - ms.leading_zeros() as usize;
+    floor_log2.min(WAIT_BUCKETS - 1)
+}
+
+/// Record one acquire's total parked time (called at most once per `acquire`).
+fn record_wait(state: &HostState, waited: Duration) {
+    let ms = waited.as_millis() as u64;
+    state.queued.fetch_add(1, Ordering::Relaxed);
+    state.wait_millis.fetch_add(ms, Ordering::Relaxed);
+    state.wait_millis_max.fetch_max(ms, Ordering::Relaxed);
+    state.wait_buckets[wait_bucket(ms)].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Holds one unit of the host's queue depth while an acquire is parked.
+///
+/// RAII for the same reason [`DialSlot`] is: an acquire dropped mid-wait must not
+/// leak the depth counter (it would report a queue that no longer exists). A
+/// cancelled acquire is deliberately *not* counted in `queued_total` / the
+/// histogram — it never got a slot, so there is no wait to attribute.
+struct WaitSlot<'a> {
+    state: &'a HostState,
+}
+
+impl<'a> WaitSlot<'a> {
+    fn new(state: &'a HostState) -> Self {
+        let depth = state.waiting.fetch_add(1, Ordering::Relaxed) + 1;
+        state.waiting_max.fetch_max(depth, Ordering::Relaxed);
+        Self { state }
+    }
+}
+
+impl Drop for WaitSlot<'_> {
+    fn drop(&mut self) {
+        self.state.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Releases a reserved dial slot when dropped.

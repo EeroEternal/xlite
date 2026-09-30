@@ -443,6 +443,13 @@ docker run --rm --network host \
 
 **现场怎么查、怎么改**（`.24` / `.26` **各跑一次**，取更紧的那次）：
 
+> **队列一直都在，只是原来看不见**：`acquire` 在**上界处**就是等（`xlite-h2-pool` 的
+> 「at the cap it waits」）—— 阈值 = `min(CAP, 对端) × CONNS`。所以这不是"要不要加队列"，
+> 而是"阈值定多少 / 等待怎么办"。现在 `GET /api/pool` 每 host 直接给出队列状态：
+> `waiting`（当前排队数）、`waiting_max`（水位）、`queued_total`（排过队的请求数）、
+> `wait_ms_mean` / `wait_ms_max` / `wait_ms_p50` / `wait_ms_p99`（分位数取自桶上界 ⇒ 是**上界**，不会低报）。
+> ⚠️ 队列**不创造产能**：持续过载时它只把 `fail` 换成**等待**（代价记在 TTFT/dur 上）。
+>
 > **上界现在可读，不用再手算**：`GET /api/pool`（0.5.2 起）每 host 给出 `peer_cap` /
 > `effective_streams_per_conn` / **`effective_ceiling`**（= `min(CAP, 对端) × CONNS`），启动时每个 host
 > 也会打一行 `upstream admission ceiling … ceiling=N`；`advanced/pool_sizing_probe.sh` 直接读它。
