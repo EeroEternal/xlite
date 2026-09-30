@@ -81,6 +81,55 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// `SETTINGS_MAX_CONCURRENT_STREAMS`, i.e. "let the peer decide".
 pub const DEFAULT_STREAM_BUDGET_PER_CONN: usize = 250;
 
+/// How many extra dial attempts [`Pool::acquire`] makes after a failed dial
+/// before it hands the error back.
+///
+/// A dial failure on this path is expensive out of proportion to itself: it is
+/// the error `proxy.rs` returns to the client as a 502. A *transient* failure
+/// (the peer restarting, a syn-backlog overflow) is worth one bounded retry,
+/// which costs a worst-case +20ms **per `acquire`** — and `proxy.rs` failover
+/// calls `acquire` once per channel, so it can add up to `channels × 20ms` to a
+/// request that is failing anyway. Hardcoded rather than an env knob on
+/// purpose: this is a bottom line, not a tuning lever.
+///
+/// Only transient dial errors are retried — see `is_retryable_dial_error`;
+/// resource exhaustion is not.
+pub const DIAL_RETRIES: u8 = 2;
+
+/// Backoff before each dial retry.
+///
+/// It exists to prevent a hot spin, not to be polite: `ECONNREFUSED` returns
+/// immediately, so retrying without sleeping would spin inside `acquire` (see
+/// issue #49 for the measurement that led here).
+pub const DIAL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Whether a failed dial is worth retrying.
+///
+/// The retryable set is named explicitly (rather than "anything except
+/// `Closed`") so that **resource exhaustion falls out**: `EMFILE`/`ENFILE`
+/// surface as `io::ErrorKind::Uncategorized`, and they are *persistent* — in
+/// the issue #49 measurement, retrying them would have tripled the dial volume
+/// (22.78M → ~68M) while every request still got the same 502. Retrying only
+/// the clearly transient connect-phase errors keeps the upside without that
+/// amplification.
+fn is_retryable_dial_error(err: &PoolError) -> bool {
+    match err {
+        PoolError::Dial(e) => matches!(
+            e.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::Interrupted
+        ),
+        // The peer can close mid-handshake (transient); a handshake failure is
+        // not a resource leak, so bounded retries are safe.
+        PoolError::Handshake(_) => true,
+        // The pool itself is gone.
+        PoolError::Closed => false,
+    }
+}
+
 /// One live HTTP/2 connection to an upstream host.
 pub(crate) struct ConnEntry {
     pub(crate) send: SendRequest<Bytes>,
@@ -276,6 +325,7 @@ impl Pool {
     /// - Waits when every connection is full and the cap is reached.
     pub async fn acquire(&self, host: &str) -> Result<Lease, PoolError> {
         let state = self.host_state(host);
+        let mut dial_failures: u8 = 0;
 
         loop {
             // Hot path: fully lock-free — a snapshot load, a `&str`-free scan
@@ -297,14 +347,51 @@ impl Pool {
                 // this future is dropped mid-dial — so a cancelled acquire
                 // never leaks a slot.
                 let slot = DialSlot { state: &state };
-                let entry = self.dial_and_insert(host, &state).await?;
-                drop(slot);
+                let result = self.dial_and_insert(host, &state).await;
+                match result {
+                    Ok(entry) => {
+                        drop(slot);
 
-                // `dial_and_insert` already reserved this request's slot while
-                // the connection was still invisible to other acquirers, so a
-                // waiter woken by the insert can never take the last free slot
-                // before us (which is what produced `old == cap` here).
-                return Ok(Lease::new(entry));
+                        // `dial_and_insert` already reserved this request's slot while
+                        // the connection was still invisible to other acquirers, so a
+                        // waiter woken by the insert can never take the last free slot
+                        // before us (which is what produced `old == cap` here).
+                        return Ok(Lease::new(entry));
+                    }
+                    Err(err) => {
+                        // A failed dial is what turns into the client's 502, and a
+                        // transient one (peer restarting, syn backlog) is worth a
+                        // bounded retry. The dial slot is *held* across the backoff on
+                        // purpose: other acquirers for this host then park on the
+                        // generation wait in step 3 instead of piling more dials onto a
+                        // peer that is already failing.
+                        //
+                        // Only transient connect errors are retried — resource
+                        // exhaustion (`EMFILE`/`ENFILE`, `Uncategorized`) and `Closed`
+                        // are returned at once. Retrying fd exhaustion would multiply
+                        // the dial volume in the exact issue #49 scenario for no gain
+                        // (see `is_retryable_dial_error`); the fix for it is the
+                        // deployment-side resource check.
+                        //
+                        // Do *not* "fall through" to step 3 instead: `DialSlot::drop`
+                        // bumps the generation even on failure, so that wait would wake
+                        // immediately, the CAS above would succeed again, and `acquire`
+                        // would spin hot between steps 1 and 2 (`ECONNREFUSED` returns
+                        // without ever yielding).
+                        dial_failures += 1;
+                        if dial_failures > DIAL_RETRIES || !is_retryable_dial_error(&err) {
+                            return Err(err);
+                        }
+                        tracing::debug!(
+                            host = %host,
+                            attempt = dial_failures,
+                            error = %err,
+                            "upstream h2 dial failed; retrying after backoff"
+                        );
+                        tokio::time::sleep(DIAL_RETRY_BACKOFF).await;
+                        continue;
+                    }
+                }
             }
 
             // Slow path. Subscribe *after* the failed scan, then re-scan: a

@@ -101,6 +101,70 @@ pub fn is_memory_url(url: &str) -> bool {
         || u.contains("mode=memory")
 }
 
+/// The process's **soft** `RLIMIT_NOFILE`, read from `/proc/self/limits`.
+///
+/// Read from procfs rather than `libc::getrlimit` to avoid pulling in a
+/// dependency; on non-Linux targets this reports `None` (the gateway only runs
+/// on Linux in production — macOS is a development machine).
+pub fn nofile_soft_limit() -> Option<u64> {
+    parse_nofile(&proc_self_limits()?)
+}
+
+/// `/proc/self/limits` on Linux; nothing to read elsewhere.
+fn proc_self_limits() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/limits").ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Pick the soft column out of the `Max open files` line of `/proc/self/limits`,
+/// which looks like this — the columns are separated by a *run* of spaces and
+/// either limit may be the literal `unlimited`:
+///
+/// ```text
+/// Max open files            1024                 1048576              files
+/// ```
+fn parse_nofile(contents: &str) -> Option<u64> {
+    contents
+        .lines()
+        .find(|line| line.starts_with("Max open files"))
+        .and_then(|line| line.split_whitespace().nth(3)) // "Max" "open" "files" <soft>
+        .and_then(|soft| soft.parse().ok())
+}
+
+/// A comfortable fd budget for a gateway that may face tens of thousands of
+/// concurrent clients: every inbound connection, every pooled upstream
+/// connection, HAProxy's health checks, logs and sockets all come out of the one
+/// process limit.
+const FD_COMFORTABLE: u64 = 65_536;
+
+/// Startup self-check for the fd budget: the warning to log, or `None`.
+///
+/// The failure mode this catches is quiet, which is what makes it expensive: with
+/// `RLIMIT_NOFILE` clamped to the Docker default of 1024 the gateway does not
+/// error — it forwards mass **502s at a tenth of the throughput** while `fail`,
+/// `vus` and `iteration_duration` all look healthy. Measured 2026-09-30 (issue
+/// #49): 22.78M `PoolError::Dial` failures and 99.49% of requests 502 with the
+/// limit at 1024, versus 0.00% and the same 1,484 qps once it was raised.
+pub fn fd_budget_warning(nofile: u64, max_conns_per_host: usize) -> Option<String> {
+    if nofile >= FD_COMFORTABLE {
+        return None;
+    }
+    Some(format!(
+        "RLIMIT_NOFILE soft limit is {nofile} (< {FD_COMFORTABLE}). At ≥10k concurrent \
+         clients a gateway can run out of file descriptors long before it runs out of CPU, \
+         and the signature is a flood of 502s with a ~10x throughput drop while every other \
+         metric still looks normal (see issue #49). On top of one fd per inbound request, \
+         each upstream host may hold up to MAX_CONNS_PER_HOST={max_conns_per_host} pooled \
+         connections. Raise it — e.g. `--ulimit nofile=1048576:1048576` for docker."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +197,36 @@ mod tests {
         assert!(is_memory_url("memory"));
         assert!(is_memory_url("sqlite::memory:"));
         assert!(!is_memory_url("sqlite:xlite.db"));
+    }
+
+    #[test]
+    fn parse_nofile_reads_the_soft_column() {
+        let proc_limits = "Limit                     Soft Limit           Hard Limit           Units\n\
+                            Max cpu time              unlimited            unlimited            seconds\n\
+                            Max open files            1024                 1048576              files\n";
+        assert_eq!(parse_nofile(proc_limits), Some(1024));
+        // A soft limit of `unlimited` parses to None, i.e. "nothing to warn
+        // about" — the check only ever fires on a number it can compare.
+        let unlimited =
+            "Max open files            unlimited            unlimited            files\n";
+        assert_eq!(parse_nofile(unlimited), None);
+        assert_eq!(parse_nofile("Limit   Soft Limit\n"), None);
+    }
+
+    #[test]
+    fn fd_budget_warning_flags_a_container_default() {
+        let warning = fd_budget_warning(1024, 32).expect("1024 is the trap this check exists for");
+        assert!(warning.contains("1024"), "{warning}");
+        assert!(warning.contains("MAX_CONNS_PER_HOST=32"), "{warning}");
+        assert!(
+            warning.contains("#49"),
+            "the warning has to carry the measurement that justifies it: {warning}"
+        );
+    }
+
+    #[test]
+    fn fd_budget_warning_is_quiet_when_the_limit_is_raised() {
+        assert!(fd_budget_warning(FD_COMFORTABLE, 32).is_none());
+        assert!(fd_budget_warning(1_048_576, 32).is_none());
     }
 }
