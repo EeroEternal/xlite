@@ -189,15 +189,26 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
+    let max_conns = state.config.max_conns_per_host;
     let hosts: Vec<Value> = state
         .upstream
         .pool_stats()
         .into_iter()
         .map(|(host, s)| {
+            // The per-host admission ceiling is stated explicitly so nobody has to
+            // multiply `min(cap, peer) × max_conns` by hand — and so changing the
+            // cap is *visible* instead of silently resizing the ceiling. Both peer
+            // values are `null` until a handshake has happened (the peer's
+            // advertised SETTINGS does not exist before then), and they follow a
+            // peer that re-advertises mid-connection.
+            let per_conn = s.effective_streams_per_conn();
             json!({
                 "host": host,
                 "connections": s.connections,
                 "in_flight": s.in_flight,
+                "peer_cap": s.peer_cap,
+                "effective_streams_per_conn": per_conn,
+                "effective_ceiling": per_conn.map(|n| n.saturating_mul(max_conns)),
                 "dials": s.dials,
                 "reclaimed": s.reclaimed,
                 "settings_fallbacks": s.settings_fallbacks,

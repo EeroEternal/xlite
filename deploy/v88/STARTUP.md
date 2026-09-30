@@ -326,6 +326,9 @@ ADMIN_PASSWORD='<管理员密码>' ./advanced/pool_sizing_probe.sh --gw-url http
 #      binding / partial ⇒ CAP 不设（跟随对端）+ MAX_CONNS 取探针给的值
 #      not-binding       ⇒ **别动 CAP**：首字问题不在这条轴上，回来查别的原因
 
+#    报告里会打印**准入上界**（`min(CAP, 对端) × CONNS`）与**已用占比** —— 因为调 `CAP` 会**悄悄**
+#    改掉那个上界（30 → 不设：750 → 6,250），现在它被直接打出来；对端值小于你的 `CAP` 时还会
+#    明确提示「限流的是对端」。来源是 `GET /api/pool`，启动时每个 host 也会打一行同样的数。
 # ③ 改完 → 空跑一轮 warmup → 再跑同一档；报告里贴探针最后那段「口径变更」说明。
 #    ⚠️ 两台必须一致（HAProxy 是 dual，配置不同 = 两条延迟曲线被合在一起）；
 #    ⚠️ `docker restart` 不改 env，必须按原命令 / compose 重建容器。

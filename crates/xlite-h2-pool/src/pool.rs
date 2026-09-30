@@ -170,6 +170,10 @@ pub(crate) struct HostState {
     pub(crate) generation_tx: watch::Sender<u64>,
     /// Set once the per-host idle reaper has been spawned.
     reaper_started: AtomicBool,
+    /// Set once the per-host admission ceiling has been logged — at the moment the
+    /// peer's advertised value becomes knowable (the first handshake), so the
+    /// ceiling is stated once per host instead of being re-derived by hand.
+    ceiling_logged: AtomicBool,
     /// Connections successfully dialled.
     dials: AtomicU64,
     /// Idle connections closed by the reaper.
@@ -192,6 +196,7 @@ impl HostState {
             generation_tx,
             reaper_started: AtomicBool::new(false),
             dials: AtomicU64::new(0),
+            ceiling_logged: AtomicBool::new(false),
             reclaimed: AtomicU64::new(0),
             settings_fallbacks: AtomicU64::new(0),
             cap_updates: Arc::new(AtomicU64::new(0)),
@@ -239,6 +244,32 @@ pub struct PoolStats {
     /// pool is re-sizing connections live (and that a handshake-time cap would
     /// no longer be the truth for this upstream).
     pub cap_updates: u64,
+    /// This pool's client-side stream budget (the `CAP` knob): `usize::MAX` means
+    /// "let the peer decide".
+    pub stream_budget_per_conn: usize,
+    /// The stream cap in force on this host's **live** connections — the minimum
+    /// across them, because that is the value that actually applies — or `None`
+    /// when none is dialled yet.
+    ///
+    /// It is the peer's advertised `SETTINGS_MAX_CONCURRENT_STREAMS`, except when
+    /// the peer never advertised one: then it is the shared fallback (see
+    /// [`PoolStats::settings_fallbacks`] for how often that happened on this host).
+    pub peer_cap: Option<usize>,
+}
+
+impl PoolStats {
+    /// `min(our budget, the peer's advertised value)` — the per-connection limit
+    /// that actually applies; `None` until a handshake has happened (the peer's
+    /// value does not exist before then).
+    ///
+    /// This and [`PoolStats::peer_cap`] exist so the per-host admission ceiling
+    /// (`this × max_conns_per_host`) is *readable* rather than something an
+    /// operator has to multiply by hand — and can silently change when tuning the
+    /// cap.
+    pub fn effective_streams_per_conn(&self) -> Option<usize> {
+        self.peer_cap
+            .map(|peer| peer.min(self.stream_budget_per_conn))
+    }
 }
 
 /// Most-recently-used host, consulted without taking the map lock.
@@ -516,6 +547,26 @@ impl Pool {
             max = self.max_conns_per_host,
             "native h2 upstream connection established"
         );
+        if !state.ceiling_logged.swap(true, Ordering::Relaxed) {
+            // The number that used to require a calculator: the per-host admission
+            // ceiling is `min(our stream budget, the peer's advertised cap) ×
+            // max_conns_per_host`. Stated once per host, as soon as the peer's value
+            // is knowable (it arrives with the handshake).
+            let budget = if self.stream_budget_per_conn == usize::MAX {
+                "peer".to_string()
+            } else {
+                self.stream_budget_per_conn.to_string()
+            };
+            tracing::info!(
+                host = %host,
+                peer_cap = cap,
+                stream_cap = %budget,
+                ceiling = cap
+                    .min(self.stream_budget_per_conn)
+                    .saturating_mul(self.max_conns_per_host),
+                "upstream admission ceiling (per host)"
+            );
+        }
         bump(&state.generation_tx);
         self.start_idle_reaper(state);
         Ok(entry)
@@ -582,15 +633,21 @@ impl Pool {
                 reclaimed: 0,
                 settings_fallbacks: 0,
                 cap_updates: 0,
+                stream_budget_per_conn: self.stream_budget_per_conn,
+                peer_cap: None,
             };
         };
-        let (connections, in_flight) = {
+        let (connections, in_flight, peer_cap) = {
             let conns = state.conns.load();
             let in_flight = conns
                 .iter()
                 .map(|c| c.in_flight.load(Ordering::Acquire))
                 .sum();
-            (conns.len(), in_flight)
+            // The minimum is what actually applies: every connection here is to the
+            // same peer, and they only differ if it changed its SETTINGS
+            // mid-flight (see `publish_peer_cap`).
+            let peer_cap = conns.iter().map(|c| c.cap.load(Ordering::Acquire)).min();
+            (conns.len(), in_flight, peer_cap)
         };
         PoolStats {
             connections,
@@ -599,6 +656,8 @@ impl Pool {
             reclaimed: state.reclaimed.load(Ordering::Relaxed),
             settings_fallbacks: state.settings_fallbacks.load(Ordering::Relaxed),
             cap_updates: state.cap_updates.load(Ordering::Relaxed),
+            stream_budget_per_conn: self.stream_budget_per_conn,
+            peer_cap,
         }
     }
 
