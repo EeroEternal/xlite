@@ -38,4 +38,4 @@ Vendor files stay thin compatibility bridges. Do not invent parallel roots (`CLA
 ## Verification
 - `rg` shows a single canonical home (or a one-line pointer + skill body).
 - A new agent can follow the text without the original chat.
-- File names under `docs/` follow `docs/rules/documentation.md` (kebab-case, length limits).
+- File names under `docs/` are kebab-case with a `-YYYY-MM` suffix for dated material (mirror the neighbouring files; there is no separate rules document).
