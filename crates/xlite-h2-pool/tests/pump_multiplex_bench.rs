@@ -1,4 +1,4 @@
-//! Micro-bench (ignored by default) for `docs/dev/h2-pinned-poll-2026-09.md`.
+//! Micro-bench (ignored by default) for the pinned-poll pump design.
 //!
 //! Question: on ONE h2 connection carrying N streams, does pinning every
 //! `RecvStream` to a single polling task (a "pump") plus a per-stream channel
