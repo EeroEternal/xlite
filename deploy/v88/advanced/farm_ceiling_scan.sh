@@ -139,7 +139,9 @@ for vus in $(printf '%s' "$LEVELS" | tr ',' ' '); do
   log="$OUT/${SCAN_COMBO}_${vus}.log"
   v88_log "档位 VUS=$vus 开始"
   docker rm -f "v88_scan_k6_$$" >/dev/null 2>&1
+  # `--ulimit nofile` 与 driver 同因（k6 要从一台机持住大量 socket，见 run_full_88_xg.sh 的 run_k6_once）
   docker run --rm --name "v88_scan_k6_$$" -m "$K6_MEM" --network=host \
+    --ulimit nofile=1048576:1048576 \
     -v "$V88_DIR:/k6:ro" \
     -e "TARGET_URL=$TARGET" -e "TOKEN=$TOKEN" -e "MODEL=$MODEL" \
     -e STREAM=true -e IN_TOKENS=100 -e "OUT_TOKENS=$SCAN_OUT" \

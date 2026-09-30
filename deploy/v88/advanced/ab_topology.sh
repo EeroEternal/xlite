@@ -316,7 +316,10 @@ for L in $LEVELS; do
   t0=$(date +%s)
   log "level $L 开始（同机 loopback，目标 127.0.0.1:${PORT}）"
   docker rm -f abtop-k6 >/dev/null 2>&1
-  docker run -d --name abtop-k6 --network=host -m "$K6_MEM" -v "$K6_DIR:/k6" \
+  # `--ulimit nofile` 与 driver 同因（k6 要从一台机持住大量 socket），别让
+  # 「k6 自己先被封顶」混进这里要判的「网关 / 农场 / k6 谁先满」。
+  docker run -d --name abtop-k6 --network=host -m "$K6_MEM" \
+    --ulimit nofile=1048576:1048576 -v "$K6_DIR:/k6" \
     -e "TARGET_URL=http://127.0.0.1:$PORT/v1/chat/completions" \
     -e "TOKEN=$TOKEN" -e "MODEL=$MODEL" -e STREAM=true \
     -e IN_TOKENS=100 -e OUT_TOKENS=500 -e "VUS=$L" -e "DURATION=$DURATION" -e "MAX_VUS=$L" \
