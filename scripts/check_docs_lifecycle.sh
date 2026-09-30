@@ -113,11 +113,23 @@ if [[ -n "$mangled" ]]; then
   findings=1
 fi
 
+# ⑤ deploy/ 下的镜像 tag 与 /health 版本期望必须跟住 Cargo.toml。
+# 起因：0.4.0 / 0.5.0 这些 pin 在 deploy/ 里漂了很久没人管（发版同步脚本只管 Cargo.toml
+# 与 changelog），而仓库自己的规则写着「镜像应打当前 Cargo.toml 版本」
+# （docs/manual/lab-loadtest.md）。这里只查 deploy/**，docs/dev/** 是历史记录不动。
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+pinned="$(grep -rnE 'xlite:[0-9]+\.[0-9]+\.[0-9]+|"version": *"[0-9]+\.[0-9]+\.[0-9]+"' deploy 2>/dev/null \
+          | grep -vE "xlite:${version}([^0-9.]|$)|\"version\": *\"${version}\"" || true)"
+if [[ -n "$pinned" ]]; then
+  printf '%s\n' "$pinned"
+  findings=1
+fi
+
 if [[ "$findings" -eq 0 ]]; then
   if [[ "$links_only" -eq 1 ]]; then
     echo "✓ 文档链接检查通过（--links-only：断链/残缺零发现）"
   else
-    echo "✓ 文档生命周期检查通过：dev/ 无落地未清理、无常设引用未归位的草案"
+    echo "✓ 文档生命周期检查通过：dev/ 无落地未清理、无常设引用未归位的草案；deploy/ 版本引用与 Cargo.toml 一致"
   fi
 fi
 exit "$findings"

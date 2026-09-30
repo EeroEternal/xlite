@@ -12,7 +12,7 @@
 
 网关镜像在仓库根构建（`Dockerfile`）；mock 镜像的构建文件在**本目录**（`Dockerfile.mock`，compose 直接引用）。目录 YAML 用 `examples/mock-24.docker.yaml`（上游主机名是 `mocks`）。
 
-当前镜像标签：`xlite:0.5.0`、`xlite-mock:0.1.0`。
+当前镜像标签：`xlite:0.5.2`、`xlite-mock:0.1.0`。
 
 ---
 
@@ -33,7 +33,7 @@ Compose 服务名：
 | --- | --- | --- | --- |
 | `redis` | `redis:7-alpine` | 6379 | `redis:6379` |
 | `mocks` | `xlite-mock:0.1.0` | 4101–4124 | `http://mocks:4101` … `http://mocks:4124` |
-| `xlite` | `xlite:0.5.0` | 8080 | 网关自己 |
+| `xlite` | `xlite:0.5.2` | 8080 | 网关自己 |
 | `xlite-2`（`--profile ha`） | 同上 | 8081 | 第二台网关，同一 Redis |
 
 调度固定为：对外模型名 `mock` → 24 条通道，权重 1、优先级 0 → 同一优先级内按权重随机，首字节前 5xx/429/连接失败才换下一条。一把 API Key，`models: []` 表示不限制模型。
@@ -146,7 +146,7 @@ docker compose ps
 
 ```bash
 cd ~/github/xlite
-docker build -t xlite:0.5.0 .
+docker build -t xlite:0.5.2 .
 docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
@@ -173,8 +173,8 @@ docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 > —— 三个 build-arg 的默认值已内置，`docker build .` 即可；要回官方源给对应参数传**空值**：
 >
 > ```bash
-> docker build -t xlite:0.5.0 .                              # 国内默认
-> docker build -t xlite:0.5.0 \
+> docker build -t xlite:0.5.2 .                              # 国内默认
+> docker build -t xlite:0.5.2 \
 >   --build-arg NPM_REGISTRY= --build-arg CRATES_MIRROR= .   # 回官方源
 > ```
 >
@@ -295,7 +295,7 @@ docker run -d --name xlite-mocks --network xlite-net --network-alias mocks \
 
 docker run --rm --network xlite-net \
   -e REDIS_URL=redis://xlite-redis:6379 \
-  xlite:0.5.0 import /opt/xlite/examples/mock-24.docker.yaml --replace
+  xlite:0.5.2 import /opt/xlite/examples/mock-24.docker.yaml --replace
 
 docker run -d --name xlite-gw --network xlite-net \
   --ulimit nofile=1048576:1048576 \
@@ -304,7 +304,7 @@ docker run -d --name xlite-gw --network xlite-net \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD=admin \
   -e LISTEN_HOST=0.0.0.0 \
-  xlite:0.5.0
+  xlite:0.5.2
 ```
 
 `--network-alias mocks` 不能省，否则 YAML 里的主机名 `mocks` 解析不到。`--ulimit nofile=1048576:1048576` 同样不能省（理由见 §2.1），核对：`docker exec xlite-gw sh -c "grep -i 'open files' /proc/1/limits"`。
