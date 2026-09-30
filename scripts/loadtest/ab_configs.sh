@@ -378,7 +378,12 @@ run_k6() {      # $1=port $2=outfile
   # `9>&-`：**后台子进程绝不能继承锁 fd**（lib_rig.sh 的约定），否则它替脚本继续持锁。
   # 先删同名残留：上一轮被 `kill -9` 时留下的容器会让 `docker run` 直接拒绝（名字冲突）。
   docker rm -f ab_configs_k6 >/dev/null 2>&1
-  docker run --rm --name ab_configs_k6 -m "$K6_MEM" --network=host -v "$K6_DIR:/k6" \
+  # `--ulimit nofile`：k6 是这条链路上**唯一**要从一台机同时持住大量 socket 的进程，不设时
+  # 它继承 docker daemon 的默认（可能低到 1024 / 65536）⇒ 连接接不完或持不住。同因的修复见
+  # deploy/v88/run_full_88_xg.sh 的 run_k6_once（#43）。
+  docker run --rm --name ab_configs_k6 -m "$K6_MEM" \
+    --ulimit nofile=1048576:1048576 \
+    --network=host -v "$K6_DIR:/k6" \
     -e TARGET_URL="http://$TARGET_HOST:$1/v1/chat/completions" \
     -e TOKEN="$TOKEN" -e MODEL="$MODEL" -e STREAM=true \
     -e IN_TOKENS=100 -e OUT_TOKENS=500 -e VUS="$VUS" -e DURATION="$DURATION" -e MAX_VUS="$VUS" \

@@ -316,7 +316,12 @@ for L in $LEVELS; do
   t0=$(date +%s)
   log "level $L 开始（同机 loopback，目标 127.0.0.1:${PORT}）"
   docker rm -f abtop-k6 >/dev/null 2>&1
-  docker run -d --name abtop-k6 --network=host -m "$K6_MEM" -v "$K6_DIR:/k6" \
+  # `--ulimit nofile`：k6 是这条链路上**唯一**要从一台机同时持住大量 socket 的进程，不设时
+  # 它继承 docker daemon 的默认（可能低到 1024 / 65536）⇒ 连接接不完或持不住。同因的修复见
+  # deploy/v88/run_full_88_xg.sh 的 run_k6_once（#43）。
+  docker run -d --name abtop-k6 --network=host -m "$K6_MEM" \
+    --ulimit nofile=1048576:1048576 \
+    -v "$K6_DIR:/k6" \
     -e "TARGET_URL=http://127.0.0.1:$PORT/v1/chat/completions" \
     -e "TOKEN=$TOKEN" -e "MODEL=$MODEL" -e STREAM=true \
     -e IN_TOKENS=100 -e OUT_TOKENS=500 -e "VUS=$L" -e "DURATION=$DURATION" -e "MAX_VUS=$L" \
