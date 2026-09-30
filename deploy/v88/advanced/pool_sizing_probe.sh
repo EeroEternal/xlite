@@ -57,6 +57,13 @@ INFLIGHT_OVERRIDE=""
 K6_REPORT=""
 OUT_TSV=""
 SELF_TEST=0
+GW_URL=""
+ADMIN_PASSWORD_CLI="${ADMIN_PASSWORD:-}"
+# `UNIT` 是连接数的单位（API 模式是 host，回落模式是口）。**必须在自测之前就有默认值**：
+# `recommend()` 会把它写进理由，而 `--self-test` 在采样区（真正按 API_MODE 赋值的
+# 地方）之前就调用它 ⇒ 少了这一行，`set -u` 下自测会在「建议」段直接
+# `UNIT: unbound variable` 退出。
+UNIT="口"
 
 usage() {
     cat <<'USAGE'
@@ -73,6 +80,9 @@ usage() {
   --inflight N       直接指定在途并发（不给则用入站连接数）
   --k6-report PATH   k6 摘要日志，用于事后交叉校验在途
   --out PATH         原始采样 TSV 路径（默认 /tmp/pool_sizing_probe_<pid>.tsv）
+  --gw-url URL       网关地址（默认 http://127.0.0.1:<--gw-port>；走 /api/pool 用）
+  --admin-password P 管理员密码：给了就**优先读 /api/pool**（0.5.2+，精确到每条 host
+                     的连接数与在途流数，不需要 ss / docker）；不给则回落 ss 采样
   --self-test        只跑纯函数自测（不采样）
   -h, --help         显示本帮助
 USAGE
@@ -91,6 +101,8 @@ while [ $# -gt 0 ]; do
         --inflight) INFLIGHT_OVERRIDE="$2"; shift 2 ;;
         --k6-report) K6_REPORT="$2"; shift 2 ;;
         --out) OUT_TSV="$2"; shift 2 ;;
+        --gw-url) GW_URL="$2"; shift 2 ;;
+        --admin-password) ADMIN_PASSWORD_CLI="$2"; shift 2 ;;
         --self-test) SELF_TEST=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "未知参数：$1（--help 看用法）" >&2; exit 2 ;;
@@ -152,7 +164,23 @@ recommend() {
         RECOMMEND_CONNS_ENV="${ceiling_from_today}"
     fi
     RECOMMEND_CONNS="${RECOMMEND_CONNS_ENV}"
-    RECOMMEND_REASON="需求峰值 ${peak_per_port}/口 ÷ ${peer}（对端值）× 余量 $(awk -v h="${hr}" 'BEGIN{printf "%.1f", h/10}') ⇒ ${demand}；保住今天的上界 ${today_conns}×${today_cap} 需要用 ${ceiling_from_today} 条 ⇒ 取大者 ${RECOMMEND_CONNS_ENV}"
+    RECOMMEND_REASON="需求峰值 ${peak_per_port}/${UNIT} ÷ ${peer}（对端值）× 余量 $(awk -v h="${hr}" 'BEGIN{printf "%.1f", h/10}') ⇒ ${demand}；保住今天的上界 ${today_conns}×${today_cap} 需要用 ${ceiling_from_today} 条 ⇒ 取大者 ${RECOMMEND_CONNS_ENV}"
+}
+
+# 解析我们自己的 /api/pool 负载。字段顺序由 serde 的 BTreeMap 决定 ⇒ **逐字段抽取**，不假设顺序。
+# 输出：每 host 一行 "<host> <connections> <in_flight>"
+api_hosts_from_json() {
+    # 注意两点：(1) `hosts` 不一定排在最后（serde 的 BTreeMap 把 max_conns_per_host /
+    # stream_budget_per_conn 排在它后面）⇒ 只截到**第一个** `]`；
+    # (2) 用 awk 的 `RS='},{'` 切记录 —— **BSD sed 的替换里 `\n` 不是换行**，
+    # `sed 's/},{/}\n{/g'` 在 macOS 上会把两个 host 粘成一个（实测丢过第二个）。
+    printf '%s' "$1" | sed -n 's/.*"hosts":\[//p' | sed 's/\].*//' | awk -v RS='},{' '{
+        h=""; c=""; f="";
+        if (match($0, /"host":"[^"]*"/))      { h = substr($0, RSTART + 8,  RLENGTH - 9) }
+        if (match($0, /"connections":[0-9]+/)){ c = substr($0, RSTART + 14, RLENGTH - 14) }
+        if (match($0, /"in_flight":[0-9]+/))  { f = substr($0, RSTART + 12, RLENGTH - 12) }
+        if (h != "") print h, (c == "" ? 0 : c), (f == "" ? 0 : f)
+    }'
 }
 
 # ============================================================
@@ -190,6 +218,19 @@ if [ "${SELF_TEST}" = "1" ]; then
     check "未绑定 ⇒ CONNS 保持" "${RECOMMEND_CONNS_ENV}" "25"
     check "未绑定 ⇒ 理由" "${RECOMMEND_REASON}" "实际每连接流数远低于 CAP ⇒ 池子没塞满，改 CAP 一个数都不会变；首字问题不在这条轴上"
 
+    echo "== /api/pool 解析 =="
+    # 关键：serde 的 BTreeMap 按字典序输出（cap_updates < connections < dials < host <
+    # in_flight < …）⇒ 解析器必须**逐字段抽取**、不假设键顺序。下面第二个 host 故意把
+    # in_flight 写在前面，顺序与真实负载相反。
+    fixture='{"data":{"hosts":[{"cap_updates":0,"connections":2,"dials":7,"host":"10.56.88.29:8081","in_flight":443,"reclaimed":1,"settings_fallbacks":0},{"in_flight":750,"host":"10.56.88.29:8082","dials":9,"connections":3}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
+    check "解析 2 host（两种键序）" "$(api_hosts_from_json "${fixture}" | tr '\n' '|')" \
+        "10.56.88.29:8081 2 443|10.56.88.29:8082 3 750|"
+    empty='{"data":{"hosts":[],"max_conns_per_host":3,"stream_budget_per_conn":null},"success":true}'
+    check "空 hosts ⇒ 零输出" "$(api_hosts_from_json "${empty}" | grep -c . || true)" "0"
+    check "cap 数字可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" "30"
+    check "cap=null ⇒ 抽不到数字（= 随对端）" "$(printf '%s' "${empty}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" ""
+    check "max_conns 可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"max_conns_per_host":\([0-9]*\).*/\1/p')" "3"
+
     if [ "${fails}" -gt 0 ]; then echo "自测失败 ${fails} 项"; exit 1; fi
     echo "自测全通过"
     exit 0
@@ -198,57 +239,129 @@ fi
 # ============================================================
 # 采样区
 # ============================================================
-for tool in ss awk sort; do
-    command -v "${tool}" >/dev/null 2>&1 || { echo "缺工具：${tool}" >&2; exit 3; }
-done
+# 数据来源二选一：
+#   A) /api/pool（给 --admin-password；0.5.2+ 的网关）—— 精确读到每条 host 的连接数与
+#      在途流数，不需要 ss，也不需要 docker。
+#   B) ss + 入站连接数（回落路径，与旧版一致）—— 本机到农场的出站连接，入站连接当在途上界。
+GW_URL="${GW_URL:-http://127.0.0.1:${GW_PORT}}"
+API_MODE=0
+[ -n "${ADMIN_PASSWORD_CLI}" ] && API_MODE=1
+command -v awk >/dev/null 2>&1 || { echo "缺工具：awk" >&2; exit 3; }
+command -v sort >/dev/null 2>&1 || { echo "缺工具：sort" >&2; exit 3; }
+if [ "${API_MODE}" = 1 ]; then
+    command -v curl >/dev/null 2>&1 || { echo "缺工具：curl（走 /api/pool 需要；或去掉 --admin-password 回落 ss）" >&2; exit 3; }
+else
+    command -v ss >/dev/null 2>&1 || { echo "缺工具：ss（回落路径需要；或给 --admin-password 走 /api/pool）" >&2; exit 3; }
+fi
 
 TSV="${OUT_TSV:-/tmp/pool_sizing_probe_$$.tsv}"
 PORTS="${TSV%.tsv}.ports.tsv"
+API="${TSV%.tsv}.api.tsv"
 OUT_FILTER="( dport >= :${FARM_LO} and dport <= :${FARM_HI} )"
 IN_FILTER="( sport = :${GW_PORT} )"
 rounds=$(( RUN_SECONDS / INTERVAL ))
 [ "${rounds}" -lt 1 ] && rounds=1
 
-: > "${TSV}"; : > "${PORTS}"
-echo "== 采样 ${rounds} 次 × ${INTERVAL}s（无压测在跑时退出码会是 2，这是故意的）==" >&2
+api_json=""; api_hosts=""; api_cap=""; api_maxconns=""
+fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
+    local jar; jar="$(mktemp)"
+    curl -sS -m 5 -c "${jar}" -X POST "${GW_URL}/api/auth/login" \
+        -H 'Content-Type: application/json' -d "{\"password\":\"${ADMIN_PASSWORD_CLI}\"}" \
+        -o /dev/null 2>/dev/null || { rm -f "${jar}"; return 1; }
+    api_json="$(curl -sS -m 5 -b "${jar}" "${GW_URL}/api/pool" 2>/dev/null)"
+    rm -f "${jar}"
+    api_cap="$(printf '%s' "${api_json}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')"
+    printf '%s' "${api_json}" | grep -q '"stream_budget_per_conn":null' && api_cap="null"
+    api_maxconns="$(printf '%s' "${api_json}" | sed -n 's/.*"max_conns_per_host":\([0-9]*\).*/\1/p')"
+    case "${api_json}" in *'"hosts"'*) return 0 ;; *) return 1 ;; esac
+}
+api_ok=0; api_note=""; api_cfg=0
+UNIT="口"; [ "${API_MODE}" = 1 ] && UNIT="host"
+if [ "${API_MODE}" = 1 ]; then
+    if fetch_pool_api; then
+        api_hosts="$(api_hosts_from_json "${api_json}")"
+        if [ -n "${api_hosts}" ]; then api_ok=1; else api_note="（/api/pool 可达但 hosts 为空 —— 此刻没有上游流量？）"; fi
+    else
+        api_note="（/api/pool 不可用：登录失败，或该版本还没有这个端点）"
+    fi
+fi
+
+: > "${TSV}"; : > "${PORTS}"; : > "${API}"
+if [ "${api_ok}" = 1 ]; then
+    echo "== 数据来源：/api/pool（精确）；采样 ${rounds} 次 × ${INTERVAL}s ==" >&2
+else
+    echo "== 数据来源：ss + 入站连接数 ${api_note}；采样 ${rounds} 次 × ${INTERVAL}s ==" >&2
+fi
 i=0
 while [ "${i}" -lt "${rounds}" ]; do
     i=$((i + 1))
     ts=$(date +%s)
-    ss -Htan state established "${OUT_FILTER}" 2>/dev/null > "${TSV}.ss"
-    out_total=$(wc -l < "${TSV}.ss" | tr -d ' ')
-    in_total=$(ss -Htan state established "${IN_FILTER}" 2>/dev/null | wc -l | tr -d ' ')
-    printf '%s\t%s\t%s\n' "${ts}" "${out_total}" "${in_total}" >> "${TSV}"
-    # 每口连接数：把本轮的分布记成 "<轮次> <端口> <连接数>"，跨轮取每口最大值
-    # ⚠️ `ss -Htan` 的实际列布局是 `Recv-Q Send-Q Local Peer` —— **没有 State 列**（实测 4 列），
-    # 所以取 $NF（Peer），不能写死 $5（写了就会把"总数"当成端口）。
-    awk -v s="${i}" '{split($NF, a, ":"); p = a[length(a)]; c[p]++} END {for (p in c) print s, p, c[p]}' \
-        "${TSV}.ss" >> "${PORTS}"
-    printf '\r  轮 %d/%d  出站 %s   入站 %s      ' "${i}" "${rounds}" "${out_total}" "${in_total}" >&2
+    if [ "${api_ok}" = 1 ]; then
+        # 每轮重取一次，跨轮取每 host 峰值 —— 单点快照会漏掉尖峰
+        if fetch_pool_api; then
+            api_hosts="$(api_hosts_from_json "${api_json}")"
+            printf '%s\n' "${api_hosts}" >> "${API}"
+            n=$(printf '%s\n' "${api_hosts}" | grep -c .)
+            c=$(printf '%s\n' "${api_hosts}" | awk '{s+=$2} END{print s+0}')
+            f=$(printf '%s\n' "${api_hosts}" | awk '{s+=$3} END{print s+0}')
+            printf '\r  轮 %d/%d  host %s  连接 %s  在途 %s      ' "${i}" "${rounds}" "${n}" "${c}" "${f}" >&2
+        else
+            printf '\r  轮 %d/%d  /api/pool 本轮取数失败      ' "${i}" "${rounds}" >&2
+        fi
+    else
+        ss -Htan state established "${OUT_FILTER}" 2>/dev/null > "${TSV}.ss"
+        out_total=$(wc -l < "${TSV}.ss" | tr -d ' ')
+        in_total=$(ss -Htan state established "${IN_FILTER}" 2>/dev/null | wc -l | tr -d ' ')
+        printf '%s\t%s\t%s\n' "${ts}" "${out_total}" "${in_total}" >> "${TSV}"
+        # 每口连接数：把本轮的分布记成 "<轮次> <端口> <连接数>"，跨轮取每口最大值
+        # ⚠️ `ss -Htan` 的实际列布局是 `Recv-Q Send-Q Local Peer` —— **没有 State 列**（实测 4 列），
+        # 所以取 $NF（Peer），不能写死 $5（写了就会把"总数"当成端口）。
+        awk -v s="${i}" '{split($NF, a, ":"); p = a[length(a)]; c[p]++} END {for (p in c) print s, p, c[p]}' \
+            "${TSV}.ss" >> "${PORTS}"
+        printf '\r  轮 %d/%d  出站 %s   入站 %s      ' "${i}" "${rounds}" "${out_total}" "${in_total}" >&2
+    fi
     [ "${i}" -lt "${rounds}" ] && sleep "${INTERVAL}"
 done
 printf '\n' >&2
 rm -f "${TSV}.ss"
 
 # ---- 汇总 ----
-out_peak=$(awk -F'\t' '{if($2>m)m=$2} END{print m+0}' "${TSV}")
-out_med=$(awk -F'\t' '{print $2}' "${TSV}" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
-in_peak=$(awk -F'\t' '{if($3>m)m=$3} END{print m+0}' "${TSV}")
-in_med=$(awk -F'\t' '{print $3}' "${TSV}" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
-
-# 每口在窗口内的最大值
-awk '{if ($3 > m[$2]) m[$2] = $3} END {for (p in m) print p, m[p]}' "${PORTS}" | sort -n > "${PORTS}.max"
-n_ports=$(wc -l < "${PORTS}.max" | tr -d ' ')
-[ "${n_ports}" -gt 0 ] || n_ports=1
-per_port_max=$(awk '{if ($2 > m) m = $2} END {print m+0}' "${PORTS}.max")
-per_port_median=$(awk '{print $2}' "${PORTS}.max" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
+if [ "${api_ok}" = 1 ]; then
+    awk '{h=$1; if ($2 > cm[h]) cm[h] = $2; if ($3 > fm[h]) fm[h] = $3} END {for (h in cm) print h, cm[h], fm[h]}' \
+        "${API}" | sort > "${PORTS}.max"
+    n_ports=$(wc -l < "${PORTS}.max" | tr -d ' ')
+    [ "${n_ports}" -gt 0 ] || n_ports=1
+    per_port_max=$(awk '{if ($2 > m) m = $2} END {print m+0}' "${PORTS}.max")
+    per_port_median=$(awk '{print $2}' "${PORTS}.max" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
+    conns_total=$(awk '{s+=$2} END{print s+0}' "${PORTS}.max")
+    inflight_total=$(awk '{s+=$3} END{print s+0}' "${PORTS}.max")
+    out_peak="${conns_total}"; out_med="${conns_total}"
+    in_peak="${inflight_total}"; in_med="${inflight_total}"
+    if [ "${api_cap}" = "null" ]; then today_cap=0; else today_cap="${api_cap:-0}"; fi
+    today_conns="${api_maxconns:-0}"
+    api_cfg=1
+else
+    out_peak=$(awk -F'\t' '{if($2>m)m=$2} END{print m+0}' "${TSV}")
+    out_med=$(awk -F'\t' '{print $2}' "${TSV}" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
+    in_peak=$(awk -F'\t' '{if($3>m)m=$3} END{print m+0}' "${TSV}")
+    in_med=$(awk -F'\t' '{print $3}' "${TSV}" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
+    # 每口在窗口内的最大值
+    awk '{if ($3 > m[$2]) m[$2] = $3} END {for (p in m) print p, m[p]}' "${PORTS}" | sort -n > "${PORTS}.max"
+    n_ports=$(wc -l < "${PORTS}.max" | tr -d ' ')
+    [ "${n_ports}" -gt 0 ] || n_ports=1
+    per_port_max=$(awk '{if ($2 > m) m = $2} END {print m+0}' "${PORTS}.max")
+    per_port_median=$(awk '{print $2}' "${PORTS}.max" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
+fi
 
 # ---- 当前配置（读容器 env；读不到就降级）----
-today_cap=0
-today_conns=0
+# ⚠️ 只在**回落路径**里初始化：API 模式下 today_cap/today_conns 已由 /api/pool 填好，
+# 这两行无条件执行会把它们覆盖回 0（实测踩过：配置显示"未设"、判定退化成 peer-limited）。
 startup=""
 gw_limits=""
-if command -v docker >/dev/null 2>&1 && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+if [ "${api_cfg}" = 1 ]; then
+    :  # 配置来自 /api/pool（today_cap/today_conns 已填好，**不要**在这里重置）
+elif command -v docker >/dev/null 2>&1 && docker inspect "${CONTAINER}" >/dev/null 2>&1; then
+    today_cap=0; today_conns=0
     envs=$(docker inspect "${CONTAINER}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null)
     cap_raw=$(printf '%s\n' "${envs}" | sed -n 's/^XLITE_UPSTREAM_STREAM_CAP=//p')
     conns_raw=$(printf '%s\n' "${envs}" | sed -n 's/^XLITE_UPSTREAM_MAX_CONNS_PER_HOST=//p')
@@ -262,6 +375,7 @@ fi
 # ---- 在途：口径优先级 = --inflight > k6 摘要（qps × dur p50）> 入站连接数 ----
 inflight_total="${in_med}"
 inflight_meter="入站连接数（在途的**上界** —— VU 在两次请求之间也占着连接）"
+if [ "${api_ok}" = 1 ]; then inflight_meter="由 /api/pool 直接读数（精确，非上界）"; fi
 k6_derived=""
 if [ -n "${K6_REPORT}" ] && [ -r "${K6_REPORT}" ]; then
     k6_qps=$(grep -m1 'iterations' "${K6_REPORT}" 2>/dev/null | grep -oE '[0-9.]+/s' | tr -d '/s')
@@ -287,7 +401,8 @@ if [ "${per_port_median}" -gt 0 ]; then
 fi
 
 data_ok=1
-if [ "${per_port_median:-0}" -le 0 ] || [ "${n_ports:-0}" -lt 2 ]; then
+min_ports=2; [ "${api_ok}" = 1 ] && min_ports=1
+if [ "${per_port_median:-0}" -le 0 ] || [ "${n_ports:-0}" -lt "${min_ports}" ]; then
     # 每口连接数不可用 ⇒ **拒绝判定**。宁可让人重采，也不能给一个自信的错结论。
     data_ok=0
 fi
@@ -301,9 +416,25 @@ else
     RECOMMEND_CAP_ENV="（拒绝判定）"
     RECOMMEND_CONNS="（拒绝判定）"
     RECOMMEND_CONNS_ENV="（拒绝判定）"
-    RECOMMEND_REASON="每口连接数不可用（跨口中位 ${per_port_median:-空} / 活跃口数 ${n_ports:-0}）"
+    RECOMMEND_REASON="每${UNIT}连接数不可用（跨${UNIT}中位 ${per_port_median:-空} / 活跃${UNIT}数 ${n_ports:-0}）"
 fi
 
+in_label="入站（k6→网关）"
+out_label="出站到农场  "
+out_hint="（端口 ${FARM_LO}-${FARM_HI}）"
+ports_label="活跃农场口数"
+detail_label="每口连接数明细"
+conns_label="每口连接数     "
+inflight_label="每口在途流数   "
+if [ "${api_ok}" = 1 ]; then
+    conns_label="每 host 连接数 "
+    inflight_label="每 host 在途流数"
+    in_label="池内在途（Σhost）"
+    out_label="池内连接（Σhost）"
+    out_hint="（不按端口聚合：/api/pool 按 host 报）"
+    ports_label="活跃 host 数 "
+    detail_label="每 host 连接/在途明细"
+fi
 case "${VERDICT}" in
     binding)      verdict_cn="**在绑定** —— 放开 CAP 会把中位首字还回来，代价是尾部与吞吐" ;;
     partial)      verdict_cn="**部分绑定** —— 改 CAP 会有变化，但幅度小于实验室的满绑定场景" ;;
@@ -326,11 +457,11 @@ cat <<EOF
 容器 fd           : ${gw_limits:-（未读到，非 docker 场景可忽略）}
 
 窗口              : ${rounds} 轮 × ${INTERVAL}s
-出站到农场        : 峰值 ${out_peak}，中位 ${out_med}（端口 ${FARM_LO}-${FARM_HI}）
-入站（k6→网关）   : 峰值 ${in_peak}，中位 ${in_med}   ← 在途口径：${inflight_meter}
-活跃农场口数      : ${n_ports}
-每口连接数        : 峰值 ${per_port_max}，跨口中位 ${per_port_median}
-每口在途流数      : ≈ ${per_port_inflight}
+${out_label}        : 峰值 ${out_peak}，中位 ${out_med}${out_hint}
+${in_label}   : 峰值 ${in_peak}，中位 ${in_med}   ← 在途口径：${inflight_meter}
+${ports_label}      : ${n_ports}
+${conns_label}  : 峰值 ${per_port_max}，跨口中位 ${per_port_median}
+${inflight_label}  : ≈ ${per_port_inflight}
 实际每连接流数    : ≈ $(awk -v a="${achieved_x10}" 'BEGIN{printf "%.1f", a/10}')
 
 判定              : ${VERDICT} —— ${verdict_cn}
@@ -338,9 +469,13 @@ cat <<EOF
 建议 MAX_CONNS    : ${RECOMMEND_CONNS}
 理由              : ${RECOMMEND_REASON}
 
-每口连接数明细（窗口内最大值，前 8 口）：
+${detail_label}（窗口内最大值，前 8）：
 EOF
-sort -k2 -rn "${PORTS}.max" | head -8 | awk '{printf "  端口 %s：%s 条\n", $1, $2}'
+if [ "${api_ok}" = 1 ]; then
+    sort -k2 -rn "${PORTS}.max" | head -8 | awk '{printf "  %s：%s 连接 / %s 在途\n", $1, $2, $3}'
+else
+    sort -k2 -rn "${PORTS}.max" | head -8 | awk '{printf "  端口 %s：%s 条\n", $1, $2}'
+fi
 
 if [ -n "${k6_line}" ]; then
     cat <<EOF
@@ -353,7 +488,7 @@ fi
 if [ "${data_ok}" != "1" ]; then
     {
         echo
-        echo "⚠️  每口连接数不可用（跨口中位 ${per_port_median:-空}，活跃口数 ${n_ports:-0}）—— **拒绝给出建议**。"
+        echo "⚠️  每${UNIT}连接数不可用（跨${UNIT}中位 ${per_port_median:-空}，活跃${UNIT}数 ${n_ports:-0}）—— **拒绝给出建议**。"
         echo "    原始采样：${TSV} / ${PORTS}.max"
         echo "    常见原因：(a) 采样窗口内没有压测在跑（池子只剩常驻连接）；(b) ss 输出格式与本脚本预期不符。"
         echo "    请在上表列出的目标档位跑着的时候重采。"
