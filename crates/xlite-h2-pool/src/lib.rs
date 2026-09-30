@@ -7,8 +7,7 @@
 //! connection per host and, once the peer's `SETTINGS_MAX_CONCURRENT_STREAMS`
 //! is exhausted, keeps assigning requests to that same connection so they
 //! queue *inside* it before ever reaching the upstream. That queueing shows
-//! up as `upstream_ttft` exploding while `queue_wait` stays 0 (see
-//! `docs/dev/loadtest-ttft-queue-analysis-2026-09.md`).
+//! up as `upstream_ttft` exploding while `queue_wait` stays 0.
 //!
 //! Go's `x/net/http2` does not do this: when a connection reaches the peer's
 //! advertised stream cap it stops using it and dials a fresh connection (up

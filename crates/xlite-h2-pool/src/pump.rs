@@ -1,6 +1,6 @@
 //! Per-connection driver + stream pump, merged into **one** task.
 //!
-//! Rationale (see `docs/dev/h2-pinned-poll-2026-09.md` §十二): an h2 connection's
+//! Rationale: an h2 connection's
 //! shared state lock is taken both by the *connection driver* (reads the socket,
 //! dispatches frames) and by `RecvStream::poll_data` (the pump). Running those in
 //! two tasks left ~17% of gateway CPU in that lock. Driving the connection and
@@ -8,8 +8,9 @@
 //! while the connection count stays exactly what the pool dialed (no ×8).
 //!
 //! Enabled by [`Config::pinned_poll`](crate::Config::pinned_poll). The wire
-//! layer defaults this to **on** and only `XROUTER_UPSTREAM_PINNED_POLL=0` / `false`
-//! turns it off; the pool crate itself has no default and just honours the flag.
+//! layer currently always enables it (`src/upstream.rs` hardcodes
+//! `pinned_poll: true`; there is no env override); the pool crate itself has no
+//! default and just honours the flag.
 
 use std::pin::Pin;
 use std::sync::Arc;

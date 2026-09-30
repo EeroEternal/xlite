@@ -47,7 +47,7 @@ pub struct Config {
     /// Client-side cap on streams per connection, applied **on top of** the
     /// peer's live `SETTINGS_MAX_CONCURRENT_STREAMS`: a connection is full at
     /// `min(peer_settings, stream_budget_per_conn)`. `usize::MAX` (the default
-    /// `build_native_h2` passes when `XROUTER_UPSTREAM_STREAM_CAP` is unset) means
+    /// `build_native_h2` passes when `XLITE_UPSTREAM_STREAM_CAP` is unset) means
     /// "let the peer decide" — the pre-existing behaviour.
     ///
     /// Lowering it below the peer's value makes the pool dial more connections
@@ -55,15 +55,15 @@ pub struct Config {
     /// concurrency knob: every stream on a connection shares that connection's
     /// internal state lock, so packing hundreds of streams onto one connection
     /// turns the lock into a cross-worker contention point (measured at ~30–50%
-    /// of gateway CPU in `docs/dev/loadtest-linkbound-2026-09.md` §十二). Note
+    /// of gateway CPU in the 2026-09 link-bound loadtest). Note
     /// that the same experiment showed lowering it also costs an upstream
     /// first-byte **tail** regression (p90 ×4–5), so it is a lever, not a fix.
     pub stream_budget_per_conn: usize,
     /// Poll this authority's `RecvStream`s from the connection's own task — the
     /// same task that drives the connection — instead of from whichever request
     /// task owns the body. That makes the connection's shared lock have exactly
-    /// one owner, without adding connections
-    /// (see `docs/dev/h2-pinned-poll-2026-09.md` §十二).
+    /// one owner, without adding connections (see the `src/pump.rs` module
+    /// docs for the rationale and measurements).
     pub pinned_poll: bool,
     /// Opens the underlying transport for a host.
     pub dial: Dial,
