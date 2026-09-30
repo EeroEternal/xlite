@@ -43,19 +43,24 @@ standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 # published 0929 load-test report's tables were built from. It is the evidence behind
 # a shipped report, not a stray build artifact, so it is retained as a data appendix
 # (no document links it today — if that stays true and the report is superseded, the
-# whole directory can go in one commit). Note this is the **only** non-Markdown entry
-# under docs/dev/ and the allowlist is by basename, i.e. exactly this one directory:
-# anything else landing next to it still trips the `artifact:` check below.
-keep=" data loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md "
+# whole directory can go in one commit).
+#
+# `keep` holds paths **relative to docs/dev/** and is matched against the relative
+# path of every file in a recursive walk, so a directory is never a blanket
+# exemption: this one archive is named explicitly, and anything else dropped into
+# `data/` still trips the `artifact:` check below.
+keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md data/loadtest-metrics-2026-09-29.json "
 
 findings=0
-for f in docs/dev/*; do
+# Recursive: an empty directory cannot be committed, so only files are judged, each
+# by its path relative to docs/dev/.
+while IFS= read -r f; do
   [[ "$links_only" -eq 0 ]] || break
-  [[ -e "$f" ]] || continue
+  rel="${f#docs/dev/}"
   base="$(basename "$f")"
   stem="${base%.*}"
 
-  if [[ "$keep" == *" $base "* ]]; then
+  if [[ "$keep" == *" $rel "* ]]; then
     continue
   fi
 
@@ -76,7 +81,7 @@ for f in docs/dev/*; do
     echo "landed:  $f 疑似已落地（changelog 已发布段落命中），确认后删除"
     findings=1
   fi
-done
+done < <(find docs/dev -mindepth 1 -type f)
 
 # ③ 相对断链检查：docs 全树 + AGENTS.md + skills 的 Markdown 相对链接目标必须存在
 # （锚点只查文件存在性；外链 http/mailto 跳过）
