@@ -82,7 +82,9 @@ usage() {
   --out PATH         原始采样 TSV 路径（默认 /tmp/pool_sizing_probe_<pid>.tsv）
   --gw-url URL       网关地址（默认 http://127.0.0.1:<--gw-port>；走 /api/pool 用）
   --admin-password P 管理员密码：给了就**优先读 /api/pool**（0.5.2+，精确到每条 host
-                     的连接数与在途流数，不需要 ss / docker）；不给则回落 ss 采样
+                     的连接数与在途流数，不需要 ss / docker）；不给则回落 ss 采样。
+                     ⚠️ 推荐改用 `ADMIN_PASSWORD` 环境变量（脚本优先读它）：`-P`/`P` 两个
+                     参数形式都会把值留在本进程 argv（ps / shell history）里。
   --self-test        只跑纯函数自测（不采样）
   -h, --help         显示本帮助
 USAGE
@@ -265,9 +267,13 @@ rounds=$(( RUN_SECONDS / INTERVAL ))
 api_json=""; api_hosts=""; api_cap=""; api_maxconns=""
 fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
     local jar; jar="$(mktemp)"
-    curl -sS -m 5 -c "${jar}" -X POST "${GW_URL}/api/auth/login" \
-        -H 'Content-Type: application/json' -d "{\"password\":\"${ADMIN_PASSWORD_CLI}\"}" \
-        -o /dev/null 2>/dev/null || { rm -f "${jar}"; return 1; }
+    # 密码经 stdin（--data @-）送给 curl，**不走 curl 的 argv** —— 否则 `ps` 能看到
+    # `curl ... -d {"password":"…"}`。脚本自己的 argv 仍可能带 --admin-password，
+    # 所以文档推荐用 ADMIN_PASSWORD 环境变量（见 usage）。
+    printf '{"password":"%s"}' "${ADMIN_PASSWORD_CLI}" \
+        | curl -sS -m 5 -c "${jar}" -X POST "${GW_URL}/api/auth/login" \
+            -H 'Content-Type: application/json' --data @- \
+            -o /dev/null 2>/dev/null || { rm -f "${jar}"; return 1; }
     api_json="$(curl -sS -m 5 -b "${jar}" "${GW_URL}/api/pool" 2>/dev/null)"
     rm -f "${jar}"
     api_cap="$(printf '%s' "${api_json}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')"
@@ -284,6 +290,13 @@ if [ "${API_MODE}" = 1 ]; then
     else
         api_note="（/api/pool 不可用：登录失败，或该版本还没有这个端点）"
     fi
+fi
+
+# API 模式在**运行时**才可能回落到 ss（登录失败 / 端点缺失 / hosts 为空），所以 ss 只在
+# 确定要走回落路径时才检查 —— 否则会把“不需要 ss”的 API 模式也卡住。没有 ss 时给清晰
+# 报错，而不是静默采到 0 条、再报一个误导性的“每口连接数不可用”。
+if [ "${api_ok}" != 1 ]; then
+    command -v ss >/dev/null 2>&1 || { echo "缺工具：ss（/api/pool 不可用${api_note} ⇒ 需要回落 ss 路径；修好密码/地址，或装上 iproute2）" >&2; exit 3; }
 fi
 
 : > "${TSV}"; : > "${PORTS}"; : > "${API}"
