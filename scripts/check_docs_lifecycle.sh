@@ -49,7 +49,14 @@ standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 # path of every file in a recursive walk, so a directory is never a blanket
 # exemption: this one archive is named explicitly, and anything else dropped into
 # `data/` still trips the `artifact:` check below.
-keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md data/loadtest-metrics-2026-09-29.json "
+#
+# v0.5.2 promotion (2026-09-30): four measurement/design drafts added in this cycle —
+# the 0928/0929 field reports, the high-concurrency tuning guide, and the H2-pool RFC
+# (now carrying its §6 measured rebuttal) — have their summaries in the released
+# [0.5.2] section, but docs/README.md indexes each one as a stable appendix and the
+# per-level detail lives only in them. Retained for the same reason as the v0.5.1
+# batch; prune only after relocating that detail.
+keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md loadtest-report-2026-09-28.md loadtest-report-2026-09-29.md performance-tuning-guide.md rfc-adaptive-h2-pool-architecture.md data/loadtest-metrics-2026-09-29.json "
 
 findings=0
 # Recursive: an empty directory cannot be committed, so only files are judged, each
