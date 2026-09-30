@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 文档生命周期门禁：审查 docs/dev/ 草案是否该清理或归位（docs/rules/documentation.md
-# 规定「已落地结论应写入 changelog 或稳定入口，再删除过时草案」，本脚本提供机械判据）。
+# 文档生命周期门禁：审查 docs/dev/ 草案是否该清理或归位。判据来自本仓的既有约定
+# ——「已落地结论写入 docs/changelog.md 或稳定入口，再删除过时草案」（AGENTS.md 规则 2/4），
+# 本脚本把它机械化为可执行的检查。
 #
 # 输出两类候审项（输出即非零退出，逐个人工裁决后清除）：
 #   landed:  文件名关键词命中 changelog 已发布段落（Unreleased 之外）→ 疑似已落地，
@@ -38,7 +39,14 @@ standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 # [0.5.1] section, but the per-run data tables / affinity SOP / execution plan
 # remain referenced from docs/README.md and each other and are not duplicated
 # elsewhere. Retained as data appendices; prune after relocating the detail.
-keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md "
+# docs/dev/data/ (adjudicated 2026-09-30): the raw per-level metrics JSON that the
+# published 0929 load-test report's tables were built from. It is the evidence behind
+# a shipped report, not a stray build artifact, so it is retained as a data appendix
+# (no document links it today — if that stays true and the report is superseded, the
+# whole directory can go in one commit). Note this is the **only** non-Markdown entry
+# under docs/dev/ and the allowlist is by basename, i.e. exactly this one directory:
+# anything else landing next to it still trips the `artifact:` check below.
+keep=" data loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md "
 
 findings=0
 for f in docs/dev/*; do
