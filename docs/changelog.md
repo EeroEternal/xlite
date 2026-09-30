@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`git-stash-safe` skill 补一条硬约束：`git stash pop` / `apply` 恢复的是**整个 index**（含 `-u` 捞进来的未跟踪路径）**，因此「pop 之后必须 `git diff --cached --stat` 对账」成为提交前的强制动作。来源是一次真实事故：`#50` 里被夹带的 `admin/node_modules` 软链接 —— `git stash -q -u` 把它存进 stash，`git stash pop` 又把它**恢复成已暂存**，而 `git commit` 提交的是**整个 index** ⇒ 它就这样进了 PR（`#58` 撤掉并改了 `.gitignore`）。改动：硬约束新增第 5 条（含事故复盘）、Procedure 新增第 6 步（`git restore --staged <path>` 清掉非预期暂存）、Verification 新增一条（每次提交前对账，pop 之后**必做**）。**验证**：本次提交自己就是第一个用例（`git diff --cached --stat` 逐条核对后再 commit）；纯技能文档改动，无代码影响。
+
 ## [0.5.2] - 2026-09-30
 
 - **清掉 `crates/xlite-h2-pool` 注释里 4 处指向不存在文档的幽灵引用，并修正一处过时的 env 旋钮名（纯注释，零行为变化）**。`lib.rs` / `pool.rs` / `pump.rs` / `tests/pump_multiplex_bench.rs` 的 rustdoc 分别引用了 `docs/dev/loadtest-ttft-queue-analysis-2026-09.md`、`docs/dev/loadtest-linkbound-2026-09.md`、`docs/dev/h2-pinned-poll-2026-09.md` —— 三个文件在 `git log --all` 全历史里从未存在（与清理 `docs/rules/documentation.md` 同类，均属 `AGENTS.md` 规则 2 禁止的形态）。修法**不伪造替代文档**：实测数字（~30–50% CPU / p90 ×4–5 / ~17% CPU）一字未改，linkbound 那处改指**仓内真实存在**的 `docs/manual/lab-loadtest.md`「上游流闸门」一节，pinned_poll 那处改指 `pump` 模块；同时 `pool.rs` 把改名前旧名 `XROUTER_UPSTREAM_STREAM_CAP` 改为实际读取的 `XLITE_UPSTREAM_STREAM_CAP`（`src/config.rs`）。**验证**：全仓 `.rs` 引用的 `docs/` 路径逐一存在性校验 MISS 清零；两 crate `cargo clippy` 无告警；`ci_local.sh --tier t1 --all` 绿。**边界**：三个缺失的实验文档本身（linkbound / pinned-poll / ttft-queue 三轮测量）仍待补写，本条只记录引用已不再指向空。
