@@ -170,18 +170,20 @@ recommend() {
 }
 
 # 解析我们自己的 /api/pool 负载。字段顺序由 serde 的 BTreeMap 决定 ⇒ **逐字段抽取**，不假设顺序。
-# 输出：每 host 一行 "<host> <connections> <in_flight>"
+# 输出：每 host 一行 "<host> <connections> <in_flight> <effective_ceiling> <peer_cap>"（后两列可为空）
 api_hosts_from_json() {
     # 注意两点：(1) `hosts` 不一定排在最后（serde 的 BTreeMap 把 max_conns_per_host /
     # stream_budget_per_conn 排在它后面）⇒ 只截到**第一个** `]`；
     # (2) 用 awk 的 `RS='},{'` 切记录 —— **BSD sed 的替换里 `\n` 不是换行**，
     # `sed 's/},{/}\n{/g'` 在 macOS 上会把两个 host 粘成一个（实测丢过第二个）。
     printf '%s' "$1" | sed -n 's/.*"hosts":\[//p' | sed 's/\].*//' | awk -v RS='},{' '{
-        h=""; c=""; f="";
+        h=""; c=""; f=""; e=""; p="";
         if (match($0, /"host":"[^"]*"/))      { h = substr($0, RSTART + 8,  RLENGTH - 9) }
         if (match($0, /"connections":[0-9]+/)){ c = substr($0, RSTART + 14, RLENGTH - 14) }
         if (match($0, /"in_flight":[0-9]+/))  { f = substr($0, RSTART + 12, RLENGTH - 12) }
-        if (h != "") print h, (c == "" ? 0 : c), (f == "" ? 0 : f)
+        if (match($0, /"peer_cap":[0-9]+/))   { p = substr($0, RSTART + 11, RLENGTH - 11) }
+        if (match($0, /"effective_ceiling":[0-9]+/)) { e = substr($0, RSTART + 20, RLENGTH - 20) }
+        if (h != "") print h, (c == "" ? 0 : c), (f == "" ? 0 : f), e, p
     }'
 }
 
@@ -224,14 +226,18 @@ if [ "${SELF_TEST}" = "1" ]; then
     # 关键：serde 的 BTreeMap 按字典序输出（cap_updates < connections < dials < host <
     # in_flight < …）⇒ 解析器必须**逐字段抽取**、不假设键顺序。下面第二个 host 故意把
     # in_flight 写在前面，顺序与真实负载相反。
-    fixture='{"data":{"hosts":[{"cap_updates":0,"connections":2,"dials":7,"host":"10.56.88.29:8081","in_flight":443,"reclaimed":1,"settings_fallbacks":0},{"in_flight":750,"host":"10.56.88.29:8082","dials":9,"connections":3}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
-    check "解析 2 host（两种键序）" "$(api_hosts_from_json "${fixture}" | tr '\n' '|')" \
-        "10.56.88.29:8081 2 443|10.56.88.29:8082 3 750|"
+    fixture='{"data":{"hosts":[{"cap_updates":0,"connections":2,"dials":7,"effective_ceiling":750,"effective_streams_per_conn":250,"host":"10.56.88.29:8081","in_flight":443,"peer_cap":250,"reclaimed":1,"settings_fallbacks":0},{"connections":3,"effective_ceiling":750,"host":"10.56.88.29:8082","in_flight":750,"peer_cap":250}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
+    check "解析 2 host（两种键序 + 上界/对端两列）" "$(api_hosts_from_json "${fixture}" | tr '\n' '|')" \
+        "10.56.88.29:8081 2 443 750 250|10.56.88.29:8082 3 750 750 250|"
     empty='{"data":{"hosts":[],"max_conns_per_host":3,"stream_budget_per_conn":null},"success":true}'
     check "空 hosts ⇒ 零输出" "$(api_hosts_from_json "${empty}" | grep -c . || true)" "0"
     check "cap 数字可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" "30"
     check "cap=null ⇒ 抽不到数字（= 随对端）" "$(printf '%s' "${empty}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" ""
     check "max_conns 可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"max_conns_per_host":\([0-9]*\).*/\1/p')" "3"
+    # 回归：`peer_cap`/`effective_ceiling` 为 null 的 host（未握手/无活连接）**不能沿用**
+    # 上一个 host 的值 —— awk 逐字段抽取时忘了每轮重置 `e`/`p` 就会残留。
+    mixed='{"data":{"hosts":[{"connections":2,"effective_ceiling":750,"host":"h1","in_flight":1,"peer_cap":250},{"connections":3,"host":"h2","in_flight":2}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
+    check "null 上界/对端不残留（第2个 host）" "$(api_hosts_from_json "${mixed}" | sed -n '2p' | awk '{print $4"/"$5}')" "/"
 
     if [ "${fails}" -gt 0 ]; then echo "自测失败 ${fails} 项"; exit 1; fi
     echo "自测全通过"
@@ -340,13 +346,24 @@ rm -f "${TSV}.ss"
 
 # ---- 汇总 ----
 if [ "${api_ok}" = 1 ]; then
-    awk '{h=$1; if ($2 > cm[h]) cm[h] = $2; if ($3 > fm[h]) fm[h] = $3} END {for (h in cm) print h, cm[h], fm[h]}' \
+    # 五列都要带上：后两列（准入上界 / 对端通告值）是给报告与建议用的，
+    # 只留前三列会让它们凭空消失（实测踩过）。
+    awk '{h=$1
+          if ($2 > cm[h]) cm[h] = $2
+          if ($3 > fm[h]) fm[h] = $3
+          if ($4 ~ /^[0-9]+$/) ce[h] = $4
+          if ($5 ~ /^[0-9]+$/) pc[h] = $5}
+         END {for (h in cm) print h, cm[h], fm[h], ce[h], pc[h]}' \
         "${API}" | sort > "${PORTS}.max"
     n_ports=$(wc -l < "${PORTS}.max" | tr -d ' ')
     [ "${n_ports}" -gt 0 ] || n_ports=1
     per_port_max=$(awk '{if ($2 > m) m = $2} END {print m+0}' "${PORTS}.max")
     per_port_median=$(awk '{print $2}' "${PORTS}.max" | sort -n | awk '{a[NR]=$1} END{print (NR? a[int((NR+1)/2)] : 0)}')
     conns_total=$(awk '{s+=$2} END{print s+0}' "${PORTS}.max")
+    # 准入上界与对端通告值：跨 host 取**最小**（保守）。上界 = min(CAP, 对端) × CONNS，
+    # 由网关算好直接给出 ⇒ 这里不再需要手算，也不再靠 --peer-cap 猜。
+    ceiling_min=$(awk '$4 ~ /^[0-9]+$/ {if (m == "" || $4 < m) m = $4} END {print m}' "${PORTS}.max")
+    peer_min=$(awk '$5 ~ /^[0-9]+$/ {if (m == "" || $5 < m) m = $5} END {print m}' "${PORTS}.max")
     inflight_total=$(awk '{s+=$3} END{print s+0}' "${PORTS}.max")
     out_peak="${conns_total}"; out_med="${conns_total}"
     in_peak="${inflight_total}"; in_med="${inflight_total}"
@@ -422,7 +439,9 @@ fi
 if [ "${data_ok}" = "1" ]; then
     binding_verdict "${achieved_x10}" "${today_cap}"
     peak_for_sizing=$(( per_port_max > per_port_inflight ? per_port_max : per_port_inflight ))
-    recommend "${VERDICT}" "${today_cap}" "${today_conns}" "${PEER_CAP}" "${peak_for_sizing}" "${HEADROOM_X10}"
+    peer_for_sizing="${PEER_CAP}"
+    if [ -n "${peer_min}" ]; then peer_for_sizing="${peer_min}"; fi
+    recommend "${VERDICT}" "${today_cap}" "${today_conns}" "${peer_for_sizing}" "${peak_for_sizing}" "${HEADROOM_X10}"
 else
     VERDICT="unusable"
     RECOMMEND_CAP="（拒绝判定）"
@@ -432,6 +451,19 @@ else
     RECOMMEND_REASON="每${UNIT}连接数不可用（跨${UNIT}中位 ${per_port_median:-空} / 活跃${UNIT}数 ${n_ports:-0}）"
 fi
 
+# 上界的来源（写清是怎么算出来的，免得又变成"看不见的数"）
+ceiling_hint=""
+used_pct="（未知）"
+if [ -n "${ceiling_min}" ]; then
+    ceiling_hint="（min(CAP=${today_cap:-未设}, 对端=${peer_min:-?}) × CONNS=${today_conns:-?}）"
+    used_pct=$(awk -v u="${per_port_inflight}" -v c="${ceiling_min}" 'BEGIN{ if (c > 0) printf "%d%%", u*100/c; else print "（未知）" }')
+fi
+# 对端值比我们的 CAP 还小时，指出"真正限流的是对端" —— 否则读者会把
+# `not-binding` 误读成"池子没塞满"，而实际上是我们的 CAP 根本没机会绑定。
+peer_hint=""
+if [ -n "${peer_min}" ] && [ -n "${today_cap}" ] && [ "${today_cap}" != 0 ] && [ "${peer_min}" -lt "${today_cap}" ]; then
+    peer_hint="  ⚠️ 对端只允许 ${peer_min} 流/连接 < 你的 CAP=${today_cap} ⇒ 你的 CAP 没机会绑定，限流的是对端"
+fi
 in_label="入站（k6→网关）"
 out_label="出站到农场  "
 out_hint="（端口 ${FARM_LO}-${FARM_HI}）"
@@ -475,6 +507,8 @@ ${in_label}   : 峰值 ${in_peak}，中位 ${in_med}   ← 在途口径：${infl
 ${ports_label}      : ${n_ports}
 ${conns_label}  : 峰值 ${per_port_max}，跨口中位 ${per_port_median}
 ${inflight_label}  : ≈ ${per_port_inflight}
+准入上界（每 host）: ${ceiling_min:-（未知，需 /api/pool）} 流${ceiling_hint}${peer_hint}
+已用（每 host 在途峰值/上界） : ${used_pct}
 实际每连接流数    : ≈ $(awk -v a="${achieved_x10}" 'BEGIN{printf "%.1f", a/10}')
 
 判定              : ${VERDICT} —— ${verdict_cn}

@@ -443,6 +443,12 @@ docker run --rm --network host \
 
 **现场怎么查、怎么改**（`.24` / `.26` **各跑一次**，取更紧的那次）：
 
+> **上界现在可读，不用再手算**：`GET /api/pool`（0.5.2 起）每 host 给出 `peer_cap` /
+> `effective_streams_per_conn` / **`effective_ceiling`**（= `min(CAP, 对端) × CONNS`），启动时每个 host
+> 也会打一行 `upstream admission ceiling … ceiling=N`；`advanced/pool_sizing_probe.sh` 直接读它。
+> 这正是为了一件常被忽略的事：**调 `CAP` 会悄悄改掉总容量**（30 → 不设，上界 750 → 6,250 ✗），
+> 现在它会被**打出来**，想保住 750 时数字直接告诉你 `CONNS` 该设几。
+>
 > 别照搬本文的实验值：`CAP` 只在**真的绑定**时才有代价。用只读探针
 > [`pool_sizing_probe.sh`](pool_sizing_probe.sh)（压测**进行中**在网关机上跑）量出
 > 「每口连接数 / 每口在途流数」，它会直接给出该不该改、以及 `MAX_CONNS` 该设几，

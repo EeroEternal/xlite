@@ -166,6 +166,30 @@ async fn all_stats_reports_every_dialed_host() {
     assert_eq!(stats[0].1.in_flight, 1, "the lease holds the slot");
     assert_eq!(stats[0].1.dials, 1);
 
+    // The visibility change: the two inputs of the per-host ceiling are reported,
+    // so nobody has to compute `min(cap, peer) × max_conns` by hand.
+    assert_eq!(
+        stats[0].1.peer_cap,
+        Some(3),
+        "this fixture's peer advertises SETTINGS_MAX_CONCURRENT_STREAMS=3"
+    );
+    assert_eq!(
+        stats[0].1.stream_budget_per_conn,
+        xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN
+    );
+    assert_eq!(
+        stats[0].1.effective_streams_per_conn(),
+        Some(3),
+        "min(our 250 budget, the peer's 3): the peer wins"
+    );
+
+    // A host whose connections are gone (or that was only ever probed) reports no
+    // peer value — the ceiling is unknowable until a handshake, and must not be
+    // invented.
+    let unknown = pool.stats("never-dialed");
+    assert_eq!(unknown.peer_cap, None);
+    assert_eq!(unknown.effective_streams_per_conn(), None);
+
     drop(lease);
     assert_eq!(
         pool.all_stats()[0].1.in_flight,
@@ -695,6 +719,8 @@ async fn stats_track_connections_in_flight_and_dials() {
             reclaimed: 0,
             settings_fallbacks: 0,
             cap_updates: 0,
+            stream_budget_per_conn: xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN,
+            peer_cap: None,
         }
     );
 }
