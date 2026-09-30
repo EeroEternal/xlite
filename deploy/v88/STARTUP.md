@@ -317,8 +317,9 @@ RESUME=1 ./run_full_88_xg.sh --combo B
 ./advanced/pool_sizing_probe.sh --container xlite-gateway --gw-port 8080 --seconds 120
 
 # 0.5.2 起更推荐：给了管理员密码就**优先读 /api/pool**（精确到每条 host 的连接数与在途
-# 流数，不需要 ss / docker；读不到会自动回落到上面那条 ss 路径，并在报告里注明）
-./advanced/pool_sizing_probe.sh --gw-url http://127.0.0.1:8080 --admin-password "$ADMIN_PASSWORD" --seconds 120
+# 流数，不需要 ss / docker；读不到会自动回落到上面那条 ss 路径，并在报告里注明）。
+# 密码走 `ADMIN_PASSWORD` 环境变量（脚本优先读它）—— 用 `--admin-password` 会把明文留在 argv
+ADMIN_PASSWORD="$ADMIN_PASSWORD" ./advanced/pool_sizing_probe.sh --gw-url http://127.0.0.1:8080 --seconds 120
 #    只读：不改系统、不重启容器、不写配置。
 
 # ② 看「判定」那一行：
