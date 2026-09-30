@@ -32,6 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/overview", get(overview))
+        .route("/api/pool", get(pool_stats))
         .route("/api/providers", get(list_providers).post(create_provider))
         .route(
             "/api/providers/{id}",
@@ -173,6 +174,50 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
         .into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
+}
+
+/// Read-only snapshot of the upstream connection pool: per host, how many
+/// connections are open, how many streams are reserved, and the cumulative
+/// dial/cap bookkeeping.
+///
+/// Two uses, both control-plane: the load-test probe (`advanced/pool_sizing_probe.sh`)
+/// reads it to decide whether `XLITE_UPSTREAM_STREAM_CAP` is actually binding
+/// (issue #49), and it answers "what did the pool look like during that burst of
+/// 502s?" without inferring it from `ss`. Session-guarded like every other
+/// `/api/*` route: it exposes internal topology, so it is not public.
+async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_session(&state, &headers) {
+        return resp.into_response();
+    }
+    let hosts: Vec<Value> = state
+        .upstream
+        .pool_stats()
+        .into_iter()
+        .map(|(host, s)| {
+            json!({
+                "host": host,
+                "connections": s.connections,
+                "in_flight": s.in_flight,
+                "dials": s.dials,
+                "reclaimed": s.reclaimed,
+                "settings_fallbacks": s.settings_fallbacks,
+                "cap_updates": s.cap_updates,
+            })
+        })
+        .collect();
+    // `stream_budget_per_conn` is `usize::MAX` when the operator never set a cap:
+    // report that as null rather than as a number nobody can act on.
+    let stream_budget = if state.config.upstream_stream_cap == usize::MAX {
+        Value::Null
+    } else {
+        json!(state.config.upstream_stream_cap)
+    };
+    ok(json!({
+        "stream_budget_per_conn": stream_budget,
+        "max_conns_per_host": state.config.max_conns_per_host,
+        "hosts": hosts,
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

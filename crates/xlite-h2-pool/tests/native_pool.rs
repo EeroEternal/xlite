@@ -148,6 +148,33 @@ fn test_pool_failing_raw(raw_os_error: i32) -> (Pool, Arc<AtomicUsize>) {
     (pool, dials)
 }
 
+/// What `GET /api/pool` serves, and what the field probe reads: every host the
+/// pool has dialed, with its live connection and in-flight counts.
+#[tokio::test(flavor = "multi_thread")]
+async fn all_stats_reports_every_dialed_host() {
+    let (pool, _) = test_pool(4, 3, false);
+    assert!(
+        pool.all_stats().is_empty(),
+        "nothing dialed yet: an empty pool must report nothing, not a phantom host"
+    );
+
+    let lease = pool.acquire("upstream").await.unwrap();
+    let stats = pool.all_stats();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].0, "upstream");
+    assert_eq!(stats[0].1.connections, 1);
+    assert_eq!(stats[0].1.in_flight, 1, "the lease holds the slot");
+    assert_eq!(stats[0].1.dials, 1);
+
+    drop(lease);
+    assert_eq!(
+        pool.all_stats()[0].1.in_flight,
+        0,
+        "releasing the lease has to be visible, otherwise the probe would \
+         conclude the pool is saturated when it is idle"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_peer_max_concurrent_streams() {
     let (pool, _) = test_pool(4, 3, false);

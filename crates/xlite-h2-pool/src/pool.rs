@@ -566,7 +566,12 @@ impl Pool {
         state
     }
 
-    /// Point-in-time stats for one host (used by `/metrics`).
+    /// Point-in-time stats for one host.
+    ///
+    /// Read-only view for the control plane: the gateway serves it at
+    /// `GET /api/pool` so a load-test probe (and whoever is debugging a mass
+    /// failure) can see whether the pool is saturated, still dialing, or waiting
+    /// on its own ceilings. Nothing here is on the data path.
     pub fn stats(&self, host: &str) -> PoolStats {
         let hosts = self.hosts.lock().unwrap();
         let Some(state) = hosts.get(host) else {
@@ -595,6 +600,27 @@ impl Pool {
             settings_fallbacks: state.settings_fallbacks.load(Ordering::Relaxed),
             cap_updates: state.cap_updates.load(Ordering::Relaxed),
         }
+    }
+
+    /// Point-in-time stats for **every** host this pool has dialed, sorted by host.
+    ///
+    /// The key is whatever `acquire` was called with (`host:port` for the
+    /// gateway). Snapshots the key list first, because [`Pool::stats`] takes the
+    /// same lock.
+    pub fn all_stats(&self) -> Vec<(String, PoolStats)> {
+        let hosts: Vec<String> = {
+            let map = self.hosts.lock().unwrap();
+            map.keys().cloned().collect()
+        };
+        let mut out: Vec<(String, PoolStats)> = hosts
+            .into_iter()
+            .map(|host| {
+                let stats = self.stats(&host);
+                (host, stats)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 }
 
