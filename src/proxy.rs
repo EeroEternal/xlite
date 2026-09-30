@@ -164,13 +164,16 @@ pub async fn chat_completions(
         .into_response()
 }
 
-/// 把一个上游错误渲染成**带 cause chain** 的一行。
+/// Render an upstream error together with its full cause chain.
 ///
-/// 502 正文里的 `message` 来自 `try_channel` 的 `Err(String)`，而 `anyhow::Error` 的
-/// `Display` **只打最外层 context** ⇒ `map_err(|e| e.to_string())` 会把真实原因整条丢掉：
-/// `failed to open transport to upstream: …`（fd 耗尽）／`HTTP/2 handshake failed: …`／
-/// `h2 send_request: …` 在客户端与压测日志里一律退化成 `h2 pool acquire` 这个标签，
-/// 无法区分三种完全不同的故障。改报 `{:#}`（anyhow 的 chain 格式，各层用 `: ` 相连）。
+/// The 502 body carries `try_channel`'s `Err(String)`, and `anyhow::Error`'s
+/// `Display` prints **only the outermost context** — so `map_err(|e|
+/// e.to_string())` threw the real reason away: `failed to open transport to
+/// upstream: …` (fd exhaustion), `HTTP/2 handshake failed: …` and
+/// `h2 send_request: …` all collapsed into the one label `h2 pool acquire`,
+/// indistinguishable from each other both in the client body and in the
+/// load-test log. Report `{:#}` instead — anyhow's chain format, layers joined
+/// by `: `.
 fn err_chain(e: &anyhow::Error) -> String {
     format!("{e:#}")
 }
@@ -199,13 +202,10 @@ async fn try_channel(
         .await
         .map_err(|e| err_chain(&e))?;
     if should_failover(upstream.status, false) {
-        // 状态码要在 drain 之前取（drain 按值吃掉 upstream）
+        // Read the status before draining: `drain_error_body` consumes `upstream`.
         let status = upstream.status;
         let _ = drain_error_body(upstream).await;
-        return Err(format!(
-            "upstream {} returned {}",
-            channel.base_url, status
-        ));
+        return Err(format!("upstream {} returned {}", channel.base_url, status));
     }
     Ok(forward_response(upstream, started).await)
 }
@@ -308,10 +308,9 @@ mod tests {
         );
     }
 
-    /// 反向用例（issue #49）：`err_chain` 必须把 cause 带出来。
-    ///
-    /// 用 `to_string()` 时，下面这个错误在 502 正文里只剩 `h2 pool acquire` ——
-    /// 而它（fd 耗尽）与「h2 握手失败」「连接池已关闭」在报告里长得一模一样。
+    /// Guard against regressing to `to_string()` (issue #49): the cause has to
+    /// survive, otherwise the 502 body carries one label for four different
+    /// failures — fd exhaustion, h2 handshake failure, pool closed, stream error.
     #[test]
     fn err_chain_keeps_the_underlying_cause() {
         let e = anyhow::anyhow!("failed to open transport to upstream: Too many open files")
@@ -319,12 +318,12 @@ mod tests {
         let rendered = err_chain(&e);
         assert!(
             rendered.contains("h2 pool acquire"),
-            "最外层 context 必须保留：{rendered}"
+            "the outermost context has to stay: {rendered}"
         );
         assert!(
             rendered.contains("Too many open files"),
-            "cause chain 必须保留，否则 502 正文只剩一个标签，\
-             分不清 fd 耗尽 / 握手失败 / 连接池关闭：{rendered}"
+            "the cause chain has to stay, or the 502 body turns four different \
+             failures into one label: {rendered}"
         );
     }
 
