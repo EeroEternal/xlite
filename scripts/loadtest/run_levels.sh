@@ -276,10 +276,26 @@ run_k6() {
     # 不传 PICK_INTERVAL（默认 sleep(0)）、不传 XLITE_MAX_IN_FLIGHT
   )
   if [ "$K6_RUNNER" = local ]; then
+    # local 路径不经过容器 ⇒ k6 直接继承**本 shell** 的 `nofile`，没有 `--ulimit` 可用。
+    # 同一个坑：大量 VU 下 k6 会先被封顶（签名：`dial: i/o timeout` 或吞吐静默掉一截，
+    # 而 `fail` / `vus_max` / `iteration_duration` 全正常）。这里**只告警**，不改行为。
+    k6_local_nofile=$(ulimit -n 2>/dev/null || echo 0)
+    case "${k6_local_nofile}" in
+      # 软上限可能是非数字（如 `unlimited`）—— 那就无需告警，也避开 `[: unlimited: integer expected`
+      ''|*[!0-9]*) ;;
+      *) if [ "${k6_local_nofile}" -lt 1048576 ]; then
+           log "⚠️  K6_RUNNER=local 且本 shell nofile=${k6_local_nofile}（< 1048576）—— 高 VU 下 k6 可能先被封顶。"
+           log "    解法：先 ulimit -n 1048576（需 hard ≥ 该值）再重跑，或改用 K6_RUNNER=docker。"
+         fi ;;
+    esac
     k6 run --compatibility-mode=base --summary-export="$RESULT_DIR/$level.summary.json" \
       "${common[@]}" "$K6_SCRIPT" > "$RESULT_DIR/$level.log" 2>&1
   else
+    # `--ulimit nofile`：k6 是这条链路上**唯一**要从一台机同时持住大量 socket 的进程，不设时
+    # 它继承 docker daemon 的默认（可能低到 1024 / 65536）⇒ 连接接不完或持不住。同因的修复见
+    # deploy/v88/run_full_88_xg.sh 的 run_k6_once（#43）。
     docker run --rm -m "$K6_MEM" --network=host \
+      --ulimit nofile=1048576:1048576 \
       -v "$(dirname "$K6_SCRIPT"):/k6:ro" -v "$RESULT_DIR:/out" \
       "${common[@]}" \
       "$K6_IMAGE" run --compatibility-mode=base \
