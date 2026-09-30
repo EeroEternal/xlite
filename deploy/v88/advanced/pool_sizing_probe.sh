@@ -177,13 +177,23 @@ api_hosts_from_json() {
     # (2) 用 awk 的 `RS='},{'` 切记录 —— **BSD sed 的替换里 `\n` 不是换行**，
     # `sed 's/},{/}\n{/g'` 在 macOS 上会把两个 host 粘成一个（实测丢过第二个）。
     printf '%s' "$1" | sed -n 's/.*"hosts":\[//p' | sed 's/\].*//' | awk -v RS='},{' '{
-        h=""; c=""; f=""; e=""; p="";
+        # 每轮重置**所有**列（漏一个就会沿用上一个 host 的值 —— 上一版踩过 e/p）。
+        h=""; c=""; f=""; e=""; p=""; w=""; q=""; n99="";
         if (match($0, /"host":"[^"]*"/))      { h = substr($0, RSTART + 8,  RLENGTH - 9) }
         if (match($0, /"connections":[0-9]+/)){ c = substr($0, RSTART + 14, RLENGTH - 14) }
         if (match($0, /"in_flight":[0-9]+/))  { f = substr($0, RSTART + 12, RLENGTH - 12) }
         if (match($0, /"peer_cap":[0-9]+/))   { p = substr($0, RSTART + 11, RLENGTH - 11) }
         if (match($0, /"effective_ceiling":[0-9]+/)) { e = substr($0, RSTART + 20, RLENGTH - 20) }
-        if (h != "") print h, (c == "" ? 0 : c), (f == "" ? 0 : f), e, p
+        if (match($0, /"waiting":[0-9]+/))      { w = substr($0, RSTART + 10, RLENGTH - 10) }
+        if (match($0, /"queued_total":[0-9]+/)) { q = substr($0, RSTART + 15, RLENGTH - 15) }
+        if (match($0, /"wait_ms_p99":[0-9]+/))  { n99 = substr($0, RSTART + 14, RLENGTH - 14) }
+        # 后三列统一给数字：waiting / queued_total 缺席时本来就是 0；wait_ms_p99 在
+        # "没排过队"时无意义，靠 queued_total==0 判断，不靠这一列。
+        # 可缺席的两列用占位符 `-`：留空会把后面三列**挤位**（$5 变成 0），
+        # 而"上界/对端未知"与"等于 0"是两回事。聚合侧本来就只认数字，`-` 会被跳过。
+        if (h != "") print h, (c == "" ? 0 : c), (f == "" ? 0 : f), \
+                            (e == "" ? "-" : e), (p == "" ? "-" : p), \
+                            (w == "" ? 0 : w), (q == "" ? 0 : q), (n99 == "" ? 0 : n99)
     }'
 }
 
@@ -226,9 +236,9 @@ if [ "${SELF_TEST}" = "1" ]; then
     # 关键：serde 的 BTreeMap 按字典序输出（cap_updates < connections < dials < host <
     # in_flight < …）⇒ 解析器必须**逐字段抽取**、不假设键顺序。下面第二个 host 故意把
     # in_flight 写在前面，顺序与真实负载相反。
-    fixture='{"data":{"hosts":[{"cap_updates":0,"connections":2,"dials":7,"effective_ceiling":750,"effective_streams_per_conn":250,"host":"10.56.88.29:8081","in_flight":443,"peer_cap":250,"reclaimed":1,"settings_fallbacks":0},{"connections":3,"effective_ceiling":750,"host":"10.56.88.29:8082","in_flight":750,"peer_cap":250}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
-    check "解析 2 host（两种键序 + 上界/对端两列）" "$(api_hosts_from_json "${fixture}" | tr '\n' '|')" \
-        "10.56.88.29:8081 2 443 750 250|10.56.88.29:8082 3 750 750 250|"
+    fixture='{"data":{"hosts":[{"cap_updates":0,"connections":2,"dials":7,"effective_ceiling":750,"effective_streams_per_conn":250,"host":"10.56.88.29:8081","in_flight":443,"peer_cap":250,"queued_total":34,"reclaimed":1,"settings_fallbacks":0,"wait_ms_p99":4096,"waiting":394},{"connections":3,"effective_ceiling":750,"host":"10.56.88.29:8082","in_flight":750,"peer_cap":250}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
+    check "解析 2 host（8 列；第 2 个缺席的队列列必须为 0）" "$(api_hosts_from_json "${fixture}" | tr '\n' '|')" \
+        "10.56.88.29:8081 2 443 750 250 394 34 4096|10.56.88.29:8082 3 750 750 250 0 0 0|"
     empty='{"data":{"hosts":[],"max_conns_per_host":3,"stream_budget_per_conn":null},"success":true}'
     check "空 hosts ⇒ 零输出" "$(api_hosts_from_json "${empty}" | grep -c . || true)" "0"
     check "cap 数字可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" "30"
@@ -237,7 +247,8 @@ if [ "${SELF_TEST}" = "1" ]; then
     # 回归：`peer_cap`/`effective_ceiling` 为 null 的 host（未握手/无活连接）**不能沿用**
     # 上一个 host 的值 —— awk 逐字段抽取时忘了每轮重置 `e`/`p` 就会残留。
     mixed='{"data":{"hosts":[{"connections":2,"effective_ceiling":750,"host":"h1","in_flight":1,"peer_cap":250},{"connections":3,"host":"h2","in_flight":2}],"max_conns_per_host":3,"stream_budget_per_conn":30},"success":true}'
-    check "null 上界/对端不残留（第2个 host）" "$(api_hosts_from_json "${mixed}" | sed -n '2p' | awk '{print $4"/"$5}')" "/"
+    # 同时钉两件事：不沿用上一个 host 的值（残留），也不把后面的列挤位（`-` 占位）。
+    check "null 上界/对端不残留且不挤位（第2个 host）" "$(api_hosts_from_json "${mixed}" | sed -n '2p' | awk '{print $4"/"$5"/"$6"/"$7"/"$8}')" "-/-/0/0/0"
 
     if [ "${fails}" -gt 0 ]; then echo "自测失败 ${fails} 项"; exit 1; fi
     echo "自测全通过"
@@ -270,7 +281,7 @@ IN_FILTER="( sport = :${GW_PORT} )"
 rounds=$(( RUN_SECONDS / INTERVAL ))
 [ "${rounds}" -lt 1 ] && rounds=1
 
-api_json=""; api_hosts=""; api_cap=""; api_maxconns=""
+api_json=""; api_hosts=""; api_cap=""; api_maxconns=""; api_has_queue=0
 fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
     local jar; jar="$(mktemp)"
     # 密码经 stdin（--data @-）送给 curl，**不走 curl 的 argv** —— 否则 `ps` 能看到
@@ -285,6 +296,10 @@ fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
     api_cap="$(printf '%s' "${api_json}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')"
     printf '%s' "${api_json}" | grep -q '"stream_budget_per_conn":null' && api_cap="null"
     api_maxconns="$(printf '%s' "${api_json}" | sed -n 's/.*"max_conns_per_host":\([0-9]*\).*/\1/p')"
+    # 这个端点的版本差异：0.5.2 的 /api/pool 没有队列字段。缺字段时**不能**把
+    # "看不见"当成"没有队列"（否则会打印"0 个在等"，那是假事实）。
+    api_has_queue=0
+    printf '%s' "${api_json}" | grep -q '"waiting"' && api_has_queue=1
     case "${api_json}" in *'"hosts"'*) return 0 ;; *) return 1 ;; esac
 }
 api_ok=0; api_note=""; api_cfg=0
@@ -345,6 +360,11 @@ printf '\n' >&2
 rm -f "${TSV}.ss"
 
 # ---- 汇总 ----
+# 回落路径（无 --admin-password）不会进 API 分支 ⇒ 这些量必须先有默认值：
+# `set -u` 下连 `[ -n "${ceiling_min}" ]` 都会 unbound（#68 引入、本 PR 修复的回归），
+# 否则文档承诺的「无密码时优雅降级」实际是整个探针在回落模式下崩掉。
+ceiling_min=""; peer_min=""
+waiting_total=0; queued_total=0; wait_p99_max=0
 if [ "${api_ok}" = 1 ]; then
     # 五列都要带上：后两列（准入上界 / 对端通告值）是给报告与建议用的，
     # 只留前三列会让它们凭空消失（实测踩过）。
@@ -352,8 +372,11 @@ if [ "${api_ok}" = 1 ]; then
           if ($2 > cm[h]) cm[h] = $2
           if ($3 > fm[h]) fm[h] = $3
           if ($4 ~ /^[0-9]+$/) ce[h] = $4
-          if ($5 ~ /^[0-9]+$/) pc[h] = $5}
-         END {for (h in cm) print h, cm[h], fm[h], ce[h], pc[h]}' \
+          if ($5 ~ /^[0-9]+$/) pc[h] = $5
+          if ($6 > wm[h]) wm[h] = $6
+          if ($7 > qm[h]) qm[h] = $7
+          if ($8 > pm[h]) pm[h] = $8}
+         END {for (h in cm) print h, cm[h], fm[h], ce[h], pc[h], wm[h], qm[h], pm[h]}' \
         "${API}" | sort > "${PORTS}.max"
     n_ports=$(wc -l < "${PORTS}.max" | tr -d ' ')
     [ "${n_ports}" -gt 0 ] || n_ports=1
@@ -364,6 +387,10 @@ if [ "${api_ok}" = 1 ]; then
     # 由网关算好直接给出 ⇒ 这里不再需要手算，也不再靠 --peer-cap 猜。
     ceiling_min=$(awk '$4 ~ /^[0-9]+$/ {if (m == "" || $4 < m) m = $4} END {print m}' "${PORTS}.max")
     peer_min=$(awk '$5 ~ /^[0-9]+$/ {if (m == "" || $5 < m) m = $5} END {print m}' "${PORTS}.max")
+    # 队列：深度跨 host 求和（每 host 取窗口内峰值），等待分位取最坏的那个 host。
+    waiting_total=$(awk '{s+=$6} END{print s+0}' "${PORTS}.max")
+    queued_total=$(awk '{s+=$7} END{print s+0}' "${PORTS}.max")
+    wait_p99_max=$(awk '{if ($8 > m) m = $8} END{print m+0}' "${PORTS}.max")
     inflight_total=$(awk '{s+=$3} END{print s+0}' "${PORTS}.max")
     out_peak="${conns_total}"; out_med="${conns_total}"
     in_peak="${inflight_total}"; in_med="${inflight_total}"
@@ -460,6 +487,24 @@ if [ -n "${ceiling_min}" ]; then
 fi
 # 对端值比我们的 CAP 还小时，指出"真正限流的是对端" —— 否则读者会把
 # `not-binding` 误读成"池子没塞满"，而实际上是我们的 CAP 根本没机会绑定。
+# 队列非空 = 上界正被钉住（队排在上游之外），代价记在等待上 —— 这正是"上游很窄"时的
+# 现场形态，所以要把等待分位一起报出来。
+queue_line="（未知，需 /api/pool）"
+if [ "${api_ok}" = 1 ] && [ "${api_has_queue}" = 0 ]; then
+    queue_line="（该版本的 /api/pool 还没有队列字段）"
+elif [ "${api_ok}" = 1 ]; then
+    queue_line="${waiting_total} 个在等 / 累计 ${queued_total}"
+fi
+queue_hint=""
+if [ -n "${waiting_total}" ] && [ "${waiting_total:-0}" -gt 0 ]; then
+    if [ "${queued_total:-0}" -gt 0 ]; then
+        queue_hint="  ← 队列非空，等待 p99 ≤ ${wait_p99_max}ms（上界被钉住，代价记在等待上）"
+    queue_line="${queue_line}${queue_hint}"
+    else
+        queue_hint="  ← 队列非空（尚无排完队的样本，故没有等待分位）"
+        queue_line="${queue_line}${queue_hint}"
+    fi
+fi
 peer_hint=""
 if [ -n "${peer_min}" ] && [ -n "${today_cap}" ] && [ "${today_cap}" != 0 ] && [ "${peer_min}" -lt "${today_cap}" ]; then
     peer_hint="  ⚠️ 对端只允许 ${peer_min} 流/连接 < 你的 CAP=${today_cap} ⇒ 你的 CAP 没机会绑定，限流的是对端"
@@ -508,6 +553,7 @@ ${ports_label}      : ${n_ports}
 ${conns_label}  : 峰值 ${per_port_max}，跨口中位 ${per_port_median}
 ${inflight_label}  : ≈ ${per_port_inflight}
 准入上界（每 host）: ${ceiling_min:-（未知，需 /api/pool）} 流${ceiling_hint}${peer_hint}
+排队（当前/累计） : ${queue_line}
 已用（每 host 在途峰值/上界） : ${used_pct}
 实际每连接流数    : ≈ $(awk -v a="${achieved_x10}" 'BEGIN{printf "%.1f", a/10}')
 
@@ -557,10 +603,22 @@ XLITE_UPSTREAM_MAX_CONNS_PER_HOST 由 ${today_conns} 调整为 ${RECOMMEND_CONNS
 依据为只读探针 advanced/pool_sizing_probe.sh 的现场采样（$(basename "${TSV}")），未改动系统配置。
 EOF
 
-if [ "${in_med}" -lt 100 ]; then
+# 负载是否"低到不可信"：ss 路径看入站连接（≈ 在途 VU），API 路径看**队列** ——
+# API 模式下 in_med 是"池内在途"，它被上界钉住，饱和的小上界（如 7/口）看起来就像
+# 没负载（实测踩过：2529 个请求在排队，却报"负载太低"）。有队列/排过队 ⇒ 显然有负载。
+low_load=0
+if [ "${in_med}" -lt 100 ]; then low_load=1; fi
+if [ "${api_ok}" = 1 ] && { [ "${waiting_total:-0}" -gt 0 ] || [ "${queued_total:-0}" -gt 0 ]; }; then
+    low_load=0
+fi
+if [ "${low_load}" = 1 ]; then
     {
         echo
+        if [ "${api_ok}" = 1 ]; then
+        echo "⚠️  窗口内既没有排队、池内在途中位也只有 ${in_med} —— 看不出负载，判定不可信。"
+    else
         echo "⚠️  窗口内入站连接中位只有 ${in_med} —— 负载太低，池子没被压满，判定不可信。"
+    fi
         echo "    请在**目标档位**（如 45000 / 55000 VU）跑着的时候再采一次。"
     } >&2
     exit 2
