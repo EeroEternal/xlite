@@ -164,6 +164,16 @@ impl Upstream {
         }
     }
 
+    /// Read-only pool snapshot for the control plane (`GET /api/pool`).
+    ///
+    /// Deliberately **not** on the data path: nothing in `proxy.rs` calls this.
+    /// It exists so a load-test probe can read the real per-host connection and
+    /// in-flight counts instead of inferring them from `ss` (issue #49), and so
+    /// "what was the pool doing when those 502s happened?" is answerable.
+    pub fn pool_stats(&self) -> Vec<(String, xlite_h2_pool::PoolStats)> {
+        self.pool.all_stats()
+    }
+
     pub async fn post_stream(
         &self,
         endpoint: &str,
@@ -379,6 +389,27 @@ mod tests {
             chat_completions_url("http://127.0.0.1:8000/v1/"),
             "http://127.0.0.1:8000/v1/chat/completions"
         );
+    }
+
+    /// `GET /api/pool`'s data source: a fresh gateway has dialed nothing, so it
+    /// must report nothing. If it invented hosts, the field probe would size
+    /// connections against capacity that does not exist.
+    #[test]
+    fn pool_stats_start_empty_for_a_fresh_upstream() {
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: true,
+            admin_password: "x".into(),
+            session_secret: None,
+            max_conns_per_host: 3,
+            upstream_stream_cap: 250,
+            catalog_reload_secs: 0,
+            upstream_ttft_header: false,
+        };
+        let up = Upstream::new(&cfg);
+        assert!(up.pool_stats().is_empty());
     }
 
     #[test]
