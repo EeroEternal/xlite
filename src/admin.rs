@@ -760,7 +760,11 @@ mod tests {
     #[test]
     fn wait_percentile_reads_the_bucket_edges() {
         let mut buckets = [0u64; xlite_h2_pool::WAIT_BUCKETS];
-        assert_eq!(wait_percentile(&buckets, 50), None, "no waits ⇒ no percentile");
+        assert_eq!(
+            wait_percentile(&buckets, 50),
+            None,
+            "no waits ⇒ no percentile"
+        );
 
         // Bucket 3 holds waits under 2^4 = 16ms; bucket 10 holds waits under 2^11 = 2048ms.
         buckets[3] = 99;

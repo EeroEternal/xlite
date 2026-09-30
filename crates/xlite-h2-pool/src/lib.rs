@@ -47,5 +47,5 @@ pub use error::PoolError;
 pub use lease::Lease;
 pub use pool::{
     BoxIo, CONNECTION_WINDOW_SIZE, Config, DEFAULT_IDLE_TIMEOUT, DEFAULT_STREAM_BUDGET_PER_CONN,
-    Dial, DialFuture, Pool, PoolStats, WAIT_BUCKETS, STREAM_WINDOW_SIZE, Transport, client_builder,
+    Dial, DialFuture, Pool, PoolStats, STREAM_WINDOW_SIZE, Transport, WAIT_BUCKETS, client_builder,
 };
