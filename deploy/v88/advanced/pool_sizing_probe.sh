@@ -147,7 +147,7 @@ recommend() {
     local verdict="$1" today_cap="$2" today_conns="$3" peer="$4" peak_per_port="$5" hr="$6"
     local demand ceiling_from_today
 
-    # 配置未知时**不给出具体建议**：	oday_cap/today_conns 是默认值 0，落到下面的通用路径会算出
+    # 配置未知时**不给出具体建议**：today_cap/today_conns 是默认值 0，落到下面的通用路径会算出
     # “保住今天的上界 0×0”这种假数字，而判定明明说的是“配置未知” —— 把看不见说成有，
     # 现场还会照抄那段部署块。与 `unusable` 的处理对齐。
     if [ "${verdict}" = "unknown-config" ]; then
