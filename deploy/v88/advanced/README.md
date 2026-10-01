@@ -154,7 +154,7 @@ diff -u scripts/loadtest/k6/k6.js deploy/v88/k6.js
    `-v …/mock-llm-linux-usage:/mock-llm:ro`（裸二进制 sha256 `dc0f4316…`）；
    客户现成的 `start-mocks.sh` 只有 **12** 口。完整命令与逐口回读见 [`../STARTUP.md`](../STARTUP.md) §1
 3. `sysctl --system`（客户包里的 `sysctl-loadtest.conf`：`somaxconn=65535` 等）
-4. 网关：`xlite:0.5.2`（不要 0.2.0）
+4. 网关：`xlite:0.5.3`（不要 0.2.0）
 5. HAProxy：`httpchk GET /health`（不是 `/api/status`）、`timeout client/server/tunnel 600s`
 6. `run_full_88_xg.sh --preflight-only` → 红就先修，别开跑
 7. 开跑；结果目录里的 `env.txt` 是**这一轮口径的唯一凭据**（含生效 `MOCK_BATCH`

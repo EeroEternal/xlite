@@ -95,7 +95,7 @@ docker run -d --name xlite-gw --network host \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD='<自己定>' \
   -e LISTEN_HOST=0.0.0.0 -e PORT=8006 \
-  xlite:0.5.2
+  xlite:0.5.3
 ```
 
 **③ 裸机 / systemd**
@@ -396,7 +396,7 @@ PY
 docker run --rm --network host \
   -e REDIS_URL='redis://10.56.88.22:6379' \
   -v /tmp/mock-24.custom.yaml:/tmp/cat.yaml:ro \
-  xlite:0.5.2 import /tmp/cat.yaml
+  xlite:0.5.3 import /tmp/cat.yaml
 ```
 
 ⚠️ `--replace` 是**先清空整表再导**（已有的 provider / model / key 全没）——只想合并就别加它。
@@ -483,7 +483,7 @@ docker inspect <gw> --format '{{.Config.Env}}' | tr ' ' '\n' | grep STREAM_CAP
 
 ```sh
 # 版本与身份
-curl -sS http://<节点>/health          # 期望 {"status":"ok","gateway":"xlite","version":"<本轮 tag，如 0.5.2>"}
+curl -sS http://<节点>/health          # 期望 {"status":"ok","gateway":"xlite","version":"<本轮 tag，如 0.5.3>"}
 # 目录后端通了
 curl -sS http://<节点>/ready           # 期望 {"status":"ready"}；503 = Redis 不通
 # 鉴权与模型

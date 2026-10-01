@@ -56,7 +56,16 @@ standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 # [0.5.2] section, but docs/README.md indexes each one as a stable appendix and the
 # per-level detail lives only in them. Retained for the same reason as the v0.5.1
 # batch; prune only after relocating that detail.
-keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md loadtest-report-2026-09-28.md loadtest-report-2026-09-29.md performance-tuning-guide.md rfc-adaptive-h2-pool-architecture.md data/loadtest-metrics-2026-09-29.json "
+#
+# v0.5.3 promotion (2026-10-01): the h1-pool cycle's drafts — the pool design
+# (`h1-upstream-pool-architecture.md`, linked from `crates/xlite-h1-pool`'s rustdoc),
+# its load-test data appendix (`h1-pool-loadtest-2026-10-01.md`, cited by
+# docs/manual/xlite.md for the 32→128 numbers), and the snapshot-precompute extension
+# design (`extension-points-snapshot-2026-09.md`, whose §5 shipped while its §7.2 A/B
+# is still unexecuted) — now match the released [0.5.3] section. Their conclusions are
+# summarised there, but the design reasoning and the full data tables live only in them.
+# Retained for the same reason as the v0.5.1/v0.5.2 batches; prune after relocating.
+keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md loadtest-report-2026-09-28.md loadtest-report-2026-09-29.md performance-tuning-guide.md rfc-adaptive-h2-pool-architecture.md data/loadtest-metrics-2026-09-29.json h1-upstream-pool-architecture.md h1-pool-loadtest-2026-10-01.md extension-points-snapshot-2026-09.md "
 
 findings=0
 # Recursive: an empty directory cannot be committed, so only files are judged, each
