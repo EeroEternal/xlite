@@ -9,6 +9,19 @@ pub struct Config {
     pub admin_password: String,
     pub session_secret: Option<String>,
     pub max_conns_per_host: usize,
+    /// Per-host connection cap for the native cleartext HTTP/1.1 pool.
+    ///
+    /// Deliberately **separate** from `max_conns_per_host`: that knob's default of
+    /// 32 is tuned for the h2c pool, where one connection carries many
+    /// multiplexed streams (`upstream_stream_cap`). Under HTTP/1.1 one connection
+    /// carries **one** request, so 32 means "32 concurrent", and the 2026-10-01
+    /// lab run measured `32 → 128` at **3.7× qps** / 10.7s → 528ms median TTFT
+    /// (see `docs/dev/h1-pool-loadtest-2026-10-01.md` §5.2 and
+    /// `docs/dev/h1-upstream-pool-architecture.md` §9). When the operator sets
+    /// `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` explicitly the h1 pool honours it
+    /// verbatim; when it is unset, h1 falls back to
+    /// [`H1_DEFAULT_MAX_CONNS_PER_HOST`] instead of the h2c default.
+    pub h1_max_conns_per_host: usize,
     /// Client-side cap on concurrent streams per upstream HTTP/2 connection:
     /// a connection is full at `min(this, the peer's live
     /// SETTINGS_MAX_CONCURRENT_STREAMS)`. `usize::MAX` (the default, from an
@@ -38,6 +51,25 @@ fn positive_or(raw: Option<String>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Default per-host connection cap for the cleartext HTTP/1.1 pool when
+/// `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` is unset. See
+/// [`Config::h1_max_conns_per_host`]: it is 4× the h2c default of 32 because
+/// HTTP/1.1 spends one connection per in-flight request, not per many streams.
+pub const H1_DEFAULT_MAX_CONNS_PER_HOST: usize = 128;
+
+/// Resolve the h1 pool cap: an explicit, valid `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`
+/// wins (the operator named a number — honour it verbatim, including a
+/// lowering). Anything else — unset, empty, non-numeric or `0` — means "not
+/// configured", so h1 keeps its own default instead of inheriting the h2c-tuned
+/// one. `positive_or` folds that same string into the shared `max_conns_per_host`
+/// default, so the two parsers agree on what "explicit" means.
+fn resolve_h1_max_conns_per_host(explicit: Option<&str>) -> usize {
+    explicit
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(H1_DEFAULT_MAX_CONNS_PER_HOST)
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         let redis_url = std::env::var("REDIS_URL")
@@ -55,8 +87,9 @@ impl Config {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let max_conns_per_host =
-            positive_or(std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST").ok(), 32);
+        let max_conns_env = std::env::var("XLITE_UPSTREAM_MAX_CONNS_PER_HOST").ok();
+        let max_conns_per_host = positive_or(max_conns_env.clone(), 32);
+        let h1_max_conns_per_host = resolve_h1_max_conns_per_host(max_conns_env.as_deref());
         let upstream_stream_cap =
             positive_or(std::env::var("XLITE_UPSTREAM_STREAM_CAP").ok(), usize::MAX);
         let catalog_reload_secs = std::env::var("XLITE_CATALOG_RELOAD_SECS")
@@ -72,6 +105,7 @@ impl Config {
             admin_password,
             session_secret,
             max_conns_per_host,
+            h1_max_conns_per_host,
             upstream_stream_cap,
             catalog_reload_secs,
             upstream_ttft_header,
@@ -151,7 +185,7 @@ const FD_COMFORTABLE: u64 = 65_536;
 /// `vus` and `iteration_duration` all look healthy. Measured 2026-09-30 (issue
 /// #49): 22.78M `PoolError::Dial` failures and 99.49% of requests 502 with the
 /// limit at 1024, versus 0.00% and the same 1,484 qps once it was raised.
-pub fn fd_budget_warning(nofile: u64, max_conns_per_host: usize) -> Option<String> {
+pub fn fd_budget_warning(nofile: u64, pooled_conns_per_host: usize) -> Option<String> {
     if nofile >= FD_COMFORTABLE {
         return None;
     }
@@ -160,8 +194,9 @@ pub fn fd_budget_warning(nofile: u64, max_conns_per_host: usize) -> Option<Strin
          clients a gateway can run out of file descriptors long before it runs out of CPU, \
          and the signature is a flood of 502s with a ~10x throughput drop while every other \
          metric still looks normal (see issue #49). On top of one fd per inbound request, \
-         each upstream host may hold up to MAX_CONNS_PER_HOST={max_conns_per_host} pooled \
-         connections. Raise it — e.g. `--ulimit nofile=1048576:1048576` for docker."
+         each upstream host may hold up to {pooled_conns_per_host} pooled connections (the \
+         larger of the h2c and HTTP/1.1 per-host caps). Raise it — e.g. \
+         `--ulimit nofile=1048576:1048576` for docker."
     ))
 }
 
@@ -214,10 +249,23 @@ mod tests {
     }
 
     #[test]
+    fn h1_cap_honours_an_explicit_env_and_defaults_higher_otherwise() {
+        // Unset / empty / invalid / 0 mean "not configured" ⇒ the h1-specific
+        // default, not the h2c-tuned shared one (32).
+        assert_eq!(resolve_h1_max_conns_per_host(None), 128);
+        assert_eq!(resolve_h1_max_conns_per_host(Some("")), 128);
+        assert_eq!(resolve_h1_max_conns_per_host(Some("abc")), 128);
+        assert_eq!(resolve_h1_max_conns_per_host(Some("0")), 128);
+        // An explicit, valid cap is honoured verbatim — including a lowering.
+        assert_eq!(resolve_h1_max_conns_per_host(Some("128")), 128);
+        assert_eq!(resolve_h1_max_conns_per_host(Some("4")), 4);
+    }
+
+    #[test]
     fn fd_budget_warning_flags_a_container_default() {
-        let warning = fd_budget_warning(1024, 32).expect("1024 is the trap this check exists for");
+        let warning = fd_budget_warning(1024, 128).expect("1024 is the trap this check exists for");
         assert!(warning.contains("1024"), "{warning}");
-        assert!(warning.contains("MAX_CONNS_PER_HOST=32"), "{warning}");
+        assert!(warning.contains("128 pooled connections"), "{warning}");
         assert!(
             warning.contains("#49"),
             "the warning has to carry the measurement that justifies it: {warning}"
@@ -226,7 +274,7 @@ mod tests {
 
     #[test]
     fn fd_budget_warning_is_quiet_when_the_limit_is_raised() {
-        assert!(fd_budget_warning(FD_COMFORTABLE, 32).is_none());
-        assert!(fd_budget_warning(1_048_576, 32).is_none());
+        assert!(fd_budget_warning(FD_COMFORTABLE, 128).is_none());
+        assert!(fd_budget_warning(1_048_576, 128).is_none());
     }
 }

@@ -73,6 +73,7 @@ fn cfg() -> Config {
         admin_password: "x".into(),
         session_secret: None,
         max_conns_per_host: 4,
+        h1_max_conns_per_host: 4,
         upstream_stream_cap: usize::MAX,
         catalog_reload_secs: 0,
         upstream_ttft_header: false,

@@ -119,6 +119,7 @@ async fn run_server() -> Result<()> {
         redis = config.redis_url.is_some(),
         database = %config.database_url,
         max_conns = config.max_conns_per_host,
+        h1_max_conns = config.h1_max_conns_per_host,
         // `peer` = 未设 STREAM_CAP：按对端通告的 SETTINGS_MAX_CONCURRENT_STREAMS 执行
         stream_cap = if config.upstream_stream_cap == usize::MAX {
             "peer".to_string()
@@ -134,9 +135,12 @@ async fn run_server() -> Result<()> {
     // fd budget (issue #49): a low RLIMIT_NOFILE does not make the gateway fail
     // loudly — it makes it forward 502s at a fraction of the throughput while the
     // metrics stay green. Say so at startup instead of leaving it to be inferred.
-    if let Some(warning) =
-        nofile_soft_limit().and_then(|limit| fd_budget_warning(limit, config.max_conns_per_host))
-    {
+    if let Some(warning) = nofile_soft_limit().and_then(|limit| {
+        fd_budget_warning(
+            limit,
+            config.max_conns_per_host.max(config.h1_max_conns_per_host),
+        )
+    }) {
         tracing::warn!("{warning}");
     }
 
