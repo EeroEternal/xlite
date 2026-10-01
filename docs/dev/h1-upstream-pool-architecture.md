@@ -162,6 +162,19 @@ pub struct PoolStats {
 
 本方案默认关闭：不设 `XLITE_UPSTREAM_H1_POOL` 时，代码路径与 main 逐字节一致。删除 crate + 接入点即可回滚；不影响 h2c 池与 PR #75 的近似方案。
 
+## 9. 收敛计划（压测后，用户已决定）
+
+**决定**：压测验证本池后，**移除 reqwest 的明文 HTTP/1.1 路径与 `AdmissionGate`（#75）**，让明文 `http://` 只走本池。理由：两条路径并存（近似 gate vs 连接级池）维护成本高、观测语义易混（`http1_gates[]` vs `h1_pool[]`），集中在一种。
+
+届时（**独立 PR**，不是本 PR）：
+- `src/upstream.rs`：删 `AdmissionGate` / `http1_gates` 采集 / `BodyKind::Reqwest` 的 HTTP/1.1 用法；`post_reqwest` 只保留 `https`；本池对明文 `http://` 转默认生效（去掉 env 开关或默认 `true`）。
+- `src/admin.rs`：`/api/pool` 去掉 `http1_gates[]`，`h1_pool[]` 成为 HTTP/1.1 的唯一来源。
+- 规则同步：`AGENTS.md` 规则 9 / `loadtest-backpressure-strategy.md` §2 / `extension-points` §6 的例外条款改为「明文 HTTP/1.1 走 `crates/xlite-h1-pool`」（不再是「#75 的 gate + 备选实现」）。
+- `advanced/pool_sizing_probe.sh`：读取 `h1_pool[]`。
+- `docs/changelog.md`：这是一次**默认行为变更**（明文上游从「reqwest + 在途上界」改为「自研连接池」），需显著标注。
+
+**前置条件**：§7 的压测验证通过（尤其「与 reqwest 路径的性能对照不得 regression」），且 idle reaper 等留白已清。
+
 ---
 
 ## 附：实现进度（本 PR 跟踪）
