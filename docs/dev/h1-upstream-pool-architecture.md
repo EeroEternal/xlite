@@ -7,7 +7,7 @@
   - 参考实现：`crates/xlite-h2-pool`（h2c 池）
   - 接入点：`src/upstream.rs`
   - 边界决策：`docs/dev/loadtest-backpressure-strategy.md`（方案 A/B/C）
-  - 前置近似：PR #75（用应用层信号量做「在途请求上界」）——本设计是其「更细粒度」的演进
+  - 前置近似：PR #75（**已合并** `989c5ad`，用应用层信号量做「在途请求上界」+ `/api/pool` 的 `http1_gates[]` 可见性；规则同步见 #77）——本设计是其「更细粒度」的演进
 
 > ⚠️ **规则边界（同 PR #75）**：本方案仍是「网关侧连接治理」，与 `loadtest-backpressure-strategy.md` §2「护栏二：杜绝应用层阻塞排队」及 `AGENTS.md` 规则 9 存在张力。它被定位为**默认关闭的备选**，正是因为该议题尚未收敛；转正前必须重新走一次设计/评审，而不是默默启用。
 
@@ -26,15 +26,15 @@ if self.h2c && endpoint.starts_with("http://") {
 ```
 
 - **h2c 路径**有真正的连接池：每 host 连接数受 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 约束（`crates/xlite-h2-pool/src/pool.rs:46`），连接满时在池内等待，且 `/api/pool` 可观测。
-- **reqwest 路径**（明文 HTTP/1.1、以及所有 `https://`）**没有任何连接池上界**：reqwest 的 `pool_max_idle_per_host(64)`（`src/upstream.rs:155`）只限制**空闲保留**连接数，不限制并发连接数。HTTP/1.1 一请求一连接 ⇒ N 并发就开 N 条连接。
+- **reqwest 路径**（明文 HTTP/1.1、以及所有 `https://`）**没有任何连接池上界**：reqwest 的 `pool_max_idle_per_host(64)`（`src/upstream.rs:265`）只限制**空闲保留**连接数，不限制并发连接数。HTTP/1.1 一请求一连接 ⇒ N 并发就开 N 条连接。
 
-PR #75 用应用层信号量把「在途请求数」限到 `N`，从而近似限制连接数。但它有已知的粒度缺口：
+PR #75（**已合并** `989c5ad`，规则同步见 #77）用应用层信号量把「在途请求数」限到 `N`，从而近似限制连接数，并把 gate 的 `permits/in_flight/waiting/waiting_max` 接进了 `/api/pool` 的 `http1_gates[]`（`src/upstream.rs:294`、`src/admin.rs:272`）。但它仍有已知的粒度缺口：
 
 | 缺口 | 现象 | 影响 |
 | --- | --- | --- |
 | **idle 连接不计入** | permit 释放后 keep-alive 连接仍在，占用 fd | 严格上界是 `N + 64`，不是 `N` |
 | **连接会重建** | 客户端取消/超时后 reqwest 关闭并新建连接 | 累计连接数 > 峰值在途（实测 10 个断开客户端留下 11 个源端口） |
-| **无连接级观测** | `/api/pool` 只覆盖 h2c 池 | HTTP/1.1 上游在控制面不可见 |
+| **只到「在途」级，不是连接级** | `http1_gates[]` 报的是在途/排队，**不含 idle 连接** | 「打开的物理连接数」仍不可见 |
 
 ## 2. 目标 / 非目标
 
@@ -52,10 +52,11 @@ PR #75 用应用层信号量把「在途请求数」限到 `N`，从而近似限
 
 | 断言 | 证据命令 | 结果 |
 | --- | --- | --- |
-| 分流只认 `H2C=1 + http://` | `rg -n "h2c && endpoint" src/upstream.rs` | `188: if self.h2c && endpoint.starts_with("http://")` |
-| reqwest 只限 idle 保留 | `rg -n "pool_max_idle_per_host" src/upstream.rs` | `155: .pool_max_idle_per_host(64)` |
+| 分流只认 `H2C=1 + http://` | `rg -n "h2c && endpoint" src/upstream.rs` | `309: if self.h2c && endpoint.starts_with("http://")` |
+| reqwest 只限 idle 保留 | `rg -n "pool_max_idle_per_host" src/upstream.rs` | `265: .pool_max_idle_per_host(64)` |
 | 连接数上界只在 h2 池 | `rg -n "max_conns_per_host" crates/xlite-h2-pool/src/pool.rs` | `46/339/412` 均为 h2 池内部 |
-| reqwest 未开 h2 prior knowledge | `rg -n "http2_prior_knowledge" src` | 无命中 ⇒ 明文 `http://` **确定**走 HTTP/1.1 |
+| HTTP/1.1 gate 已在 main（#75） | `rg -n "fn http1_gate_stats" src/upstream.rs` | `294`（`GateStat` 见 `:152`）；`/api/pool` 见 `src/admin.rs:272` |
+| reqwest 未开 h2 prior knowledge | `rg -n "\.http2_prior_knowledge\(" src` | 无调用（唯一的 `http2_prior_knowledge` 在 `src/upstream.rs:129`，是注释）⇒ 明文 `http://` **确定**走 HTTP/1.1 |
 | hyper 已含 http1 | `rg -n "^hyper" Cargo.toml` | `17: hyper = { version = "1", features = ["http1", "http2"] }` |
 
 ## 4. 设计
@@ -115,13 +116,13 @@ pub struct PoolStats {
 }
 ```
 
-`GET /api/pool` 的 `hosts[]` 在启用本池后，应同时覆盖 h2c 与 h1 两个来源（或在同一 host 条目标注 `proto`）。
+`GET /api/pool` 现状：`hosts[]` 只覆盖 h2c 池；`http1_gates[]`（#75）覆盖 HTTP/1.1 的**在途/排队**，但**不含**物理连接数与 idle。启用本池后，`http1_gates[]` 的 `permits/in_flight/waiting/waiting_max` 语义由本池接续（`in_flight` 从「在途请求」变为「忙连接」，`waiting` 仍为排队数），并补上本池特有的 `connections`（含 idle）/`dials`/`reclaimed`；建议在同一 host 条目标注 `proto`，避免 h2c 与 h1 两个来源混淆。
 
 ### 4.5 接入与开关
 
 - 新 env：**`XLITE_UPSTREAM_H1_POOL=1`**（默认 **关**）。
 - 生效条件：`XLITE_UPSTREAM_H1_POOL=1` **且** `endpoint` 是明文 `http://`（`https://` 仍走 reqwest）**且** `H2C` 关闭（若 `H2C=1`，明文 `http://` 仍归 h2c 池，避免两条池争同一 host）。
-- 与 PR #75 的关系：本池启用时，`AdmissionGate` 对该 host **不生效**（由连接级上界取代）；未启用时行为与 main 一致。
+- 与 #75 的关系：本池启用时，`AdmissionGate` 对该 host **不生效**（由连接级上界取代；`/api/pool` 的 `http1_gates[]` 改由本池填充，字段语义见 §4.4）；**未启用时行为与 main 完全一致**（`AdmissionGate` + `http1_gates[]` 照旧）。
 
 ## 5. 与 h2-pool 的关系
 
@@ -138,7 +139,7 @@ pub struct PoolStats {
 
 ## 6. 边界与风险（诚实清单）
 
-1. **TLS/ALPN 不覆盖**：只做明文 `http://`。`https://` 上游继续走 reqwest ⇒ 「HTTPS + 只支持 HTTP/1.1」的上游仍无连接上界（与 PR #75 相同的边界）。
+1. **TLS/ALPN 不覆盖**：只做明文 `http://`。`https://` 上游继续走 reqwest ⇒ 「HTTPS + 只支持 HTTP/1.1」的上游仍无连接上界（与已合并的 #75 相同的边界）。
 2. **复刻自研池风险**：h2 池已记录过拨号失败、等待不返回、幽灵流等代价（其 RFC §6）。h1 池必须逐条处理，否则只是把 h2 池的坑再挖一遍。
 3. **维护两套池**：新增一个 crate 的长期维护成本；转正前应论证它带来的粒度收益值这个成本。
 4. **body 流式透传**：必须保持「字节透传、不做协议转换」（`wire-boundary.md`）；背压靠 TCP，不得在网关缓冲整个响应。
@@ -160,6 +161,8 @@ pub struct PoolStats {
 ---
 
 ## 附：实现进度（本 PR 跟踪）
+
+> 本稿已在 #75（`989c5ad`）、#77（`e42166a`）合入后 **rebase 到新 main**：现状引用的行号已刷新（分流 `upstream.rs:309`、reqwest `:265`）；`http1_gates[]` 是 #75 已交付的观测，§4.4/§4.5 说明本池转正后如何接续它。
 
 - [ ] `crates/xlite-h1-pool`：Config / Pool / Lease / PoolError / stats
 - [ ] 连接表、acquire、等待、reaper
