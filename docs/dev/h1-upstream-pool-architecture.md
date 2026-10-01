@@ -15,7 +15,7 @@
 
 ## 1. 背景与问题
 
-xlite 的上游分流只有两条路（`src/upstream.rs:188`）：
+xlite 的上游分流只有两条路（`src/upstream.rs` 的 `post_stream()`）：
 
 ```rust
 if self.h2c && endpoint.starts_with("http://") {
@@ -25,10 +25,10 @@ if self.h2c && endpoint.starts_with("http://") {
 }
 ```
 
-- **h2c 路径**有真正的连接池：每 host 连接数受 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 约束（`crates/xlite-h2-pool/src/pool.rs:46`），连接满时在池内等待，且 `/api/pool` 可观测。
-- **reqwest 路径**（明文 HTTP/1.1、以及所有 `https://`）**没有任何连接池上界**：reqwest 的 `pool_max_idle_per_host(64)`（`src/upstream.rs:265`）只限制**空闲保留**连接数，不限制并发连接数。HTTP/1.1 一请求一连接 ⇒ N 并发就开 N 条连接。
+- **h2c 路径**有真正的连接池：每 host 连接数受 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 约束（`crates/xlite-h2-pool` 的 `Config::max_conns_per_host`），连接满时在池内等待，且 `/api/pool` 可观测。
+- **reqwest 路径**（明文 HTTP/1.1、以及所有 `https://`）**没有任何连接池上界**：reqwest 的 `pool_max_idle_per_host(64)`（`src/upstream.rs` 的 reqwest `Client::builder()`）只限制**空闲保留**连接数，不限制并发连接数。HTTP/1.1 一请求一连接 ⇒ N 并发就开 N 条连接。
 
-PR #75（**已合并** `989c5ad`，规则同步见 #77）用应用层信号量把「在途请求数」限到 `N`，从而近似限制连接数，并把 gate 的 `permits/in_flight/waiting/waiting_max` 接进了 `/api/pool` 的 `http1_gates[]`（`src/upstream.rs:294`、`src/admin.rs:272`）。但它仍有已知的粒度缺口：
+PR #75（**已合并** `989c5ad`，规则同步见 #77）用应用层信号量把「在途请求数」限到 `N`，从而近似限制连接数，并把 gate 的 `permits/in_flight/waiting/waiting_max` 接进了 `/api/pool` 的 `http1_gates[]`（`Upstream::http1_gate_stats()`；`/api/pool` 见 `src/admin.rs`）。但它仍有已知的粒度缺口：
 
 | 缺口 | 现象 | 影响 |
 | --- | --- | --- |
@@ -52,12 +52,12 @@ PR #75（**已合并** `989c5ad`，规则同步见 #77）用应用层信号量�
 
 | 断言 | 证据命令 | 结果 |
 | --- | --- | --- |
-| 分流只认 `H2C=1 + http://` | `rg -n "h2c && endpoint" src/upstream.rs` | `309: if self.h2c && endpoint.starts_with("http://")` |
-| reqwest 只限 idle 保留 | `rg -n "pool_max_idle_per_host" src/upstream.rs` | `265: .pool_max_idle_per_host(64)` |
-| 连接数上界只在 h2 池 | `rg -n "max_conns_per_host" crates/xlite-h2-pool/src/pool.rs` | `46/339/412` 均为 h2 池内部 |
-| HTTP/1.1 gate 已在 main（#75） | `rg -n "fn http1_gate_stats" src/upstream.rs` | `294`（`GateStat` 见 `:152`）；`/api/pool` 见 `src/admin.rs:272` |
-| reqwest 未开 h2 prior knowledge | `rg -n "\.http2_prior_knowledge\(" src` | 无调用（唯一的 `http2_prior_knowledge` 在 `src/upstream.rs:129`，是注释）⇒ 明文 `http://` **确定**走 HTTP/1.1 |
-| hyper 已含 http1 | `rg -n "^hyper" Cargo.toml` | `17: hyper = { version = "1", features = ["http1", "http2"] }` |
+| 分流只认 `H2C=1 + http://` | `rg -n "h2c && endpoint" src/upstream.rs` | `post_stream()` 内唯一命中 |
+| reqwest 只限 idle 保留 | `rg -n "pool_max_idle_per_host" src/upstream.rs` | 唯一命中（值为 `64`） |
+| 连接数上界只在 h2 池 | `rg -n "max_conns_per_host" crates/xlite-h2-pool/src/pool.rs` | 全部命中在 h2 池内部 |
+| HTTP/1.1 gate 已在 main（#75） | `rg -n "fn http1_gate_stats" src/upstream.rs` | `Upstream::http1_gate_stats()`；`/api/pool` 见 `src/admin.rs` 的 `http1_gates` |
+| reqwest 未开 h2 prior knowledge | `rg -n "\.http2_prior_knowledge\(" src` | 无调用（`http2_prior_knowledge` 只在一行 doc 注释里出现）⇒ 明文 `http://` **确定**走 HTTP/1.1 |
+| hyper 已含 http1 | `rg -n "^hyper" Cargo.toml` | `features = ["http1", "http2"]` |
 
 ## 4. 设计
 
@@ -162,7 +162,7 @@ pub struct PoolStats {
 
 ## 附：实现进度（本 PR 跟踪）
 
-> 本稿已在 #75（`989c5ad`）、#77（`e42166a`）合入后 **rebase 到新 main**：现状引用的行号已刷新（分流 `upstream.rs:309`、reqwest `:265`）；`http1_gates[]` 是 #75 已交付的观测，§4.4/§4.5 说明本池转正后如何接续它。
+> 本稿已在 #75（`989c5ad`）、#77（`e42166a`）、#78（`fba7b4e`）合入后 **rebase 到最新 main**；现状引用一律用**符号**（函数 / 字段名）而非行号，避免每次 main 前进都漂移；`http1_gates[]` 是 #75 已交付的观测，§4.4/§4.5 说明本池转正后如何接续它。
 
 - [ ] `crates/xlite-h1-pool`：Config / Pool / Lease / PoolError / stats
 - [ ] 连接表、acquire、等待、reaper
