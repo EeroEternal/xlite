@@ -22,7 +22,7 @@ No CostAware, CapabilityAware, session stickiness, or strategy enum.
 
 ## Upstream
 
-Cleartext HTTP/2 (`XLITE_UPSTREAM_H2C=1` and `http://` base URL) uses `crates/xlite-h2-pool`: one connection is full at the peer's `SETTINGS_MAX_CONCURRENT_STREAMS`, then the pool dials another (capped by `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`). Other URLs use reqwest.
+Cleartext HTTP/2 (`XLITE_UPSTREAM_H2C=1` and `http://` base URL) uses `crates/xlite-h2-pool`: one connection is full at the peer's `SETTINGS_MAX_CONCURRENT_STREAMS`, then the pool dials another (capped by `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`). Other URLs use reqwest. On the reqwest path, a cleartext `http://` upstream is HTTP/1.1 by construction (one request per connection), so the same `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` bounds its in-flight requests per host — excess requests wait in the gateway rather than opening unbounded upstream sockets. `https` is exempt: ALPN may negotiate HTTP/2, where an in-flight cap would throttle multiplexing instead of connection count.
 
 ## Objects
 
