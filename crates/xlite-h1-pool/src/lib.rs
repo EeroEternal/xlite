@@ -389,8 +389,12 @@ impl Pool {
     }
 
     /// Reserve a connection to `host`. Waits in a fair FIFO queue (the semaphore)
-    /// for a slot, then reuses an idle connection or dials a new one; the permit
-    /// count bounds the number of open connections.
+    /// for a slot, then reuses an idle connection or dials a new one.
+    ///
+    /// The permit bounds **in-flight leases** (concurrent requests). On HTTP/1.1
+    /// one connection serves one request, so `connections ≤ in-flight peak ≤
+    /// max_conns_per_host` follows; idle connections hold no permit and are managed
+    /// by the reaper (`min_idle_conns`).
     pub async fn acquire(&self, host: &str) -> Result<Lease, PoolError> {
         let state = self.host_state(host);
         // Fair queue: FIFO, no thundering herd on release.

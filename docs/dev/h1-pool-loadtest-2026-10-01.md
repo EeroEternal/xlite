@@ -89,3 +89,9 @@ export default function () {
 1. h1 池与 reqwest 路径**吞吐/尾部/fail 全面持平**（三档 + 长时），§7 的「不得 regression」通过。
 2. **`MAX_CONNS` 是 h1 的最大杠杆**：`32→128` ⇒ qps 3.7×、ttfb 10.7s→528ms。h1 的默认值应**按 fd 预算**给得比 h2c 大得多。
 3. **能用 h2c 就用 h2c**：5000 VU h2c 741 qps / 不排队 vs h1(128) 411 / 6.35s。h1 池是「上游只支持 HTTP/1.1」时的退路。
+
+## 8. 数据出处（可回溯）
+
+- 本文表格数字取自 2026-10-01 台架会话的 **k6 stdout summary**（`k6-customer:latest` 未启用 `--summary-export`，**原始 summary 未落盘** —— 这是本记录的诚实边界）。
+- 台架文件：101 `~/h1lab/{H1POOL,GATE,H1POOL128,H2C}.log`、`mock-24.yaml`、`load.js`；102 `~/h1lab/mock_h1.py`（python HTTP/1.1 mock，仅用于早期小档；24 口用的是 Go `mock-llm:h2c`）。
+- 复现：按 §2 的实例 env + §3 的 catalog + §4 的 k6 命令。

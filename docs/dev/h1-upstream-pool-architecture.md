@@ -1,6 +1,6 @@
 # HTTP/1.1 上游连接池（`xlite-h1-pool`）设计稿 —— 备选方案
 
-- **状态**：Draft / **备选（默认关闭、未压测验证）**
+- **状态**：Draft / **备选（默认关闭；已压测，见 §10 与 [`h1-pool-loadtest-2026-10-01.md`](h1-pool-loadtest-2026-10-01.md)）**
 - **日期**：2026-10-01
 - **定位**：给走 reqwest 的 **HTTP/1.1 上游**一个与 h2c 池（`crates/xlite-h2-pool`）同构的连接池，把上游控制粒度从「在途请求级」提升到**「物理连接级」**（含空闲连接）。**本方案不默认启用**；待压测与整体成熟后再验证，再决定是否转正。
 - **关联**：
@@ -87,6 +87,8 @@ impl Lease {
 ```
 
 > 上述签名已与实现同步。`idle_timeout` 由后台 reaper 使用（默认 90s，同 h2 池 / reqwest）；`min_idle_conns`（默认 1）让 reaper 不回收低于该数量的空闲连接；拨号带 `DIAL_RETRIES`（2 次，仅瞬时错误，10ms 退避）。`ResponseBody` 包装 hyper 的 `Incoming`，poll 到 `None` 才把连接标为可复用（未读完就释放则退役该连接）。
+>
+> **上界口径**：`Semaphore` 的 permit 约束的是**在途 lease（并发请求）数**，连接数上界是其**推论**（HTTP/1.1 一连接一请求 ⇒ `连接数 ≤ 在途峰值 ≤ max_conns_per_host`）；**空闲连接不占 permit**，只由 reaper 按 `min_idle_conns` 管理。因此 `max_conns_per_host` 对在途请求与连接都构成上界。
 
 ### 4.2 连接生命周期
 
@@ -115,7 +117,7 @@ pub struct PoolStats {
     pub connections: usize,       // 当前打开的物理连接数（含 idle）
     pub in_flight: usize,         // 忙连接数（0/1 per conn，求和）
     pub dials: usize,
-    pub reclaimed: usize,         // reaper 关闭的空闲连接数（reaper 未做，恒 0）
+    pub reclaimed: usize,         // reaper 关闭的空闲连接数
 }
 ```
 
@@ -149,7 +151,7 @@ pub struct PoolStats {
 3. **维护两套池**：新增一个 crate 的长期维护成本；转正前应论证它带来的粒度收益值这个成本。
 4. **body 流式透传**：必须保持「字节透传、不做协议转换」（`wire-boundary.md`）；背压靠 TCP，不得在网关缓冲整个响应。
 5. **未决项**：`min_idle_conns` 预热是否需要；是否要把两池统一到 `Transport` trait；idle 回收与 DNS 变更/连接漂移的关系。
-6. **拨号失败无重试**：h2 池有 `DIAL_RETRIES` + 退避，h1 池 `dial` 失败直接返回 `PoolError`，由 `src/proxy.rs` 的跨 channel failover 兜底（单 channel 时即 502）。语义不一致但可接受；若需要重试，作为独立改动（不在本稿 checklist）。
+6. **拨号失败重试**：h1 池已实现 `DIAL_RETRIES`（2 次，退避 10ms）+ `is_retryable_dial_error`（只重试瞬时错误：`ConnectionRefused/Reset/Aborted/TimedOut/Interrupted` 与握手失败；资源耗尽不重试）—— 与 h2 池同口径；`src/proxy.rs` 的跨 channel failover 仍作为上层兜底。
 
 ## 7. 验证计划（压测与整体成熟后执行）
 
@@ -217,14 +219,14 @@ pub struct PoolStats {
 > 本稿已在 #75（`989c5ad`）、#77（`e42166a`）、#78（`fba7b4e`）合入后 **rebase 到最新 main**；现状引用一律用**符号**（函数 / 字段名）而非行号，避免每次 main 前进都漂移；`http1_gates[]` 是 #75 已交付的观测，§4.4/§4.5 说明本池转正后如何接续它。
 
 - [x] `crates/xlite-h1-pool`：Config / Pool / Lease / PoolError / PoolStats
-- [x] 连接表 + `acquire`（复用 / 拨号 / 排队 + `Notify` 唤醒）+ 连接级 `in_flight`
-- [x] 集成测试（真实 TCP 回环，**5 项**）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立、**半读连接退役**（响应体未读完就释放 ⇒ 连接不复用、下次重新拨号）
+- [x] 连接表 + `acquire`（复用 / 拨号 / 排队 + **`Semaphore` 公平 FIFO** 唤醒）+ 连接级 `in_flight`
+- [x] 集成测试（真实 TCP 回环，**7 项**）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立、**半读连接退役**、**reaper 回收**、**min_idle 保底**
 - [x] xlite 级接入回归测试（`tests/upstream_h1_pool.rs`）：`h1_pool=1` 走池且 `h1_pool_stats` 非空 / `http1_gates` 空；默认走 gate 且反之
 - [x] 空闲连接回收（reaper）：`idle_timeout`（默认 90s，同 h2 池 / reqwest）+ 后台周期扫描（间隔 `idle_timeout/2`）；低载回收后 `connections` 回落、`reclaimed` 计数
 - [x] `min_idle_conns`（reaper 保底）+ `DIAL_RETRIES`（瞬时拨号失败有界重试，退避 10ms）
 - [x] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
 - [x] `/api/pool` 新增 `h1_pool[]`（不接 gate 字段，避免两个机制混用；§4.4）
 - [ ] 探针（`advanced/pool_sizing_probe.sh`）读取 `h1_pool[]`：启用 h1 池后 API 模式观测留白（`hosts[]`/`http1_gates[]` 皆空 ⇒ 回落 `ss`）
-- [ ] 压测验证（§7）
+- [x] 压测验证（§7；结果见 §10 与 [`h1-pool-loadtest-2026-10-01.md`](h1-pool-loadtest-2026-10-01.md)）
 
-**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + **半读连接退役** + **接入回归测试**已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：idle reaper（`reclaimed` 恒 `0`）、压测验证。
+**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + 半读连接退役 + reaper / `min_idle_conns` / `DIAL_RETRIES` + 接入回归测试 + 压测验证（§10）均已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：`min_idle_conns` 主动预热（未做）、探针读取 `h1_pool[]`、跳机稳定性。
