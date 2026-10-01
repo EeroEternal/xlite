@@ -390,6 +390,7 @@ mod tests {
             redis_url: None,
             listen: "127.0.0.1:0".into(),
             h2c: false,
+            h1_pool: false,
             admin_password: "admin".into(),
             session_secret: None,
             max_conns_per_host: 8,

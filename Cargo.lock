@@ -2789,6 +2789,7 @@ dependencies = [
  "h2",
  "hmac",
  "http",
+ "http-body-util",
  "hyper",
  "rand 0.9.5",
  "redis",
@@ -2808,7 +2809,22 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "xlite-h1-pool",
  "xlite-h2-pool",
+]
+
+[[package]]
+name = "xlite-h1-pool"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

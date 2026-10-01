@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/xlite-h2-pool"]
+members = [".", "crates/xlite-h1-pool", "crates/xlite-h2-pool"]
 resolver = "2"
 
 [package]
@@ -33,9 +33,11 @@ anyhow = "1.0"
 thiserror = "2"
 rand = "0.9"
 http = "1"
+http-body-util = "0.1"
 futures-util = "0.3"
 url = "2"
 dotenvy = "0.15"
+xlite-h1-pool = { path = "crates/xlite-h1-pool" }
 xlite-h2-pool = { path = "crates/xlite-h2-pool" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
