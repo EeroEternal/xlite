@@ -266,10 +266,28 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
     } else {
         json!(state.config.upstream_stream_cap)
     };
+    // The HTTP/1.1 admission gate parks requests in the gateway too; exposing it
+    // here is the same "a queue must be visible" rule as the per-host wait stats
+    // above (a silent, unbounded wait is the part that actually hurts TTFT).
+    let http1_gates: Vec<Value> = state
+        .upstream
+        .http1_gate_stats()
+        .into_iter()
+        .map(|g| {
+            json!({
+                "host": g.authority,
+                "permits": g.permits,
+                "in_flight": g.in_flight,
+                "waiting": g.waiting,
+                "waiting_max": g.waiting_max,
+            })
+        })
+        .collect();
     ok(json!({
         "stream_budget_per_conn": stream_budget,
         "max_conns_per_host": state.config.max_conns_per_host,
         "hosts": hosts,
+        "http1_gates": http1_gates,
     }))
     .into_response()
 }

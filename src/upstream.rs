@@ -1,8 +1,10 @@
 //! Upstream HTTP client. h2c uses the native pool (Go-style stream accounting);
 //! everything else uses reqwest.
 
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -12,6 +14,7 @@ use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
 use reqwest::Client;
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
@@ -111,16 +114,123 @@ fn valid_header_name(name: &str) -> std::result::Result<HeaderName, String> {
         .map_err(|_| format!("`{name}` is not a valid header name"))
 }
 
+/// Per-authority admission cap for the reqwest (HTTP/1.1) path.
+///
+/// The h2c pool bounds upstream connections with `max_conns_per_host`, but the
+/// reqwest path had no such bound: HTTP/1.1 is one request per connection, so a
+/// burst opened one upstream socket per in-flight request (measured: 20
+/// concurrent requests ⇒ 20 upstream connections even with
+/// `XLITE_UPSTREAM_MAX_CONNS_PER_HOST=4`). This gate gives that path the same
+/// *shape* of bound the h2c pool already has — at most `permits` in-flight
+/// requests per `host:port`, the rest wait here — rather than inventing a new
+/// knob.
+///
+/// Applied **only to cleartext `http://`**, where the protocol is known to be
+/// HTTP/1.1 (reqwest never speaks h2c without `http2_prior_knowledge`). `https`
+/// is deliberately excluded: ALPN may negotiate h2, and an in-flight cap there
+/// would throttle multiplexing instead of bounding connection count.
+///
+/// Waiting is the advertised behaviour (h2 pool: "at the cap it waits"); the
+/// gateway still never fabricates a 429/503.
+struct AdmissionGate {
+    permits: usize,
+    hosts: Mutex<HashMap<String, Arc<GateSlot>>>,
+}
+
+/// One authority's live gate state: the semaphore **plus** the visibility counters.
+/// The queue on this path is real and bounded-only-by-clients, so it must be
+/// readable (the #68/#70 lesson: a queue that cannot be seen cannot be reasoned about).
+struct GateSlot {
+    sem: Arc<Semaphore>,
+    /// Acquirers currently parked on this authority.
+    waiting: AtomicUsize,
+    /// High-water mark of [`GateSlot::waiting`].
+    waiting_max: AtomicUsize,
+}
+
+/// One authority's point-in-time gate snapshot (for `GET /api/pool`).
+pub struct GateStat {
+    pub authority: String,
+    pub permits: usize,
+    pub in_flight: usize,
+    pub waiting: usize,
+    pub waiting_max: usize,
+}
+
+impl AdmissionGate {
+    fn new(permits: usize) -> Self {
+        Self {
+            permits: permits.max(1),
+            hosts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The gate slot for one authority, created on first use and shared for the
+    /// process lifetime (so a catalog reload does not reset live permits).
+    fn slot(&self, authority: &str) -> Arc<GateSlot> {
+        let mut hosts = self.hosts.lock().expect("admission gate poisoned");
+        Arc::clone(hosts.entry(authority.to_string()).or_insert_with(|| {
+            Arc::new(GateSlot {
+                sem: Arc::new(Semaphore::new(self.permits)),
+                waiting: AtomicUsize::new(0),
+                waiting_max: AtomicUsize::new(0),
+            })
+        }))
+    }
+
+    /// Wait for a slot on `authority`. The returned permit must be held for as
+    /// long as the request is in flight, including its (possibly streaming)
+    /// response body.
+    async fn acquire(&self, authority: &str) -> OwnedSemaphorePermit {
+        let slot = self.slot(authority);
+        // Counted as "waiting" only while parked; once the permit is granted the
+        // request is in flight (and visible as `in_flight` in the snapshot).
+        let depth = slot.waiting.fetch_add(1, Ordering::Relaxed) + 1;
+        slot.waiting_max.fetch_max(depth, Ordering::Relaxed);
+        let permit = Arc::clone(&slot.sem)
+            .acquire_owned()
+            .await
+            .expect("admission semaphore is never closed");
+        slot.waiting.fetch_sub(1, Ordering::Relaxed);
+        permit
+    }
+
+    /// Point-in-time snapshot of every authority that has ever been gated, sorted
+    /// by authority. Read-only and off the data path — this is what keeps the
+    /// queue on this route from repeating the "queue that cannot be seen" mistake.
+    fn snapshot(&self) -> Vec<GateStat> {
+        let hosts = self.hosts.lock().expect("admission gate poisoned");
+        let mut out: Vec<GateStat> = hosts
+            .iter()
+            .map(|(authority, slot)| GateStat {
+                authority: authority.clone(),
+                permits: self.permits,
+                in_flight: self.permits.saturating_sub(slot.sem.available_permits()),
+                waiting: slot.waiting.load(Ordering::Relaxed),
+                waiting_max: slot.waiting_max.load(Ordering::Relaxed),
+            })
+            .collect();
+        out.sort_by(|a, b| a.authority.cmp(&b.authority));
+        out
+    }
+}
+
 #[derive(Clone)]
 pub struct Upstream {
     h2c: bool,
     pool: Arc<Pool>,
     http: Client,
+    /// Bounds in-flight requests per cleartext HTTP/1.1 upstream (see
+    /// [`AdmissionGate`]). `https` never touches it.
+    admission: Arc<AdmissionGate>,
 }
 
 pub struct UpstreamBody {
     inner: BodyKind,
     _lease: Option<Lease>,
+    /// Holds the HTTP/1.1 admission slot for the whole response body so the
+    /// bound covers the request's full lifetime, not just the header exchange.
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 enum BodyKind {
@@ -161,6 +271,7 @@ impl Upstream {
             h2c: cfg.h2c,
             pool: Arc::new(pool),
             http,
+            admission: Arc::new(AdmissionGate::new(cfg.max_conns_per_host)),
         }
     }
 
@@ -172,6 +283,16 @@ impl Upstream {
     /// "what was the pool doing when those 502s happened?" is answerable.
     pub fn pool_stats(&self) -> Vec<(String, xlite_h2_pool::PoolStats)> {
         self.pool.all_stats()
+    }
+
+    /// Point-in-time snapshot of the HTTP/1.1 admission gates (`GET /api/pool`).
+    ///
+    /// Same reasoning as [`Self::pool_stats`]: this gate parks requests in the
+    /// gateway, and a queue that cannot be seen cannot be reasoned about — the
+    /// probe and the operator get `waiting` / `waiting_max` / `in_flight` per
+    /// authority instead of a silent, unbounded wait.
+    pub fn http1_gate_stats(&self) -> Vec<GateStat> {
+        self.admission.snapshot()
     }
 
     pub async fn post_stream(
@@ -188,7 +309,15 @@ impl Upstream {
         if self.h2c && endpoint.starts_with("http://") {
             self.post_h2c(authority, path, auth, extra, body).await
         } else {
-            self.post_reqwest(endpoint, auth, extra, body).await
+            // Cleartext `http://` on this branch is HTTP/1.1 by construction, so
+            // bound its per-host in-flight count (⇒ connections). `https` keeps
+            // reqwest's default behaviour; see [`AdmissionGate`].
+            let permit = if endpoint.starts_with("http://") && !authority.is_empty() {
+                Some(self.admission.acquire(authority).await)
+            } else {
+                None
+            };
+            self.post_reqwest(endpoint, auth, extra, body, permit).await
         }
     }
 
@@ -251,6 +380,7 @@ impl Upstream {
             body: UpstreamBody {
                 inner,
                 _lease: Some(lease),
+                _permit: None,
             },
         })
     }
@@ -261,6 +391,7 @@ impl Upstream {
         auth: Option<&(HeaderName, HeaderValue)>,
         extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
+        permit: Option<OwnedSemaphorePermit>,
     ) -> Result<UpstreamResponse> {
         let mut req = self
             .http
@@ -285,6 +416,7 @@ impl Upstream {
             body: UpstreamBody {
                 inner: BodyKind::Reqwest(Box::pin(response.bytes_stream())),
                 _lease: None,
+                _permit: permit,
             },
         })
     }
@@ -522,5 +654,66 @@ mod tests {
             upstream_url("http://h:1", "api/v1/chat"),
             "http://h:1/api/v1/chat"
         );
+    }
+
+    /// The HTTP/1.1 admission gate: a host is capped at `permits` in-flight
+    /// requests (a second acquire must wait), each host is bounded independently,
+    /// and releasing a slot wakes the waiter. The snapshot must make all of that
+    /// visible (`in_flight` / `waiting` / `waiting_max` per authority) — a gate
+    /// that parks requests but reports nothing would repeat the
+    /// "queue that cannot be seen" mistake.
+    #[tokio::test]
+    async fn admission_gate_bounds_each_host_independently() {
+        let gate = std::sync::Arc::new(AdmissionGate::new(1));
+        assert!(
+            gate.snapshot().is_empty(),
+            "nothing gated yet ⇒ empty snapshot"
+        );
+
+        let held = gate.acquire("h:1").await;
+        let snap = gate.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].authority, "h:1");
+        assert_eq!(snap[0].permits, 1);
+        assert_eq!(snap[0].in_flight, 1, "the held permit is in flight");
+        assert_eq!(snap[0].waiting, 0);
+
+        // Park a second acquirer on the same authority; it must show up as
+        // `waiting` (and the high-water mark has to record it).
+        let blocked = {
+            let gate = std::sync::Arc::clone(&gate);
+            tokio::spawn(async move { gate.acquire("h:1").await })
+        };
+        for _ in 0..50 {
+            if gate.snapshot()[0].waiting == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let snap = gate.snapshot();
+        assert_eq!(snap[0].waiting, 1, "a parked acquirer must show up");
+        assert_eq!(snap[0].waiting_max, 1, "the high-water mark has to see it");
+        assert_eq!(snap[0].in_flight, 1, "the held permit still counts");
+
+        drop(held);
+        let reacquired = tokio::time::timeout(Duration::from_millis(50), blocked)
+            .await
+            .expect("releasing a slot must wake the waiter")
+            .unwrap();
+        let snap = gate.snapshot();
+        assert_eq!(snap[0].waiting, 0, "the queue has to drain");
+        assert_eq!(snap[0].in_flight, 1, "the woken acquirer now holds it");
+        assert_eq!(snap[0].waiting_max, 1, "the high-water mark stays");
+        drop(reacquired);
+        assert_eq!(gate.snapshot()[0].in_flight, 0, "dropped ⇒ released");
+
+        // A different host is bounded independently and shows up as its own entry.
+        let other = gate.acquire("h:2").await;
+        let snap = gate.snapshot();
+        assert_eq!(snap.len(), 2, "each authority gets its own entry");
+        assert_eq!(snap[0].authority, "h:1");
+        assert_eq!(snap[1].authority, "h:2");
+        assert_eq!(snap[1].in_flight, 1);
+        drop(other);
     }
 }
