@@ -29,11 +29,12 @@ use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http::{Request, Response};
 use http_body_util::Full;
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -129,6 +130,34 @@ struct ConnEntry {
     reusable: AtomicBool,
 }
 
+/// Tracks whether the response body of a lease's current request was read to
+/// completion. HTTP/1.1 can only reuse a connection whose previous response body
+/// was fully consumed; a lease dropped before [`BodyTracker::mark_complete`] marks
+/// its connection non-reusable, so `acquire` drops it instead of handing a dead
+/// (peer-closed) connection to the next request. Clone it into the body consumer.
+#[derive(Clone, Default)]
+pub struct BodyTracker(Arc<AtomicBool>);
+
+impl BodyTracker {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    fn reset(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    /// Call once the response body has been read to completion (i.e. the stream
+    /// returned `None`). Until then, releasing the lease retires the connection.
+    pub fn mark_complete(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_complete(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// A reserved connection. Holding a [`Lease`] means "this connection is busy";
 /// dropping it frees the slot and wakes a waiter. It must be held until the
 /// response body has been consumed (that is what makes the bound cover the whole
@@ -136,6 +165,7 @@ struct ConnEntry {
 pub struct Lease {
     entry: Arc<ConnEntry>,
     state: Arc<HostState>,
+    tracker: BodyTracker,
     released: bool,
 }
 
@@ -144,14 +174,26 @@ impl Lease {
     ///
     /// HTTP/1.1 is serial: callers must finish/consume the previous response
     /// before calling this again on the same lease. A failure marks the
-    /// connection non-reusable.
+    /// connection non-reusable. The returned body ([`ResponseBody`]) marks the
+    /// connection reusable on its own once polled to completion.
     pub async fn send_request(
         &self,
         req: Request<Full<Bytes>>,
-    ) -> Result<Response<Incoming>, PoolError> {
+    ) -> Result<Response<ResponseBody>, PoolError> {
+        self.tracker.reset();
         let mut sender = self.entry.sender.lock().await;
         match sender.send_request(req).await {
-            Ok(resp) => Ok(resp),
+            Ok(resp) => {
+                let tracker = self.tracker.clone();
+                let (parts, body) = resp.into_parts();
+                Ok(Response::from_parts(
+                    parts,
+                    ResponseBody {
+                        inner: body,
+                        tracker,
+                    },
+                ))
+            }
             Err(err) => {
                 self.entry.reusable.store(false, Ordering::Release);
                 Err(PoolError::Request(err))
@@ -166,11 +208,44 @@ impl Lease {
     }
 }
 
+/// The response body of a [`Lease::send_request`], wrapping the hyper stream so
+/// that reaching end-of-stream marks the connection reusable. A body dropped
+/// before then retires the connection ([`Lease`] drop), because HTTP/1.1 cannot
+/// reuse a socket whose previous response was not fully read.
+pub struct ResponseBody {
+    inner: Incoming,
+    tracker: BodyTracker,
+}
+
+impl Body for ResponseBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+        let this = self.get_mut();
+        let frame = Pin::new(&mut this.inner).poll_frame(cx);
+        if matches!(frame, Poll::Ready(None)) {
+            this.tracker.mark_complete();
+        }
+        frame
+    }
+}
+
 impl Drop for Lease {
     fn drop(&mut self) {
         if !self.released {
             self.released = true;
             self.entry.in_flight.store(false, Ordering::Release);
+            // A connection whose response body was not read to completion cannot
+            // be reused by HTTP/1.1 (hyper will have/ will retire it), so retire
+            // it here as well — otherwise the next acquire could hand out a dead
+            // connection and fail a request that had no failover left.
+            if !self.tracker.is_complete() {
+                self.entry.reusable.store(false, Ordering::Release);
+            }
             self.state.notify.notify_waiters();
         }
     }
@@ -242,6 +317,7 @@ impl Pool {
                     return Ok(Lease {
                         entry,
                         state: Arc::clone(&state),
+                        tracker: BodyTracker::new(),
                         released: false,
                     });
                 }
@@ -257,6 +333,7 @@ impl Pool {
                             return Ok(Lease {
                                 entry,
                                 state: Arc::clone(&state),
+                                tracker: BodyTracker::new(),
                                 released: false,
                             });
                         }

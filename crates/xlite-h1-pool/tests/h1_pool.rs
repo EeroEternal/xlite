@@ -24,23 +24,28 @@ fn tcp_dial() -> Dial {
 /// Start a keep-alive HTTP/1.1 server; returns `host:port` and a counter of
 /// accepted TCP connections.
 async fn start_server() -> (String, Arc<AtomicUsize>) {
+    start_server_with_body(b"{\"ok\":true}".to_vec()).await
+}
+
+async fn start_server_with_body(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&accepted);
+    let body = Arc::new(body);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
             counter.fetch_add(1, Ordering::SeqCst);
-            tokio::spawn(serve(stream));
+            tokio::spawn(serve(stream, Arc::clone(&body)));
         }
     });
     (format!("127.0.0.1:{}", addr.port()), accepted)
 }
 
-async fn serve(mut stream: TcpStream) {
+async fn serve(mut stream: TcpStream, body: Arc<Vec<u8>>) {
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
@@ -66,13 +71,13 @@ async fn serve(mut stream: TcpStream) {
         }
         pending.drain(..cl);
         // Respond.
-        let body = b"{\"ok\":true}";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
-            body.len(),
-            String::from_utf8_lossy(body)
-        );
-        if stream.write_all(resp.as_bytes()).await.is_err() {
+        let mut resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        resp.extend_from_slice(&body);
+        if stream.write_all(&resp).await.is_err() {
             return;
         }
         if stream.flush().await.is_err() {
@@ -202,4 +207,30 @@ async fn hosts_are_independent() {
 
     let hosts: Vec<String> = pool.all_stats().into_iter().map(|(h, _)| h).collect();
     assert_eq!(hosts.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unread_body_retires_the_connection() {
+    // Large enough that a single client read cannot exhaust it, so abandoning the
+    // body leaves it unread (HTTP/1.1 cannot reuse such a connection).
+    let big = vec![b'x'; 512 * 1024];
+    let (host, _accepted) = start_server_with_body(big).await;
+    let pool = pool(4);
+
+    let lease = pool.acquire(&host).await.unwrap();
+    let resp = lease.send_request(make_req(&host)).await.unwrap();
+    let mut body = resp.into_body();
+    let _ = body.frame().await; // read one frame, then abandon the rest
+    drop(body);
+    drop(lease);
+
+    // The retired connection must not be handed out again: the next acquire dials
+    // a fresh one (dials goes 1 -> 2) instead of reusing the half-read socket.
+    let lease2 = pool.acquire(&host).await.unwrap();
+    assert_eq!(
+        pool.stats(&host).dials,
+        2,
+        "an unread body must retire its connection instead of being reused"
+    );
+    drop(lease2);
 }

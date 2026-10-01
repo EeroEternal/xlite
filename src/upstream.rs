@@ -13,11 +13,11 @@ use bytes::Bytes;
 use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
 use http_body_util::Full;
-use hyper::body::{Body, Incoming};
+use hyper::body::Body;
 use reqwest::Client;
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use xlite_h1_pool::{Config as H1PoolConfig, Lease as H1Lease, Pool as H1Pool};
+use xlite_h1_pool::{Config as H1PoolConfig, Lease as H1Lease, Pool as H1Pool, ResponseBody};
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
@@ -252,7 +252,7 @@ pub struct UpstreamBody {
 }
 
 enum BodyKind {
-    H1(Incoming),
+    H1(ResponseBody),
     H2(h2::RecvStream, usize),
     Pump(tokio::sync::mpsc::Receiver<Result<Bytes, String>>),
     Reqwest(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>),
@@ -373,7 +373,8 @@ impl Upstream {
 
     /// Send one request through the native HTTP/1.1 pool. The returned lease is
     /// held by the response body so the connection stays reserved until the body
-    /// is fully consumed.
+    /// is fully consumed. (`&self` is unused on purpose: connection selection and
+    /// dialing are entirely the pool's job.)
     async fn post_h1(
         &self,
         h1: &Arc<H1Pool>,
@@ -544,6 +545,7 @@ impl Stream for UpstreamBody {
                     Poll::Ready(Some(Err(err))) => {
                         return Poll::Ready(Some(Err(std::io::Error::other(err))));
                     }
+                    // Reaching end-of-stream is marked complete by `ResponseBody`.
                     Poll::Ready(None) => return Poll::Ready(None),
                     Poll::Pending => return Poll::Pending,
                 }

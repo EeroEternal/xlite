@@ -166,10 +166,11 @@ pub struct PoolStats {
 
 - [x] `crates/xlite-h1-pool`：Config / Pool / Lease / PoolError / PoolStats
 - [x] 连接表 + `acquire`（复用 / 拨号 / 排队 + `Notify` 唤醒）+ 连接级 `in_flight`
-- [x] 集成测试（真实 TCP 回环，4 项）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立
+- [x] 集成测试（真实 TCP 回环，**5 项**）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立、**半读连接退役**（响应体未读完就释放 ⇒ 连接不复用、下次重新拨号）
+- [x] xlite 级接入回归测试（`tests/upstream_h1_pool.rs`）：`h1_pool=1` 走池且 `h1_pool_stats` 非空 / `http1_gates` 空；默认走 gate 且反之
 - [ ] 空闲连接回收（reaper）与 `min_idle_conns` 预热 —— `PoolStats::reclaimed` 目前恒 `0`
 - [x] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
 - [x] `/api/pool` 新增 `h1_pool[]`（不接 gate 字段，避免两个机制混用；§4.4）
 - [ ] 压测验证（§7）
 
-**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` 已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：idle reaper（`reclaimed` 恒 `0`）、压测验证。
+**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + **半读连接退役** + **接入回归测试**已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：idle reaper（`reclaimed` 恒 `0`）、压测验证。
