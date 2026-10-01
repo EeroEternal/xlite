@@ -12,9 +12,12 @@ use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
+use http_body_util::Full;
+use hyper::body::{Body, Incoming};
 use reqwest::Client;
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use xlite_h1_pool::{Config as H1PoolConfig, Lease as H1Lease, Pool as H1Pool};
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
@@ -228,21 +231,28 @@ impl AdmissionGate {
 pub struct Upstream {
     h2c: bool,
     pool: Arc<Pool>,
+    /// Opt-in native HTTP/1.1 pool (`XLITE_UPSTREAM_H1_POOL=1`). When present it
+    /// owns cleartext `http://` upstreams, replacing reqwest + [`AdmissionGate`].
+    h1: Option<Arc<H1Pool>>,
     http: Client,
     /// Bounds in-flight requests per cleartext HTTP/1.1 upstream (see
-    /// [`AdmissionGate`]). `https` never touches it.
+    /// [`AdmissionGate`]). `https` never touches it. Unused when [`Self::h1`] is set.
     admission: Arc<AdmissionGate>,
 }
 
 pub struct UpstreamBody {
     inner: BodyKind,
     _lease: Option<Lease>,
+    /// Holds the native HTTP/1.1 pool lease for the whole response body (same
+    /// reason as `_permit`: the bound must cover the full request lifetime).
+    _h1: Option<H1Lease>,
     /// Holds the HTTP/1.1 admission slot for the whole response body so the
     /// bound covers the request's full lifetime, not just the header exchange.
     _permit: Option<OwnedSemaphorePermit>,
 }
 
 enum BodyKind {
+    H1(Incoming),
     H2(h2::RecvStream, usize),
     Pump(tokio::sync::mpsc::Receiver<Result<Bytes, String>>),
     Reqwest(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>),
@@ -270,6 +280,21 @@ impl Upstream {
             dial,
             idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
         });
+        // The h1 pool is a different crate with its own `Dial`/`BoxIo` types, so
+        // it gets its own dial closure (same shape, same TCP+nodelay setup).
+        let h1 = cfg.h1_pool.then(|| {
+            let dial: xlite_h1_pool::Dial = Arc::new(|host: String| {
+                Box::pin(async move {
+                    let stream = TcpStream::connect(host.as_str()).await?;
+                    let _ = stream.set_nodelay(true);
+                    Ok(Box::new(stream) as Box<dyn xlite_h1_pool::BoxIo>)
+                })
+            });
+            Arc::new(H1Pool::new(H1PoolConfig {
+                max_conns_per_host: cfg.max_conns_per_host.max(1),
+                dial,
+            }))
+        });
         let http = Client::builder()
             .pool_max_idle_per_host(64)
             .tcp_nodelay(true)
@@ -279,6 +304,7 @@ impl Upstream {
         Self {
             h2c: cfg.h2c,
             pool: Arc::new(pool),
+            h1,
             http,
             admission: Arc::new(AdmissionGate::new(cfg.max_conns_per_host)),
         }
@@ -304,6 +330,15 @@ impl Upstream {
         self.admission.snapshot()
     }
 
+    /// Connection-level stats for the opt-in native HTTP/1.1 pool
+    /// (`GET /api/pool`). Empty when the pool is off.
+    pub fn h1_pool_stats(&self) -> Vec<(String, xlite_h1_pool::PoolStats)> {
+        self.h1
+            .as_ref()
+            .map(|pool| pool.all_stats())
+            .unwrap_or_default()
+    }
+
     pub async fn post_stream(
         &self,
         endpoint: &str,
@@ -315,19 +350,78 @@ impl Upstream {
     ) -> Result<UpstreamResponse> {
         // Auth header, extra headers, authority and path are all computed once
         // per channel at snapshot build — the request path parses nothing.
-        if self.h2c && endpoint.starts_with("http://") {
-            self.post_h2c(authority, path, auth, extra, body).await
-        } else {
-            // Cleartext `http://` on this branch is HTTP/1.1 by construction, so
-            // bound its per-host in-flight count (⇒ connections). `https` keeps
-            // reqwest's default behaviour; see [`AdmissionGate`].
-            let permit = if endpoint.starts_with("http://") && !authority.is_empty() {
-                Some(self.admission.acquire(authority).await)
-            } else {
+        // Cleartext `http://` prefers the native h1 pool when it is enabled;
+        // `https` and the h2c pool are unaffected by that switch.
+        if endpoint.starts_with("http://") {
+            if self.h2c {
+                return self.post_h2c(authority, path, auth, extra, body).await;
+            }
+            if let Some(h1) = &self.h1 {
+                return self.post_h1(h1, authority, path, auth, extra, body).await;
+            }
+            // No native pool: bound the reqwest path at the request level.
+            let permit = if authority.is_empty() {
                 None
+            } else {
+                Some(self.admission.acquire(authority).await)
             };
-            self.post_reqwest(endpoint, auth, extra, body, permit).await
+            return self.post_reqwest(endpoint, auth, extra, body, permit).await;
         }
+        // `https://` keeps reqwest's default behaviour; see [`AdmissionGate`].
+        self.post_reqwest(endpoint, auth, extra, body, None).await
+    }
+
+    /// Send one request through the native HTTP/1.1 pool. The returned lease is
+    /// held by the response body so the connection stays reserved until the body
+    /// is fully consumed.
+    async fn post_h1(
+        &self,
+        h1: &Arc<H1Pool>,
+        authority: &str,
+        path: &str,
+        auth: Option<&(HeaderName, HeaderValue)>,
+        extra: &[(HeaderName, HeaderValue)],
+        body: Bytes,
+    ) -> Result<UpstreamResponse> {
+        if authority.is_empty() {
+            anyhow::bail!("upstream url missing host");
+        }
+        let lease = h1
+            .acquire(authority)
+            .await
+            .map_err(|e| anyhow::anyhow!("h1 pool acquire: {e}"))?;
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", authority)
+            .header("content-type", "application/json");
+        if let Some((name, value)) = auth {
+            builder = builder.header(name.clone(), value.clone());
+        }
+        for (name, value) in extra {
+            builder = builder.header(name.clone(), value.clone());
+        }
+        let request = builder.body(Full::new(body)).context("build h1 request")?;
+        let response = lease
+            .send_request(request)
+            .await
+            .map_err(|e| anyhow::anyhow!("h1 send_request: {e}"))?;
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Ok(UpstreamResponse {
+            status,
+            content_type,
+            body: UpstreamBody {
+                inner: BodyKind::H1(response.into_body()),
+                _lease: None,
+                _h1: Some(lease),
+                _permit: None,
+            },
+        })
     }
 
     async fn post_h2c(
@@ -389,6 +483,7 @@ impl Upstream {
             body: UpstreamBody {
                 inner,
                 _lease: Some(lease),
+                _h1: None,
                 _permit: None,
             },
         })
@@ -425,6 +520,7 @@ impl Upstream {
             body: UpstreamBody {
                 inner: BodyKind::Reqwest(Box::pin(response.bytes_stream())),
                 _lease: None,
+                _h1: None,
                 _permit: permit,
             },
         })
@@ -437,6 +533,21 @@ impl Stream for UpstreamBody {
     fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match &mut this.inner {
+            BodyKind::H1(body) => loop {
+                match Pin::new(&mut *body).poll_frame(cx) {
+                    Poll::Ready(Some(Ok(frame))) => {
+                        if let Ok(data) = frame.into_data() {
+                            return Poll::Ready(Some(Ok(data)));
+                        }
+                        // trailers: keep polling for the next data frame
+                    }
+                    Poll::Ready(Some(Err(err))) => {
+                        return Poll::Ready(Some(Err(std::io::Error::other(err))));
+                    }
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
+                }
+            },
             BodyKind::H2(recv, released) => match recv.poll_data(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     *released += bytes.len();
@@ -542,6 +653,7 @@ mod tests {
             redis_url: None,
             listen: "127.0.0.1:0".into(),
             h2c: true,
+            h1_pool: false,
             admin_password: "x".into(),
             session_secret: None,
             max_conns_per_host: 3,

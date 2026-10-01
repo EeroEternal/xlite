@@ -116,13 +116,13 @@ pub struct PoolStats {
 }
 ```
 
-`GET /api/pool` 现状：`hosts[]` 只覆盖 h2c 池；`http1_gates[]`（#75）覆盖 HTTP/1.1 的**在途/排队**，但**不含**物理连接数与 idle。启用本池后，`http1_gates[]` 的 `permits/in_flight/waiting/waiting_max` 语义由本池接续（`in_flight` 从「在途请求」变为「忙连接」，`waiting` 仍为排队数），并补上本池特有的 `connections`（含 idle）/`dials`/`reclaimed`；建议在同一 host 条目标注 `proto`，避免 h2c 与 h1 两个来源混淆。
+`GET /api/pool` 现状：`hosts[]` 只覆盖 h2c 池；`http1_gates[]`（#75）覆盖 HTTP/1.1 的**在途/排队**，但**不含**物理连接数与 idle。启用本池后，新增顶层 `h1_pool[]`（每 host：`connections`（含 idle）/`in_flight`/`dials`/`reclaimed`）；此时 `http1_gates[]` 保持为空（gate 对本池接管的 host 不再 `acquire`）—— 两个机制各报各的、不共用同一字段，避免语义漂移。
 
 ### 4.5 接入与开关
 
 - 新 env：**`XLITE_UPSTREAM_H1_POOL=1`**（默认 **关**）。
 - 生效条件：`XLITE_UPSTREAM_H1_POOL=1` **且** `endpoint` 是明文 `http://`（`https://` 仍走 reqwest）**且** `H2C` 关闭（若 `H2C=1`，明文 `http://` 仍归 h2c 池，避免两条池争同一 host）。
-- 与 #75 的关系：本池启用时，`AdmissionGate` 对该 host **不生效**（由连接级上界取代；`/api/pool` 的 `http1_gates[]` 改由本池填充，字段语义见 §4.4）；**未启用时行为与 main 完全一致**（`AdmissionGate` + `http1_gates[]` 照旧）。
+- 与 #75 的关系：本池启用时，`AdmissionGate` 对该 host **不生效**（由连接级上界取代；`/api/pool` 的 `h1_pool[]` 承载本池 stats，`http1_gates[]` 为空，见 §4.4）；**未启用时行为与 main 完全一致**（`AdmissionGate` + `http1_gates[]` 照旧）。
 
 ## 5. 与 h2-pool 的关系
 
@@ -168,8 +168,8 @@ pub struct PoolStats {
 - [x] 连接表 + `acquire`（复用 / 拨号 / 排队 + `Notify` 唤醒）+ 连接级 `in_flight`
 - [x] 集成测试（真实 TCP 回环，4 项）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立
 - [ ] 空闲连接回收（reaper）与 `min_idle_conns` 预热 —— `PoolStats::reclaimed` 目前恒 `0`
-- [ ] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
-- [ ] `/api/pool` 覆盖 h1 池（§4.4）
+- [x] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
+- [x] `/api/pool` 新增 `h1_pool[]`（不接 gate 字段，避免两个机制混用；§4.4）
 - [ ] 压测验证（§7）
 
-**当前状态**：crate 已实现且自测通过，但**尚未接入网关数据面**（`src/upstream.rs` 未动）—— 即默认构建与运行时行为与 main 完全一致。
+**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` 已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：idle reaper（`reclaimed` 恒 `0`）、压测验证。

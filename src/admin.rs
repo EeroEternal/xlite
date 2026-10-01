@@ -167,6 +167,7 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
             "api_keys": counts.api_keys,
             "channels": counts.channels,
             "h2c": state.config.h2c,
+            "h1_pool": state.config.h1_pool,
             "listen": state.config.listen,
             "storage": state.store.catalog().kind().as_str(),
             "version": env!("CARGO_PKG_VERSION"),
@@ -283,11 +284,30 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
             })
         })
         .collect();
+    // The opt-in native HTTP/1.1 pool reports connection-level stats. When it is
+    // enabled it replaces the request-level gate for cleartext upstreams (so
+    // `http1_gates` stays empty and this array carries the real state); when it
+    // is off this is an empty array.
+    let h1_pool: Vec<Value> = state
+        .upstream
+        .h1_pool_stats()
+        .into_iter()
+        .map(|(host, s)| {
+            json!({
+                "host": host,
+                "connections": s.connections,
+                "in_flight": s.in_flight,
+                "dials": s.dials,
+                "reclaimed": s.reclaimed,
+            })
+        })
+        .collect();
     ok(json!({
         "stream_budget_per_conn": stream_budget,
         "max_conns_per_host": state.config.max_conns_per_host,
         "hosts": hosts,
         "http1_gates": http1_gates,
+        "h1_pool": h1_pool,
     }))
     .into_response()
 }
