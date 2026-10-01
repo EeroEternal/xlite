@@ -116,8 +116,6 @@ async fn run_server() -> Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         listen = %config.listen,
         h2c = config.h2c,
-        h1_pool = config.h1_pool,
-        h1_pool_active = config.h1_pool_active(),
         redis = config.redis_url.is_some(),
         database = %config.database_url,
         max_conns = config.max_conns_per_host,

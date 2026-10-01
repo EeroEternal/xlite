@@ -1,6 +1,6 @@
-//! Regression tests for the `XLITE_UPSTREAM_H1_POOL` switch: cleartext `http://`
-//! must go through the native h1 pool when enabled, and through the request-level
-//! gate when not — with the two observability surfaces staying disjoint.
+//! Regression tests for cleartext `http://` upstreams: they must go through the
+//! native h1 pool. (The reqwest + request-level gate path was removed in the
+//! unification; `https` still uses reqwest.)
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -64,13 +64,12 @@ async fn serve(mut stream: TcpStream) {
     }
 }
 
-fn cfg(h1_pool: bool) -> Config {
+fn cfg() -> Config {
     Config {
         database_url: "memory".into(),
         redis_url: None,
         listen: "127.0.0.1:0".into(),
         h2c: false,
-        h1_pool,
         admin_password: "x".into(),
         session_secret: None,
         max_conns_per_host: 4,
@@ -103,9 +102,9 @@ async fn call(up: &Upstream, host: &str) -> (u16, Vec<u8>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn h1_pool_serves_cleartext_http_and_reports_connection_stats() {
+async fn cleartext_http_goes_through_the_native_h1_pool() {
     let host = start_mock().await;
-    let up = Upstream::new(&cfg(true));
+    let up = Upstream::new(&cfg());
 
     let (status, body) = call(&up, &host).await;
     assert_eq!(status, 200);
@@ -115,28 +114,8 @@ async fn h1_pool_serves_cleartext_http_and_reports_connection_stats() {
     assert_eq!(stats.len(), 1, "the h1 pool must report the host it served");
     assert_eq!(stats[0].0, host);
     assert_eq!(stats[0].1.connections, 1);
-    assert!(
-        up.http1_gate_stats().is_empty(),
-        "the gate must not engage on a host owned by the h1 pool"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_path_uses_the_gate_not_the_h1_pool() {
-    let host = start_mock().await;
-    let up = Upstream::new(&cfg(false));
-
-    let (status, body) = call(&up, &host).await;
-    assert_eq!(status, 200);
-    assert_eq!(&body[..], b"{\"ok\":true}");
-
-    assert!(
-        up.h1_pool_stats().is_empty(),
-        "the h1 pool must be off by default"
-    );
     assert_eq!(
-        up.http1_gate_stats().len(),
-        1,
-        "the request-level gate must own cleartext http by default"
+        stats[0].1.in_flight, 0,
+        "the lease is released once the body is read"
     );
 }

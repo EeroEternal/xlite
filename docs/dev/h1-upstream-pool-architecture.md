@@ -166,7 +166,7 @@ pub struct PoolStats {
 
 本方案默认关闭：不设 `XLITE_UPSTREAM_H1_POOL` 时，代码路径与 main 逐字节一致。删除 crate + 接入点即可回滚；不影响 h2c 池与 PR #75 的近似方案。
 
-## 9. 收敛计划（压测后，用户已决定）
+## 9. 收敛计划（已执行 —— `feat-unify-http1-h1-pool`）
 
 **决定**：压测验证本池后，**移除 reqwest 的明文 HTTP/1.1 路径与 `AdmissionGate`（#75）**，让明文 `http://` 只走本池。理由：两条路径并存（近似 gate vs 连接级池）维护成本高、观测语义易混（`http1_gates[]` vs `h1_pool[]`），集中在一种。
 

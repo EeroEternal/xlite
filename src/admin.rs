@@ -167,8 +167,6 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
             "api_keys": counts.api_keys,
             "channels": counts.channels,
             "h2c": state.config.h2c,
-            "h1_pool": state.config.h1_pool,
-            "h1_pool_active": state.config.h1_pool_active(),
             "listen": state.config.listen,
             "storage": state.store.catalog().kind().as_str(),
             "version": env!("CARGO_PKG_VERSION"),
@@ -268,27 +266,9 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
     } else {
         json!(state.config.upstream_stream_cap)
     };
-    // The HTTP/1.1 admission gate parks requests in the gateway too; exposing it
-    // here is the same "a queue must be visible" rule as the per-host wait stats
-    // above (a silent, unbounded wait is the part that actually hurts TTFT).
-    let http1_gates: Vec<Value> = state
-        .upstream
-        .http1_gate_stats()
-        .into_iter()
-        .map(|g| {
-            json!({
-                "host": g.authority,
-                "permits": g.permits,
-                "in_flight": g.in_flight,
-                "waiting": g.waiting,
-                "waiting_max": g.waiting_max,
-            })
-        })
-        .collect();
-    // The opt-in native HTTP/1.1 pool reports connection-level stats. When it is
-    // enabled it replaces the request-level gate for cleartext upstreams (so
-    // `http1_gates` stays empty and this array carries the real state); when it
-    // is off this is an empty array.
+    // Cleartext `http://` upstreams go through the native HTTP/1.1 pool now, so
+    // its connection-level stats are the HTTP/1.1 side of this snapshot (there is
+    // no request-level gate any more).
     let h1_pool: Vec<Value> = state
         .upstream
         .h1_pool_stats()
@@ -300,6 +280,12 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "in_flight": s.in_flight,
                 "dials": s.dials,
                 "reclaimed": s.reclaimed,
+                // Queue visibility for the HTTP/1.1 path — same fields (and the
+                // same "a queue must be visible" reasoning) as the h2c hosts[].
+                "waiting": s.waiting,
+                "waiting_max": s.waiting_max,
+                "queued_total": s.queued_total,
+                "wait_ms_max": s.wait_millis_max,
             })
         })
         .collect();
@@ -307,7 +293,6 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
         "stream_budget_per_conn": stream_budget,
         "max_conns_per_host": state.config.max_conns_per_host,
         "hosts": hosts,
-        "http1_gates": http1_gates,
         "h1_pool": h1_pool,
     }))
     .into_response()

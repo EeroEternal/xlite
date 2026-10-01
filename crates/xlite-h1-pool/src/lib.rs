@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -39,7 +39,7 @@ use hyper::body::{Body, Frame, Incoming};
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 /// The transport handed to the pool by [`Dial`].
 pub trait BoxIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -124,20 +124,19 @@ pub struct PoolStats {
     pub in_flight: usize,
     /// Total successful dials since start.
     pub dials: usize,
-    /// Connections closed by the idle reaper (always `0` until that lands).
+    /// Connections closed by the idle reaper.
     pub reclaimed: usize,
+    /// Acquirers currently parked on this host's semaphore — the queue depth.
+    pub waiting: usize,
+    /// High-water mark of [`PoolStats::waiting`].
+    pub waiting_max: usize,
+    /// Acquires that had to park at least once.
+    pub queued_total: u64,
+    /// Exact worst wait seen, in milliseconds.
+    pub wait_millis_max: u64,
 }
 
-impl PoolStats {
-    pub fn new(connections: usize, in_flight: usize, dials: usize, reclaimed: usize) -> Self {
-        Self {
-            connections,
-            in_flight,
-            dials,
-            reclaimed,
-        }
-    }
-}
+impl PoolStats {}
 
 /// The upstream HTTP/1.1 connection pool.
 pub struct Pool {
@@ -156,6 +155,17 @@ struct HostState {
     sem: Arc<Semaphore>,
     dials: AtomicUsize,
     reclaimed: AtomicUsize,
+    /// Acquirers currently parked on this host's semaphore — the queue depth.
+    /// A queue that cannot be seen cannot be reasoned about.
+    waiting: AtomicUsize,
+    /// High-water mark of [`HostState::waiting`].
+    waiting_max: AtomicUsize,
+    /// Acquires that had to park at least once (fast-path acquires excluded).
+    queued: AtomicU64,
+    /// Total milliseconds those acquires spent parked.
+    wait_millis: AtomicU64,
+    /// Exact worst wait seen.
+    wait_millis_max: AtomicU64,
 }
 
 #[derive(Default)]
@@ -382,6 +392,11 @@ impl Pool {
             Arc::new(HostState {
                 inner: Mutex::new(HostInner::default()),
                 sem: Arc::new(Semaphore::new(self.max_conns_per_host)),
+                waiting: AtomicUsize::new(0),
+                waiting_max: AtomicUsize::new(0),
+                queued: AtomicU64::new(0),
+                wait_millis: AtomicU64::new(0),
+                wait_millis_max: AtomicU64::new(0),
                 dials: AtomicUsize::new(0),
                 reclaimed: AtomicUsize::new(0),
             })
@@ -397,11 +412,30 @@ impl Pool {
     /// by the reaper (`min_idle_conns`).
     pub async fn acquire(&self, host: &str) -> Result<Lease, PoolError> {
         let state = self.host_state(host);
-        // Fair queue: FIFO, no thundering herd on release.
-        let permit = Arc::clone(&state.sem)
-            .acquire_owned()
-            .await
-            .expect("h1 pool semaphore is never closed");
+        // Fast path: a free slot and nobody ahead of us (the semaphore is fair,
+        // so a parked acquirer would be served first) ⇒ this request never
+        // queues, so it must NOT touch the waiting counters. Counting it would
+        // make `waiting_max` report "queued" for a request that never queued.
+        let permit = match Arc::clone(&state.sem).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                // Slow path: actually parking — now the counters are meaningful.
+                let start = Instant::now();
+                let depth = state.waiting.fetch_add(1, Ordering::Relaxed) + 1;
+                state.waiting_max.fetch_max(depth, Ordering::Relaxed);
+                let permit = Arc::clone(&state.sem)
+                    .acquire_owned()
+                    .await
+                    .expect("h1 pool semaphore is never closed");
+                state.waiting.fetch_sub(1, Ordering::Relaxed);
+                state.queued.fetch_add(1, Ordering::Relaxed);
+                let ms = start.elapsed().as_millis() as u64;
+                state.wait_millis.fetch_add(ms, Ordering::Relaxed);
+                state.wait_millis_max.fetch_max(ms, Ordering::Relaxed);
+                permit
+            }
+            Err(TryAcquireError::Closed) => unreachable!("h1 pool semaphore is never closed"),
+        };
 
         {
             let mut inner = state.inner.lock().expect("h1 pool inner mutex poisoned");
@@ -505,6 +539,10 @@ impl Pool {
                         .count(),
                     dials: state.dials.load(Ordering::Relaxed),
                     reclaimed: state.reclaimed.load(Ordering::Relaxed),
+                    waiting: state.waiting.load(Ordering::Relaxed),
+                    waiting_max: state.waiting_max.load(Ordering::Relaxed),
+                    queued_total: state.queued.load(Ordering::Relaxed),
+                    wait_millis_max: state.wait_millis_max.load(Ordering::Relaxed),
                 }
             }
             None => PoolStats::default(),
