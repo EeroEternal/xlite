@@ -302,6 +302,23 @@ rounds=$(( RUN_SECONDS / INTERVAL ))
 [ "${rounds}" -lt 1 ] && rounds=1
 
 api_json=""; api_hosts=""; api_cap=""; api_maxconns=""; api_has_queue=0
+
+
+# 解析顶层 `h1_pool[]`（明文 http 走 h1 池，#76）的排队字段：跨 host 求 waiting /
+# queued_total 的和、取 wait_ms_max 的最坏值，输出 `h1w=… h1q=… h1m=…`。
+# hosts[] 只覆盖 h2c 池 ⇒ 明文 http 通道的排队深度只能从这里来；漏掉就会对着
+# 排队的通道报「0 个在等」。写法与 api_hosts_from_json 同款（RS='},{'）。
+h1q_from_json() {
+    printf '%s' "$1" | sed -n 's/.*"h1_pool":\[//p' | sed 's/\].*//' | awk -v RS='},{' '
+        { w = 0; q = 0; m = 0
+          if (match($0, /"waiting":[0-9]+/))     { w = substr($0, RSTART + 10, RLENGTH - 10) }
+          if (match($0, /"queued_total":[0-9]+/)){ q = substr($0, RSTART + 15, RLENGTH - 15) }
+          if (match($0, /"wait_ms_max":[0-9]+/)) { m = substr($0, RSTART + 14, RLENGTH - 14) }
+          tw += w; tq += q; if (m + 0 > tm) tm = m + 0
+        }
+        END { printf "h1w=%d h1q=%d h1m=%d", tw, tq, tm }'
+}
+
 fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
     local jar; jar="$(mktemp)"
     # 密码经 stdin（--data @-）送给 curl，**不走 curl 的 argv** —— 否则 `ps` 能看到
@@ -411,6 +428,13 @@ if [ "${api_ok}" = 1 ]; then
     waiting_total=$(awk '{s+=$6} END{print s+0}' "${PORTS}.max")
     queued_total=$(awk '{s+=$7} END{print s+0}' "${PORTS}.max")
     wait_p99_max=$(awk '{if ($8 > m) m = $8} END{print m+0}' "${PORTS}.max")
+    # 明文 http 走 h1 池（#76）后，其排队字段在顶层 h1_pool[] —— hosts[] 只覆盖 h2c 池。
+    # 两条来源**相加**（一次部署可能同时有 h2c 与 h1 上游），等待时长取最坏值；
+    # 漏加这里就会对着排队的通道报「0 个在等」。等待时长只有 max（无分位），故用「≤ max」表述。
+    eval "$(h1q_from_json "${api_json}")"
+    waiting_total=$((waiting_total + h1w))
+    queued_total=$((queued_total + h1q))
+    if [ "${h1m}" -gt "${wait_p99_max}" ]; then wait_p99_max="${h1m}"; fi
     inflight_total=$(awk '{s+=$3} END{print s+0}' "${PORTS}.max")
     out_peak="${conns_total}"; out_med="${conns_total}"
     in_peak="${inflight_total}"; in_med="${inflight_total}"

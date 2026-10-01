@@ -295,3 +295,51 @@ async fn reaper_keeps_min_idle_connections() {
     );
     assert_eq!(pool.stats(&host).reclaimed, 0);
 }
+
+/// The waiting counters have to make the invisible queue visible: with cap=1 a
+/// second acquire parks (waiting/waiting_max), and once the slot is released it
+/// is counted in queued_total with its wait duration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_saturated_pool_reports_its_queue_depth_and_wait() {
+    let (host, _accepted) = start_server().await;
+    let pool = Arc::new(pool(1));
+
+    let held = pool.acquire(&host).await.unwrap();
+    let before = pool.stats(&host);
+    assert_eq!(before.waiting, 0);
+    assert_eq!(before.queued_total, 0);
+
+    let waiter = {
+        let pool = Arc::clone(&pool);
+        let h2 = host.clone();
+        tokio::spawn(async move { pool.acquire(&h2).await })
+    };
+    for _ in 0..200 {
+        if pool.stats(&host).waiting == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let parked = pool.stats(&host);
+    assert_eq!(parked.waiting, 1, "a parked acquirer must show up");
+    assert_eq!(parked.waiting_max, 1, "the high-water mark has to see it");
+    assert_eq!(parked.in_flight, 1, "the held slot still counts");
+
+    // Hold it a measurable while so the wait timer has something to record.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(held);
+
+    let lease = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .expect("releasing the slot must wake the waiter")
+        .unwrap();
+    let after = pool.stats(&host);
+    assert_eq!(after.waiting, 0, "the queue has to drain");
+    assert_eq!(after.queued_total, 1, "exactly one acquire had to park");
+    assert!(
+        after.wait_millis_max >= 10,
+        "the wait was ~20ms, so the worst wait has to reflect it (got {})",
+        after.wait_millis_max
+    );
+    drop(lease);
+}

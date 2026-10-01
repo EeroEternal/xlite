@@ -34,7 +34,7 @@
    - 只要下游没有主动返回错误、网络连接没有中断，网关绝不主动向客户端抛出 429/503，尽最大努力把请求完整送达并守候返回。
 2. **护栏二：杜绝网关应用层阻塞排队（保住 TTFT）**
    - 严禁恢复类似 `XLITE_MAX_IN_FLIGHT` 的应用层等待队列。排队不仅无法提高系统吞吐，还会将等待时间全额计入 `timings.waiting`，直接摧毁 TTFT 指标。
-   - **例外（2026-10-01，经用户豁免，#75）**：明文 `http://`（HTTP/1.1）上游的**每 host 在途上界**（复用 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`，信号量排队、permit 随响应体释放）不在禁止之列 —— 该路径一条连接一个请求，上界就是连接上界，不设等同无闸门；且排队状态经 `GET /api/pool` 的 `http1_gates[]` 可见。同一例外的**备选实现**：`crates/xlite-h1-pool`（`XLITE_UPSTREAM_H1_POOL=1`，默认关）给出连接级上界，经 `GET /api/pool` 的 `h1_pool[]` 可见；边界同为「明文 HTTP/1.1」。h2 路径仍严禁任何应用层排队。
+   - **例外（2026-10-01，经用户豁免；#75 起、#76 收敛）**：明文 `http://`（HTTP/1.1）上游的**每 host 连接治理**不在禁止之列 —— 该路径一条连接一个请求，上界就是连接上界，不设等同无闸门。**实现已收敛为 `crates/xlite-h1-pool`**（原生 HTTP/1.1 连接池，`XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 为每 host 连接上界，公平排队、permit 随响应体释放），经 `GET /api/pool` 的 `h1_pool[]` 可见；**#75 的 request-level gate（`http1_gates[]`）已删除**。h2 路径仍严禁任何应用层排队。
 3. **护栏三：传输层物理背压替代应用层报错（保护下游）**
    - 利用操作系统的 TCP 接收窗口、Listen Backlog 以及 HTTP/2 的 Stream/Connection 级别流控，将反压物理传导至网络协议栈，实现平滑削峰。
 

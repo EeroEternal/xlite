@@ -6,10 +6,6 @@ pub struct Config {
     pub redis_url: Option<String>,
     pub listen: String,
     pub h2c: bool,
-    /// Opt-in: use the native `crates/xlite-h1-pool` connection pool for
-    /// cleartext `http://` upstreams instead of reqwest + `AdmissionGate`. Off by
-    /// default (experimental; see `docs/dev/h1-upstream-pool-architecture.md`).
-    pub h1_pool: bool,
     pub admin_password: String,
     pub session_secret: Option<String>,
     pub max_conns_per_host: usize,
@@ -53,7 +49,6 @@ impl Config {
         let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
         let host = std::env::var("LISTEN_HOST").unwrap_or_else(|_| "0.0.0.0".into());
         let h2c = env_flag("XLITE_UPSTREAM_H2C");
-        let h1_pool = env_flag("XLITE_UPSTREAM_H1_POOL");
         let admin_password =
             std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| "admin".to_string());
         let session_secret = std::env::var("ADMIN_SESSION_SECRET")
@@ -74,7 +69,6 @@ impl Config {
             redis_url,
             listen: format!("{host}:{port}"),
             h2c,
-            h1_pool,
             admin_password,
             session_secret,
             max_conns_per_host,
@@ -82,13 +76,6 @@ impl Config {
             catalog_reload_secs,
             upstream_ttft_header,
         })
-    }
-
-    /// Whether the opt-in h1 pool is actually in effect. `H2C=1` owns cleartext
-    /// `http://` outright, so a set-but-shadowed `XLITE_UPSTREAM_H1_POOL` must not
-    /// be reported as active — in that case the pool is not even built.
-    pub fn h1_pool_active(&self) -> bool {
-        self.h1_pool && !self.h2c
     }
 }
 
