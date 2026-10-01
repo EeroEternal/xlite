@@ -170,7 +170,7 @@ pub struct PoolStats {
 
 **决定**：压测验证本池后，**移除 reqwest 的明文 HTTP/1.1 路径与 `AdmissionGate`（#75）**，让明文 `http://` 只走本池。理由：两条路径并存（近似 gate vs 连接级池）维护成本高、观测语义易混（`http1_gates[]` vs `h1_pool[]`），集中在一种。
 
-**定位与默认值（压测结论，见 §10）**：本池只应在**上游不支持 h2/h2c** 时使用 —— 能用 h2c 就用 h2c 池（5000 VU：h2c **741** qps vs h1(`MAX=128`) **411**，且 h2c 始终不排队）。收敛时，h1 池的 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 默认值应**按 fd 预算**给得比 h2c 大得多：h2c 的 32 是「32 连接 × 每连接多流」，h1 的 32 就是「32 并发」（实测 `32→128` 直接 **3.7×**）。建议 `≈ (nofile − 入站预留) / host 数`，并在启动期按 `nofile` 校核。
+**定位与默认值（压测结论，见 §10）**：本池只应在**上游不支持 h2/h2c** 时使用 —— 能用 h2c 就用 h2c 池（5000 VU：h2c **741** qps vs h1(`MAX=128`) **411**，且 h2c 始终不排队）。h1 池的 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 默认值**按 fd 预算**给得比 h2c 大得多（**已实现**）：h2c 的 32 是「32 连接 × 每连接多流」，h1 的 32 就是「32 并发」（实测 `32→128` 直接 **3.7×**）。`Config::from_env` 在 env **未设**时给 h1 路径 `H1_DEFAULT_MAX_CONNS_PER_HOST = 128`（h2c 仍 32），显式设置则两个池都原样遵守该值；启动期按 `nofile` 校核（`fd_budget_warning` 的 fd 预算现取 h2c/h1 两个上限的较大者）。
 
 届时（**独立 PR**，不是本 PR）：
 - `src/upstream.rs`：删 `AdmissionGate` / `http1_gates` 采集 / `BodyKind::Reqwest` 的 HTTP/1.1 用法；`post_reqwest` 只保留 `https`；本池对明文 `http://` 转默认生效（去掉 env 开关或默认 `true`）。

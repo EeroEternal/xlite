@@ -171,7 +171,9 @@ impl Upstream {
             })
         });
         let h1 = Arc::new(H1Pool::new(H1PoolConfig {
-            max_conns_per_host: cfg.max_conns_per_host.max(1),
+            // HTTP/1.1 spends one connection per in-flight request, so this pool
+            // gets its own (higher) default — see `Config::h1_max_conns_per_host`.
+            max_conns_per_host: cfg.h1_max_conns_per_host.max(1),
             idle_timeout: xlite_h1_pool::DEFAULT_IDLE_TIMEOUT,
             min_idle_conns: xlite_h1_pool::DEFAULT_MIN_IDLE_CONNS,
             dial: h1_dial,
@@ -511,6 +513,7 @@ mod tests {
             admin_password: "x".into(),
             session_secret: None,
             max_conns_per_host: 3,
+            h1_max_conns_per_host: 3,
             upstream_stream_cap: 250,
             catalog_reload_secs: 0,
             upstream_ttft_header: false,
