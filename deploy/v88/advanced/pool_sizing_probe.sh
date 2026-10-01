@@ -252,6 +252,25 @@ if [ "${SELF_TEST}" = "1" ]; then
     check "未绑定 ⇒ CONNS 保持" "${RECOMMEND_CONNS_ENV}" "25"
     check "未绑定 ⇒ 理由" "${RECOMMEND_REASON}" "实际每连接流数远低于 CAP ⇒ 池子没塞满，改 CAP 一个数都不会变；首字问题不在这条轴上"
 
+# 解析顶层 `h1_pool[]`（明文 http 走 h1 池，#76）为与 hosts[] **同构的 8 列行**：
+# host connections in_flight ceiling peer_cap waiting queued wait_ms_max
+# ceiling = `MAX_CONNS_PER_HOST`（HTTP/1.1 一连接一请求 ⇒ 也是在途上界）；
+# peer_cap 对 h1 无意义 ⇒ `-`；旧版本缺队列字段 ⇒ 0，`wait_ms_max` 缺席 ⇒ `-`（不伪造）。
+# 与 hosts[] 的行**并入同一张聚合表**（跨 host 取 min/sum），探针的全套读数自动覆盖 h1 通道。
+h1_hosts_from_json() { # <json> <max_conns_per_host>
+    printf '%s' "$1" | sed -n 's/.*"h1_pool":\[//p' | sed 's/\].*//' | awk -v RS='},{' -v mc="$2" '
+    {
+        h = ""; c = ""; f = ""; w = ""; q = ""; m = ""
+        if (match($0, /"host":"[^"]*"/))          { h = substr($0, RSTART + 8,  RLENGTH - 9) }
+        if (match($0, /"connections":[0-9]+/))    { c = substr($0, RSTART + 14, RLENGTH - 14) }
+        if (match($0, /"in_flight":[0-9]+/))      { f = substr($0, RSTART + 12, RLENGTH - 12) }
+        if (match($0, /"waiting":[0-9]+/))        { w = substr($0, RSTART + 10, RLENGTH - 10) }
+        if (match($0, /"queued_total":[0-9]+/))   { q = substr($0, RSTART + 15, RLENGTH - 15) }
+        if (match($0, /"wait_ms_max":[0-9]+/))    { m = substr($0, RSTART + 14, RLENGTH - 14) }
+        if (h != "") print h, (c == "" ? 0 : c), (f == "" ? 0 : f), (mc == "" ? "-" : mc), "-", (w == "" ? 0 : w), (q == "" ? 0 : q), (m == "" ? "-" : m)
+    }'
+}
+
     echo "== /api/pool 解析 =="
     # 关键：serde 的 BTreeMap 按字典序输出（cap_updates < connections < dials < host <
     # in_flight < …）⇒ 解析器必须**逐字段抽取**、不假设键顺序。下面第二个 host 故意把
@@ -263,6 +282,11 @@ if [ "${SELF_TEST}" = "1" ]; then
     check "空 hosts ⇒ 零输出" "$(api_hosts_from_json "${empty}" | grep -c . || true)" "0"
     check "cap 数字可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" "30"
     check "cap=null ⇒ 抽不到数字（= 随对端）" "$(printf '%s' "${empty}" | sed -n 's/.*"stream_budget_per_conn":\([0-9]*\).*/\1/p')" ""
+    echo "== h1_pool[] 解析（与 hosts[] 同构的 8 列）==="
+    h1fx='{"data":{"h1_pool":[{"connections":4,"host":"10.0.0.9:9090","in_flight":4,"queued_total":500,"reclaimed":0,"wait_ms_max":900,"waiting":33},{"connections":1,"host":"10.0.0.9:9091","in_flight":0,"waiting":0}],"max_conns_per_host":128},"success":true}'
+    check "h1 行 8 列（ceiling=MAX_CONNS，peer=-）" "$(h1_hosts_from_json "${h1fx}" 128 | tr '\n' '|')" \
+        "10.0.0.9:9090 4 4 128 - 33 500 900|10.0.0.9:9091 1 0 128 - 0 0 -|"
+    check "h1 行：mc 缺席 ⇒ ceiling=-" "$(h1_hosts_from_json "${h1fx}" "" | sed -n '1p' | awk '{print $4}')" "-"
     check "max_conns 可抽到" "$(printf '%s' "${fixture}" | sed -n 's/.*"max_conns_per_host":\([0-9]*\).*/\1/p')" "3"
     # 回归：`peer_cap`/`effective_ceiling` 为 null 的 host（未握手/无活连接）**不能沿用**
     # 上一个 host 的值 —— awk 逐字段抽取时忘了每轮重置 `e`/`p` 就会残留。
@@ -304,20 +328,7 @@ rounds=$(( RUN_SECONDS / INTERVAL ))
 api_json=""; api_hosts=""; api_cap=""; api_maxconns=""; api_has_queue=0
 
 
-# 解析顶层 `h1_pool[]`（明文 http 走 h1 池，#76）的排队字段：跨 host 求 waiting /
-# queued_total 的和、取 wait_ms_max 的最坏值，输出 `h1w=… h1q=… h1m=…`。
-# hosts[] 只覆盖 h2c 池 ⇒ 明文 http 通道的排队深度只能从这里来；漏掉就会对着
-# 排队的通道报「0 个在等」。写法与 api_hosts_from_json 同款（RS='},{'）。
-h1q_from_json() {
-    printf '%s' "$1" | sed -n 's/.*"h1_pool":\[//p' | sed 's/\].*//' | awk -v RS='},{' '
-        { w = 0; q = 0; m = 0
-          if (match($0, /"waiting":[0-9]+/))     { w = substr($0, RSTART + 10, RLENGTH - 10) }
-          if (match($0, /"queued_total":[0-9]+/)){ q = substr($0, RSTART + 15, RLENGTH - 15) }
-          if (match($0, /"wait_ms_max":[0-9]+/)) { m = substr($0, RSTART + 14, RLENGTH - 14) }
-          tw += w; tq += q; if (m + 0 > tm) tm = m + 0
-        }
-        END { printf "h1w=%d h1q=%d h1m=%d", tw, tq, tm }'
-}
+
 
 fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
     local jar; jar="$(mktemp)"
@@ -339,12 +350,20 @@ fetch_pool_api() { # 登录换 cookie，再取每 host 快照；成功返回 0
     printf '%s' "${api_json}" | grep -q '"waiting"' && api_has_queue=1
     case "${api_json}" in *'"hosts"'*) return 0 ;; *) return 1 ;; esac
 }
-api_ok=0; api_note=""; api_cfg=0
+api_ok=0; api_note=""; api_cfg=0; h1_seen=0
 UNIT="口"; [ "${API_MODE}" = 1 ] && UNIT="host"
 if [ "${API_MODE}" = 1 ]; then
     if fetch_pool_api; then
         api_hosts="$(api_hosts_from_json "${api_json}")"
-        if [ -n "${api_hosts}" ]; then api_ok=1; else api_note="（/api/pool 可达但 hosts 为空 —— 此刻没有上游流量？）"; fi
+        # h1 池模式下 hosts[] 可能为空（明文 http 不走 h2c 池），但 h1_pool[] 有数据
+        # ⇒ 只要有任一来源就 api_ok=1，不能误回落 ss。
+        h1_rows="$(h1_hosts_from_json "${api_json}" "${api_maxconns:-}")"
+        if [ -n "${api_hosts}" ] || [ -n "${h1_rows}" ]; then
+            api_ok=1
+            [ -n "${h1_rows}" ] && h1_seen=1
+        else
+            api_note="（/api/pool 可达但 hosts 与 h1_pool 皆为空 —— 此刻没有上游流量？）"
+        fi
     else
         api_note="（/api/pool 不可用：登录失败，或该版本还没有这个端点）"
     fi
@@ -371,7 +390,11 @@ while [ "${i}" -lt "${rounds}" ]; do
         # 每轮重取一次，跨轮取每 host 峰值 —— 单点快照会漏掉尖峰
         if fetch_pool_api; then
             api_hosts="$(api_hosts_from_json "${api_json}")"
+            # h1 池的 host 行与 hosts[] 同构，并入同一张聚合表（详见 h1_hosts_from_json）。
+            h1_rows="$(h1_hosts_from_json "${api_json}" "${api_maxconns:-}")"
+            [ -n "${h1_rows}" ] && h1_seen=1
             printf '%s\n' "${api_hosts}" >> "${API}"
+            [ -n "${h1_rows}" ] && printf '%s\n' "${h1_rows}" >> "${API}"
             n=$(printf '%s\n' "${api_hosts}" | grep -c .)
             c=$(printf '%s\n' "${api_hosts}" | awk '{s+=$2} END{print s+0}')
             f=$(printf '%s\n' "${api_hosts}" | awk '{s+=$3} END{print s+0}')
@@ -428,13 +451,8 @@ if [ "${api_ok}" = 1 ]; then
     waiting_total=$(awk '{s+=$6} END{print s+0}' "${PORTS}.max")
     queued_total=$(awk '{s+=$7} END{print s+0}' "${PORTS}.max")
     wait_p99_max=$(awk '{if ($8 > m) m = $8} END{print m+0}' "${PORTS}.max")
-    # 明文 http 走 h1 池（#76）后，其排队字段在顶层 h1_pool[] —— hosts[] 只覆盖 h2c 池。
-    # 两条来源**相加**（一次部署可能同时有 h2c 与 h1 上游），等待时长取最坏值；
-    # 漏加这里就会对着排队的通道报「0 个在等」。等待时长只有 max（无分位），故用「≤ max」表述。
-    eval "$(h1q_from_json "${api_json}")"
-    waiting_total=$((waiting_total + h1w))
-    queued_total=$((queued_total + h1q))
-    if [ "${h1m}" -gt "${wait_p99_max}" ]; then wait_p99_max="${h1m}"; fi
+    # h1 池的 host 行已与 hosts[] 同构并入同一张聚合表（见循环内 h1_hosts_from_json）
+    # ⇒ 上界/排队/明细的求和与取 min 自动覆盖 h1 通道，无需单独合并。
     inflight_total=$(awk '{s+=$3} END{print s+0}' "${PORTS}.max")
     out_peak="${conns_total}"; out_med="${conns_total}"
     in_peak="${inflight_total}"; in_med="${inflight_total}"
@@ -532,7 +550,12 @@ fi
 ceiling_hint=""
 used_pct="（未知）"
 if [ -n "${ceiling_min}" ]; then
-    ceiling_hint="（min(CAP=${today_cap:-未设}, 对端=${peer_min:-?}) × CONNS=${today_conns:-?}）"
+    if [ "${h1_seen}" = 1 ]; then
+        # 聚合表里含 h1 池 host（上界 = MAX_CONNS，无 CAP/对端/C－ONNS 的概念）⇒ 通用表述。
+        ceiling_hint="（各 host 上界取最小（保守）；含 h1 池 host：其上界 = MAX_CONNS_PER_HOST）"
+    else
+        ceiling_hint="（min(CAP=${today_cap:-未设}, 对端=${peer_min:-?}) × CONNS=${today_conns:-?}）"
+    fi
     used_pct=$(awk -v u="${per_port_inflight}" -v c="${ceiling_min}" 'BEGIN{ if (c > 0) printf "%d%%", u*100/c; else print "（未知）" }')
 fi
 # 对端值比我们的 CAP 还小时，指出"真正限流的是对端" —— 否则读者会把

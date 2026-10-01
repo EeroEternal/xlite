@@ -123,7 +123,7 @@ pub struct PoolStats {
 
 > `connections` 含「已被标记不可复用、但尚未被下一次 `acquire` 的 `retain` 清掉」的连接，故瞬时值可能略高于有效连接数 —— 它们是真实仍打开的连接，不是伪造数字。
 
-`GET /api/pool` 现状：`hosts[]` 只覆盖 h2c 池；`http1_gates[]`（#75）覆盖 HTTP/1.1 的**在途/排队**，但**不含**物理连接数与 idle。启用本池后，新增顶层 `h1_pool[]`（每 host：`connections`（含 idle）/`in_flight`/`dials`/`reclaimed`）；此时 `http1_gates[]` 保持为空（gate 对本池接管的 host 不再 `acquire`）—— 两个机制各报各的、不共用同一字段，避免语义漂移。
+`GET /api/pool` 现状：`hosts[]` 覆盖 h2c 池；`http1_gates[]`（#75）覆盖 HTTP/1.1 的**在途/排队**，但**不含**物理连接数与 idle。启用本池后，新增顶层 `h1_pool[]`（每 host：`connections`（含 idle）/`in_flight`/`dials`/`reclaimed`）；此时 `http1_gates[]` 保持为空（gate 对本池接管的 host 不再 `acquire`）—— 两个机制各报各的、不共用同一字段，避免语义漂移。**探针已读 `h1_pool[]`**：h1 池 host 与 `hosts[]` 同构并入聚合表，全套读数覆盖明文 http 通道。
 
 ### 4.5 接入与开关
 
@@ -226,7 +226,7 @@ pub struct PoolStats {
 - [x] `min_idle_conns`（reaper 保底）+ `DIAL_RETRIES`（瞬时拨号失败有界重试，退避 10ms）
 - [x] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
 - [x] `/api/pool` 新增 `h1_pool[]`（不接 gate 字段，避免两个机制混用；§4.4）
-- [ ] 探针（`advanced/pool_sizing_probe.sh`）读取 `h1_pool[]`：启用 h1 池后 API 模式观测留白（`hosts[]`/`http1_gates[]` 皆空 ⇒ 回落 `ss`）
+- [x] 探针（`advanced/pool_sizing_probe.sh`）读取 `h1_pool[]`：h1 池 host 与 `hosts[]` 同构并入聚合表（ceiling = `MAX_CONNS_PER_HOST`，peer = `-`）⇒ 准入上界/已用/排队/低载判据全套覆盖明文 http 通道
 - [x] 压测验证（§7；结果见 §10 与 [`h1-pool-loadtest-2026-10-01.md`](h1-pool-loadtest-2026-10-01.md)）
 
-**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + 半读连接退役 + reaper / `min_idle_conns` / `DIAL_RETRIES` + 接入回归测试 + 压测验证（§10）均已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：`min_idle_conns` 主动预热（未做）、探针读取 `h1_pool[]`、跳机稳定性。
+**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + 半读连接退役 + reaper / `min_idle_conns` / `DIAL_RETRIES` + 接入回归测试 + 压测验证（§10）+ **探针读取 `h1_pool[]`** 均已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：`min_idle_conns` 主动预热（未做）、探针读取 `h1_pool[]`、跳机稳定性。
