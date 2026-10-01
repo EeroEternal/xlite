@@ -14,7 +14,7 @@ use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
 use reqwest::Client;
 use tokio::net::TcpStream;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
@@ -183,8 +183,17 @@ impl AdmissionGate {
     /// response body.
     async fn acquire(&self, authority: &str) -> OwnedSemaphorePermit {
         let slot = self.slot(authority);
-        // Counted as "waiting" only while parked; once the permit is granted the
-        // request is in flight (and visible as `in_flight` in the snapshot).
+        // Fast path: a free slot and nobody ahead of us (tokio's semaphore is
+        // fair, so a waiter would have been served first) ⇒ this request never
+        // parks, so it must NOT touch the waiting counters. Counting it would
+        // make `waiting_max` report "queued" for a request that never queued —
+        // the exact false number the #68/#70 visibility work exists to prevent.
+        match Arc::clone(&slot.sem).try_acquire_owned() {
+            Ok(permit) => return permit,
+            Err(TryAcquireError::NoPermits) => {}
+            Err(TryAcquireError::Closed) => unreachable!("gate semaphore is never closed"),
+        }
+        // Slow path: we are actually parking; only now are the counters meaningful.
         let depth = slot.waiting.fetch_add(1, Ordering::Relaxed) + 1;
         slot.waiting_max.fetch_max(depth, Ordering::Relaxed);
         let permit = Arc::clone(&slot.sem)
@@ -677,6 +686,10 @@ mod tests {
         assert_eq!(snap[0].permits, 1);
         assert_eq!(snap[0].in_flight, 1, "the held permit is in flight");
         assert_eq!(snap[0].waiting, 0);
+        assert_eq!(
+            snap[0].waiting_max, 0,
+            "a request that never queued must not raise the high-water mark"
+        );
 
         // Park a second acquirer on the same authority; it must show up as
         // `waiting` (and the high-water mark has to record it).
