@@ -30,6 +30,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http::{Request, Response};
@@ -70,9 +71,17 @@ pub struct Config {
     /// Hard cap on concurrently open connections per host — on HTTP/1.1 this is
     /// also the in-flight request cap. `0` is treated as `1`.
     pub max_conns_per_host: usize,
+    /// Close connections idle for longer than this. Keeping it below the
+    /// upstream's own keep-alive timeout is what avoids handing a peer-closed
+    /// socket to the next request (the `dials` churn seen in the long soak run).
+    pub idle_timeout: Duration,
     /// Opens a fresh transport to `host:port`.
     pub dial: Dial,
 }
+
+/// Default [`Config::idle_timeout`] — matches the h2 pool / reqwest's
+/// `pool_idle_timeout`.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Point-in-time per-host pool state (for the control plane).
 #[derive(Clone, Copy, Debug, Default)]
@@ -102,7 +111,7 @@ impl PoolStats {
 pub struct Pool {
     max_conns_per_host: usize,
     dial: Dial,
-    hosts: Mutex<HashMap<String, Arc<HostState>>>,
+    hosts: Arc<Mutex<HashMap<String, Arc<HostState>>>>,
 }
 
 struct HostState {
@@ -129,6 +138,9 @@ struct ConnEntry {
     in_flight: AtomicBool,
     /// Cleared after a failed request so the entry is dropped from the table.
     reusable: AtomicBool,
+    /// When the connection last became idle (`None` while in flight). The reaper
+    /// drops entries idle for longer than `idle_timeout`.
+    idle_since: Mutex<Option<Instant>>,
 }
 
 /// Tracks whether the response body of a lease's current request was read to
@@ -246,6 +258,11 @@ impl Drop for Lease {
         if !self.released {
             self.released = true;
             self.entry.in_flight.store(false, Ordering::Release);
+            *self
+                .entry
+                .idle_since
+                .lock()
+                .expect("h1 pool idle_since poisoned") = Some(Instant::now());
             // A connection whose response body was not read to completion cannot
             // be reused by HTTP/1.1 (hyper will have/ will retire it), so retire
             // it here as well — otherwise the next acquire could hand out a dead
@@ -258,12 +275,52 @@ impl Drop for Lease {
     }
 }
 
+/// Background task: periodically retire connections idle for longer than
+/// `idle_timeout` (mirrors the h2 pool). This keeps the connection count tracking
+/// load and stops the pool from handing out sockets the upstream already closed.
+async fn reaper_loop(hosts: Arc<Mutex<HashMap<String, Arc<HostState>>>>, idle_timeout: Duration) {
+    let interval = (idle_timeout / 2).max(Duration::from_millis(50));
+    loop {
+        tokio::time::sleep(interval).await;
+        let states: Vec<Arc<HostState>> = {
+            let hosts = hosts.lock().expect("h1 pool hosts mutex poisoned");
+            hosts.values().cloned().collect()
+        };
+        let now = Instant::now();
+        for state in states {
+            let removed = {
+                let mut inner = state.inner.lock().expect("h1 pool inner mutex poisoned");
+                let before = inner.conns.len();
+                inner.conns.retain(|c| {
+                    if c.in_flight.load(Ordering::Acquire) {
+                        return true;
+                    }
+                    match *c.idle_since.lock().expect("h1 pool idle_since poisoned") {
+                        Some(since) => now.duration_since(since) < idle_timeout,
+                        None => true,
+                    }
+                });
+                before - inner.conns.len()
+            };
+            if removed > 0 {
+                state.reclaimed.fetch_add(removed, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 impl Pool {
     pub fn new(config: Config) -> Self {
+        let hosts = Arc::new(Mutex::new(HashMap::new()));
+        // Start the idle-connection reaper on the current runtime, if any. A
+        // caller outside a runtime just gets a pool without the background task.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(reaper_loop(Arc::clone(&hosts), config.idle_timeout));
+        }
         Self {
             max_conns_per_host: config.max_conns_per_host.max(1),
             dial: config.dial,
-            hosts: Mutex::new(HashMap::new()),
+            hosts,
         }
     }
 
@@ -299,9 +356,15 @@ impl Pool {
                 .conns
                 .iter()
                 .find(|c| {
-                    c.in_flight
+                    if c.in_flight
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
+                    {
+                        *c.idle_since.lock().expect("h1 pool idle_since poisoned") = None;
+                        true
+                    } else {
+                        false
+                    }
                 })
                 .map(Arc::clone)
             {
@@ -346,6 +409,7 @@ impl Pool {
             sender: AsyncMutex::new(sender),
             in_flight: AtomicBool::new(false),
             reusable: AtomicBool::new(true),
+            idle_since: Mutex::new(None),
         }))
     }
 

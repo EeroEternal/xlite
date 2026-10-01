@@ -123,6 +123,7 @@ fn make_req(host: &str) -> Request<Full<Bytes>> {
 fn pool(max_conns: usize) -> Pool {
     Pool::new(Config {
         max_conns_per_host: max_conns,
+        idle_timeout: Duration::from_secs(90),
         dial: tcp_dial(),
     })
 }
@@ -233,4 +234,37 @@ async fn an_unread_body_retires_the_connection() {
         "an unread body must retire its connection instead of being reused"
     );
     drop(lease2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reaper_reclaims_idle_connections() {
+    let (host, _accepted) = start_server().await;
+    let pool = Pool::new(Config {
+        max_conns_per_host: 4,
+        idle_timeout: Duration::from_millis(100),
+        dial: tcp_dial(),
+    });
+
+    let lease = pool.acquire(&host).await.unwrap();
+    let resp = lease.send_request(make_req(&host)).await.unwrap();
+    let _ = resp.into_body().collect().await.unwrap();
+    drop(lease);
+    assert_eq!(pool.stats(&host).connections, 1);
+
+    // The reaper scans every idle_timeout / 2 = 50ms.
+    for _ in 0..40 {
+        if pool.stats(&host).connections == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        pool.stats(&host).connections,
+        0,
+        "an idle connection must be reaped"
+    );
+    assert!(
+        pool.stats(&host).reclaimed >= 1,
+        "reclaimed must be counted"
+    );
 }
