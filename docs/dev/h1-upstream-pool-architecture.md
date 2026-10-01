@@ -69,6 +69,7 @@ PR #75（**已合并** `989c5ad`，规则同步见 #77）用应用层信号量�
 pub struct Config {
     pub max_conns_per_host: usize,   // 连接级硬上界
     pub idle_timeout: Duration,      // 空闲连接回收阈值（reaper）
+    pub min_idle_conns: usize,       // reaper 保底空闲连接（默认 1）
     pub dial: Dial,                  // 与 h2 池同一形状：TcpStream → BoxIo
 }
 
@@ -85,7 +86,7 @@ impl Lease {
 }
 ```
 
-> 上述签名已与实现同步；`idle_timeout` 由后台 reaper 使用（默认 `DEFAULT_IDLE_TIMEOUT` = 90s，同 h2 池 / reqwest）；`min_idle_conns` 预热**未做**（§6 未决项）。`ResponseBody` 包装 hyper 的 `Incoming`，poll 到 `None` 才把连接标为可复用（未读完就释放则退役该连接）。
+> 上述签名已与实现同步。`idle_timeout` 由后台 reaper 使用（默认 90s，同 h2 池 / reqwest）；`min_idle_conns`（默认 1）让 reaper 不回收低于该数量的空闲连接；拨号带 `DIAL_RETRIES`（2 次，仅瞬时错误，10ms 退避）。`ResponseBody` 包装 hyper 的 `Incoming`，poll 到 `None` 才把连接标为可复用（未读完就释放则退役该连接）。
 
 ### 4.2 连接生命周期
 
@@ -193,7 +194,7 @@ pub struct PoolStats {
 
 **reaper 验证（修复 churn）**：长时 2000 VU × 300s 后 `dials` 稳定在 **32~33/口**（对照无 reaper 时为 46–71）、`connections` 24×32、0 fail；压测结束后过一轮 `idle_timeout`（90s，扫描 45s），**`connections` 全部回落到 0、`reclaimed` = 32/口（共 768）**。即 reaper 在高载惰性、低载回收。
 
-**未做**：`min_idle_conns` 预热；跨机（非 loopback）稳定性未测。
+**未做**：跨机（非 loopback）稳定性未测；`min_idle_conns` 仅作 reaper 保底，未做主动预热（突建）。
 
 ---
 
@@ -206,7 +207,7 @@ pub struct PoolStats {
 - [x] 集成测试（真实 TCP 回环，**5 项**）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立、**半读连接退役**（响应体未读完就释放 ⇒ 连接不复用、下次重新拨号）
 - [x] xlite 级接入回归测试（`tests/upstream_h1_pool.rs`）：`h1_pool=1` 走池且 `h1_pool_stats` 非空 / `http1_gates` 空；默认走 gate 且反之
 - [x] 空闲连接回收（reaper）：`idle_timeout`（默认 90s，同 h2 池 / reqwest）+ 后台周期扫描（间隔 `idle_timeout/2`）；低载回收后 `connections` 回落、`reclaimed` 计数
-- [ ] `min_idle_conns` 预热（保底空闲连接）—— 未做
+- [x] `min_idle_conns`（reaper 保底）+ `DIAL_RETRIES`（瞬时拨号失败有界重试，退避 10ms）
 - [x] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
 - [x] `/api/pool` 新增 `h1_pool[]`（不接 gate 字段，避免两个机制混用；§4.4）
 - [ ] 探针（`advanced/pool_sizing_probe.sh`）读取 `h1_pool[]`：启用 h1 池后 API 模式观测留白（`hosts[]`/`http1_gates[]` 皆空 ⇒ 回落 `ss`）

@@ -295,6 +295,7 @@ impl Upstream {
             Arc::new(H1Pool::new(H1PoolConfig {
                 max_conns_per_host: cfg.max_conns_per_host.max(1),
                 idle_timeout: xlite_h1_pool::DEFAULT_IDLE_TIMEOUT,
+                min_idle_conns: xlite_h1_pool::DEFAULT_MIN_IDLE_CONNS,
                 dial,
             }))
         });

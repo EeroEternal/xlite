@@ -124,6 +124,7 @@ fn pool(max_conns: usize) -> Pool {
     Pool::new(Config {
         max_conns_per_host: max_conns,
         idle_timeout: Duration::from_secs(90),
+        min_idle_conns: 0,
         dial: tcp_dial(),
     })
 }
@@ -242,6 +243,7 @@ async fn reaper_reclaims_idle_connections() {
     let pool = Pool::new(Config {
         max_conns_per_host: 4,
         idle_timeout: Duration::from_millis(100),
+        min_idle_conns: 0,
         dial: tcp_dial(),
     });
 
@@ -267,4 +269,29 @@ async fn reaper_reclaims_idle_connections() {
         pool.stats(&host).reclaimed >= 1,
         "reclaimed must be counted"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reaper_keeps_min_idle_connections() {
+    let (host, _accepted) = start_server().await;
+    let pool = Pool::new(Config {
+        max_conns_per_host: 4,
+        idle_timeout: Duration::from_millis(80),
+        min_idle_conns: 1,
+        dial: tcp_dial(),
+    });
+
+    let lease = pool.acquire(&host).await.unwrap();
+    let resp = lease.send_request(make_req(&host)).await.unwrap();
+    let _ = resp.into_body().collect().await.unwrap();
+    drop(lease);
+
+    // Well past idle_timeout: the one connection must survive as min_idle.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        pool.stats(&host).connections,
+        1,
+        "a connection within min_idle_conns must not be reaped"
+    );
+    assert_eq!(pool.stats(&host).reclaimed, 0);
 }

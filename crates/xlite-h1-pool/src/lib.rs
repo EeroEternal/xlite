@@ -75,6 +75,9 @@ pub struct Config {
     /// upstream's own keep-alive timeout is what avoids handing a peer-closed
     /// socket to the next request (the `dials` churn seen in the long soak run).
     pub idle_timeout: Duration,
+    /// Keep at least this many idle connections per host — the reaper will not
+    /// retire below it (default 1, matching the h2 pool).
+    pub min_idle_conns: usize,
     /// Opens a fresh transport to `host:port`.
     pub dial: Dial,
 }
@@ -82,6 +85,35 @@ pub struct Config {
 /// Default [`Config::idle_timeout`] — matches the h2 pool / reqwest's
 /// `pool_idle_timeout`.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Default [`Config::min_idle_conns`].
+pub const DEFAULT_MIN_IDLE_CONNS: usize = 1;
+
+/// Bound on bounded dial retries: a transient connect failure is worth a couple
+/// of retries (it would otherwise surface as a 502), resource exhaustion is not.
+pub const DIAL_RETRIES: u8 = 2;
+
+/// Backoff before each dial retry; exists to avoid a hot spin when the peer
+/// refuses immediately.
+pub const DIAL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Whether a failed dial is worth retrying. The retryable set is named
+/// explicitly so resource exhaustion (EMFILE/ENFILE → `Uncategorized`) falls
+/// out — those are persistent and retrying them only amplifies dial volume.
+fn is_retryable_dial_error(err: &PoolError) -> bool {
+    match err {
+        PoolError::Dial(e) => matches!(
+            e.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::Interrupted
+        ),
+        PoolError::Handshake(_) => true,
+        PoolError::Request(_) => false,
+    }
+}
 
 /// Point-in-time per-host pool state (for the control plane).
 #[derive(Clone, Copy, Debug, Default)]
@@ -278,7 +310,11 @@ impl Drop for Lease {
 /// Background task: periodically retire connections idle for longer than
 /// `idle_timeout` (mirrors the h2 pool). This keeps the connection count tracking
 /// load and stops the pool from handing out sockets the upstream already closed.
-async fn reaper_loop(hosts: Arc<Mutex<HashMap<String, Arc<HostState>>>>, idle_timeout: Duration) {
+async fn reaper_loop(
+    hosts: Arc<Mutex<HashMap<String, Arc<HostState>>>>,
+    idle_timeout: Duration,
+    min_idle: usize,
+) {
     let interval = (idle_timeout / 2).max(Duration::from_millis(50));
     loop {
         tokio::time::sleep(interval).await;
@@ -291,13 +327,25 @@ async fn reaper_loop(hosts: Arc<Mutex<HashMap<String, Arc<HostState>>>>, idle_ti
             let removed = {
                 let mut inner = state.inner.lock().expect("h1 pool inner mutex poisoned");
                 let before = inner.conns.len();
+                // Retire idle-and-expired connections, but never below `min_idle`.
+                let mut idle = inner
+                    .conns
+                    .iter()
+                    .filter(|c| !c.in_flight.load(Ordering::Acquire))
+                    .count();
                 inner.conns.retain(|c| {
                     if c.in_flight.load(Ordering::Acquire) {
                         return true;
                     }
-                    match *c.idle_since.lock().expect("h1 pool idle_since poisoned") {
-                        Some(since) => now.duration_since(since) < idle_timeout,
-                        None => true,
+                    let expired = match *c.idle_since.lock().expect("h1 pool idle_since poisoned") {
+                        Some(since) => now.duration_since(since) >= idle_timeout,
+                        None => false,
+                    };
+                    if expired && idle > min_idle {
+                        idle -= 1;
+                        false
+                    } else {
+                        true
                     }
                 });
                 before - inner.conns.len()
@@ -315,7 +363,11 @@ impl Pool {
         // Start the idle-connection reaper on the current runtime, if any. A
         // caller outside a runtime just gets a pool without the background task.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(reaper_loop(Arc::clone(&hosts), config.idle_timeout));
+            handle.spawn(reaper_loop(
+                Arc::clone(&hosts),
+                config.idle_timeout,
+                config.min_idle_conns,
+            ));
         }
         Self {
             max_conns_per_host: config.max_conns_per_host.max(1),
@@ -394,6 +446,22 @@ impl Pool {
     }
 
     async fn dial(&self, host: &str) -> Result<Arc<ConnEntry>, PoolError> {
+        let mut attempt = 0u8;
+        loop {
+            match self.dial_once(host).await {
+                Ok(entry) => return Ok(entry),
+                Err(err) => {
+                    if attempt >= DIAL_RETRIES || !is_retryable_dial_error(&err) {
+                        return Err(err);
+                    }
+                    attempt += 1;
+                    tokio::time::sleep(DIAL_RETRY_BACKOFF).await;
+                }
+            }
+        }
+    }
+
+    async fn dial_once(&self, host: &str) -> Result<Arc<ConnEntry>, PoolError> {
         let io = (self.dial)(host.to_string()).await?;
         let (sender, conn) = http1::handshake(TokioIo::new(io))
             .await
