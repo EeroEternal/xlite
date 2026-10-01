@@ -168,6 +168,8 @@ pub struct PoolStats {
 
 **决定**：压测验证本池后，**移除 reqwest 的明文 HTTP/1.1 路径与 `AdmissionGate`（#75）**，让明文 `http://` 只走本池。理由：两条路径并存（近似 gate vs 连接级池）维护成本高、观测语义易混（`http1_gates[]` vs `h1_pool[]`），集中在一种。
 
+**定位与默认值（压测结论，见 §10）**：本池只应在**上游不支持 h2/h2c** 时使用 —— 能用 h2c 就用 h2c 池（5000 VU：h2c **741** qps vs h1(`MAX=128`) **411**，且 h2c 始终不排队）。收敛时，h1 池的 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 默认值应**按 fd 预算**给得比 h2c 大得多：h2c 的 32 是「32 连接 × 每连接多流」，h1 的 32 就是「32 并发」（实测 `32→128` 直接 **3.7×**）。建议 `≈ (nofile − 入站预留) / host 数`，并在启动期按 `nofile` 校核。
+
 届时（**独立 PR**，不是本 PR）：
 - `src/upstream.rs`：删 `AdmissionGate` / `http1_gates` 采集 / `BodyKind::Reqwest` 的 HTTP/1.1 用法；`post_reqwest` 只保留 `https`；本池对明文 `http://` 转默认生效（去掉 env 开关或默认 `true`）。
 - `src/admin.rs`：`/api/pool` 去掉 `http1_gates[]`，`h1_pool[]` 成为 HTTP/1.1 的唯一来源。
@@ -193,6 +195,18 @@ pub struct PoolStats {
 **结论**：修复后 h1 池与 reqwest 路径**性能等价**（200/1000/2000 三档）；且 h1 池的连接上界**精确可见**（`/api/pool` 每口 `connections=32`、`dials=32`，无多余拨号），这是 gate 的 `http1_gates[]` 给不出的连接级信息。§7 的「性能对照不得 regression」**通过**。
 
 **reaper 验证（修复 churn）**：长时 2000 VU × 300s 后 `dials` 稳定在 **32~33/口**（对照无 reaper 时为 46–71）、`connections` 24×32、0 fail；压测结束后过一轮 `idle_timeout`（90s，扫描 45s），**`connections` 全部回落到 0、`reclaimed` = 32/口（共 768）**。即 reaper 在高载惰性、低载回收。
+
+**连接数是 h1 的最大杠杆（追加实验）**：同一台架、同一 24 口 mock、同一 2000 VU：
+
+| 配置 | 2000 VU qps | 5000 VU qps | ttfb 中位 | 连接/口 |
+| --- | --- | --- | --- | --- |
+| h1pool `MAX_CONNS=32`（当前默认） | 111 | — | 10.7s | 32 |
+| h1pool `MAX_CONNS=128` | **335** | **411** | 528ms / 6.35s | ~100+ |
+| h2c 池（`H2C=1`）`MAX_CONNS=32` | **333** | **741** | 526ms / 543ms | 32（多流） |
+
+⇒ ① h1 的并发 = `MAX_CONNS × host 数`（一连接一请求），**默认 32 对 h1 过低**，提到 128 即 **3.7×**、ttfb 从 10.7s → 528ms；② h2c 用 1/4 连接数做到同等/更高吞吐（5000 VU `741` vs `411`）—— **能用 h2c 就用 h2c**；③ h1 与 reqwest 代码级持平，瓶颈在配置与协议，不在调度器。
+
+完整台架与全部档位数据见 [`h1-pool-loadtest-2026-10-01.md`](h1-pool-loadtest-2026-10-01.md)。
 
 **未做**：跨机（非 loopback）稳定性未测；`min_idle_conns` 仅作 reaper 保底，未做主动预热（突建）。
 
