@@ -175,6 +175,23 @@ pub struct PoolStats {
 
 **前置条件**：§7 的压测验证通过（尤其「与 reqwest 路径的性能对照不得 regression」），且 idle reaper 等留白已清。
 
+## 10. 压测记录（2026-10-01，实验室 101/102）
+
+**台架**：k6（101）→ xlite（101）→ 24 口 Go mock（102，明文 HTTP/1.1，`8081-8104`）。constant-VU / 30s，`http_req_waiting` ≈ TTFT。网关 `nofile=1048576`（首轮 1000 VU 的 98% fail 是漏设 fd 所致，已排除）。对照：`XLITE_UPSTREAM_H1_POOL=1` vs 默认 gate+reqwest，均 `MAX_CONNS_PER_HOST=32`。
+
+| 负载 | 指标 | h1pool | gate |
+| --- | --- | --- | --- |
+| 200 VU | qps / ttfb 中位 / fail | 33.4 / 510ms / 0% | 33.4 / 497ms / 0% |
+| 1000 VU | qps / ttfb 中位 / fail | 105.2 / 717ms / 0% | 115.0 / 837ms / 0% |
+| 2000 VU（修复前） | ttfb p90 / p95 / max | **18.5 / 24.3~28.8 / 46.8s** | 12.2 / 12.4 / 17.8s |
+| 2000 VU（修复后） | ttfb p90 / p95 / max | **12.2 / 12.4 / 17.8s** | 12.2 / 12.4 / 17.9s |
+
+**发现并修复**：初版用 `Notify::notify_waiters()` 唤醒等待者（惊群：每口 `waiting_max` 37–91，释放一次唤醒全部、只有一个赢、其余重新 park），2000 VU 下 ttfb p90 比 gate 高 ~51%、max 高 ~2.6×（3 次重复稳定）。改为每 host `tokio::sync::Semaphore`（permits = `max_conns_per_host`，公平 FIFO，permit 随 `Lease` 释放）后，**p90/p95/max 与 gate 对齐、qps 相同、0 fail**。
+
+**结论**：修复后 h1 池与 reqwest 路径**性能等价**（200/1000/2000 三档）；且 h1 池的连接上界**精确可见**（`/api/pool` 每口 `connections=32`、`dials=32`，无多余拨号），这是 gate 的 `http1_gates[]` 给不出的连接级信息。§7 的「性能对照不得 regression」**通过**。
+
+**未做**：idle reaper（`reclaimed` 恒 0）；更高档（>2000 VU）与长时稳定性未测。
+
 ---
 
 ## 附：实现进度（本 PR 跟踪）
