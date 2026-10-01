@@ -68,7 +68,6 @@ PR #75（**已合并** `989c5ad`，规则同步见 #77）用应用层信号量�
 ```rust
 pub struct Config {
     pub max_conns_per_host: usize,   // 连接级硬上界
-    pub idle_timeout: Duration,      // 空闲连接回收阈值
     pub dial: Dial,                  // 与 h2 池同一形状：TcpStream → BoxIo
 }
 
@@ -80,9 +79,12 @@ impl Pool {
 
 pub struct Lease { /* 一条连接的一次独占使用权 */ }
 impl Lease {
-    pub async fn send_request(&self, req: Request<()>, body: Bytes) -> Result<Response<Incoming>, PoolError>;
+    pub async fn send_request(&self, req: Request<Full<Bytes>>)
+        -> Result<Response<ResponseBody>, PoolError>;
 }
 ```
+
+> 上述签名已与实现同步；`idle_timeout` / `min_idle_conns`（§4.2 的 reaper）**未实现**，见 §6 未决项。`ResponseBody` 包装 hyper 的 `Incoming`，poll 到 `None` 才把连接标为可复用（未读完就释放则退役该连接）。
 
 ### 4.2 连接生命周期
 
@@ -109,10 +111,9 @@ HTTP/1.1 **无多路复用**，一条连接同一时刻只能服务一个请求 
 ```rust
 pub struct PoolStats {
     pub connections: usize,       // 当前打开的物理连接数（含 idle）
-    pub in_flight: usize,         // 0/1 per conn，求和
-    pub waiting: usize,           // 排队等待的 acquire 数
+    pub in_flight: usize,         // 忙连接数（0/1 per conn，求和）
     pub dials: usize,
-    pub reclaimed: usize,         // reaper 关闭的空闲连接数
+    pub reclaimed: usize,         // reaper 关闭的空闲连接数（reaper 未做，恒 0）
 }
 ```
 

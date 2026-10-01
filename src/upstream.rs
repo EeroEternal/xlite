@@ -282,7 +282,9 @@ impl Upstream {
         });
         // The h1 pool is a different crate with its own `Dial`/`BoxIo` types, so
         // it gets its own dial closure (same shape, same TCP+nodelay setup).
-        let h1 = cfg.h1_pool.then(|| {
+        // `H2C=1` owns cleartext `http://` outright, so skip building a pool that
+        // `post_stream` would never reach.
+        let h1 = (cfg.h1_pool && !cfg.h2c).then(|| {
             let dial: xlite_h1_pool::Dial = Arc::new(|host: String| {
                 Box::pin(async move {
                     let stream = TcpStream::connect(host.as_str()).await?;

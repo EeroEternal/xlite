@@ -134,13 +134,17 @@ struct ConnEntry {
 /// completion. HTTP/1.1 can only reuse a connection whose previous response body
 /// was fully consumed; a lease dropped before [`BodyTracker::mark_complete`] marks
 /// its connection non-reusable, so `acquire` drops it instead of handing a dead
-/// (peer-closed) connection to the next request. Clone it into the body consumer.
-#[derive(Clone, Default)]
+/// (peer-closed) connection to the next request.
+///
+/// Initial state is `true` ("no request outstanding"): a lease that was acquired
+/// but never used must stay reusable. `send_request` flips it to `false`, and only
+/// reading the body to `None` flips it back.
+#[derive(Clone)]
 pub struct BodyTracker(Arc<AtomicBool>);
 
 impl BodyTracker {
     fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
+        Self(Arc::new(AtomicBool::new(true)))
     }
 
     fn reset(&self) {
