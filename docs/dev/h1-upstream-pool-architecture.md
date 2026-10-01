@@ -164,10 +164,12 @@ pub struct PoolStats {
 
 > 本稿已在 #75（`989c5ad`）、#77（`e42166a`）、#78（`fba7b4e`）合入后 **rebase 到最新 main**；现状引用一律用**符号**（函数 / 字段名）而非行号，避免每次 main 前进都漂移；`http1_gates[]` 是 #75 已交付的观测，§4.4/§4.5 说明本池转正后如何接续它。
 
-- [ ] `crates/xlite-h1-pool`：Config / Pool / Lease / PoolError / stats
-- [ ] 连接表、acquire、等待、reaper
-- [ ] 单元测试（复用上界、等待唤醒、错误路径）
-- [ ] 集成测试（真实 TCP，回环）
-- [ ] `src/upstream.rs` 接入（env gate，默认关）
-- [ ] `/api/pool` 覆盖 h1 池
+- [x] `crates/xlite-h1-pool`：Config / Pool / Lease / PoolError / PoolStats
+- [x] 连接表 + `acquire`（复用 / 拨号 / 排队 + `Notify` 唤醒）+ 连接级 `in_flight`
+- [x] 集成测试（真实 TCP 回环，4 项）：单请求、keep-alive 复用、`cap=1` 连接上界与排队唤醒、跨 host 独立
+- [ ] 空闲连接回收（reaper）与 `min_idle_conns` 预热 —— `PoolStats::reclaimed` 目前恒 `0`
+- [ ] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
+- [ ] `/api/pool` 覆盖 h1 池（§4.4）
 - [ ] 压测验证（§7）
+
+**当前状态**：crate 已实现且自测通过，但**尚未接入网关数据面**（`src/upstream.rs` 未动）—— 即默认构建与运行时行为与 main 完全一致。

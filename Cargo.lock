@@ -2812,6 +2812,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlite-h1-pool"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "xlite-h2-pool"
 version = "0.1.0"
 dependencies = [

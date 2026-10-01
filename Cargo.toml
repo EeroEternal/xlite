@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/xlite-h2-pool"]
+members = [".", "crates/xlite-h1-pool", "crates/xlite-h2-pool"]
 resolver = "2"
 
 [package]
