@@ -168,6 +168,7 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
             "channels": counts.channels,
             "h2c": state.config.h2c,
             "h1_pool": state.config.h1_pool,
+            "h1_pool_active": state.config.h1_pool_active(),
             "listen": state.config.listen,
             "storage": state.store.catalog().kind().as_str(),
             "version": env!("CARGO_PKG_VERSION"),

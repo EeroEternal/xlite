@@ -117,6 +117,8 @@ pub struct PoolStats {
 }
 ```
 
+> `connections` 含「已被标记不可复用、但尚未被下一次 `acquire` 的 `retain` 清掉」的连接，故瞬时值可能略高于有效连接数 —— 它们是真实仍打开的连接，不是伪造数字。
+
 `GET /api/pool` 现状：`hosts[]` 只覆盖 h2c 池；`http1_gates[]`（#75）覆盖 HTTP/1.1 的**在途/排队**，但**不含**物理连接数与 idle。启用本池后，新增顶层 `h1_pool[]`（每 host：`connections`（含 idle）/`in_flight`/`dials`/`reclaimed`）；此时 `http1_gates[]` 保持为空（gate 对本池接管的 host 不再 `acquire`）—— 两个机制各报各的、不共用同一字段，避免语义漂移。
 
 ### 4.5 接入与开关
@@ -145,6 +147,7 @@ pub struct PoolStats {
 3. **维护两套池**：新增一个 crate 的长期维护成本；转正前应论证它带来的粒度收益值这个成本。
 4. **body 流式透传**：必须保持「字节透传、不做协议转换」（`wire-boundary.md`）；背压靠 TCP，不得在网关缓冲整个响应。
 5. **未决项**：`min_idle_conns` 预热是否需要；是否要把两池统一到 `Transport` trait；idle 回收与 DNS 变更/连接漂移的关系。
+6. **拨号失败无重试**：h2 池有 `DIAL_RETRIES` + 退避，h1 池 `dial` 失败直接返回 `PoolError`，由 `src/proxy.rs` 的跨 channel failover 兜底（单 channel 时即 502）。语义不一致但可接受；若需要重试，作为独立改动（不在本稿 checklist）。
 
 ## 7. 验证计划（压测与整体成熟后执行）
 
@@ -172,6 +175,7 @@ pub struct PoolStats {
 - [ ] 空闲连接回收（reaper）与 `min_idle_conns` 预热 —— `PoolStats::reclaimed` 目前恒 `0`
 - [x] `src/upstream.rs` 接入（`XLITE_UPSTREAM_H1_POOL=1`，默认关；§4.5）
 - [x] `/api/pool` 新增 `h1_pool[]`（不接 gate 字段，避免两个机制混用；§4.4）
+- [ ] 探针（`advanced/pool_sizing_probe.sh`）读取 `h1_pool[]`：启用 h1 池后 API 模式观测留白（`hosts[]`/`http1_gates[]` 皆空 ⇒ 回落 `ss`）
 - [ ] 压测验证（§7）
 
 **当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + **半读连接退役** + **接入回归测试**已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：idle reaper（`reclaimed` 恒 `0`）、压测验证。

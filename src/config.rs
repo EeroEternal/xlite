@@ -83,6 +83,13 @@ impl Config {
             upstream_ttft_header,
         })
     }
+
+    /// Whether the opt-in h1 pool is actually in effect. `H2C=1` owns cleartext
+    /// `http://` outright, so a set-but-shadowed `XLITE_UPSTREAM_H1_POOL` must not
+    /// be reported as active — in that case the pool is not even built.
+    pub fn h1_pool_active(&self) -> bool {
+        self.h1_pool && !self.h2c
+    }
 }
 
 pub fn env_flag(name: &str) -> bool {
