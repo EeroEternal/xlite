@@ -229,4 +229,4 @@ pub struct PoolStats {
 - [x] 探针（`advanced/pool_sizing_probe.sh`）读取 `h1_pool[]`：h1 池 host 与 `hosts[]` 同构并入聚合表（ceiling = `MAX_CONNS_PER_HOST`，peer = `-`）⇒ 准入上界/已用/排队/低载判据全套覆盖明文 http 通道
 - [x] 压测验证（§7；结果见 §10 与 [`h1-pool-loadtest-2026-10-01.md`](h1-pool-loadtest-2026-10-01.md)）
 
-**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + 半读连接退役 + reaper / `min_idle_conns` / `DIAL_RETRIES` + 接入回归测试 + 压测验证（§10）+ **探针读取 `h1_pool[]`** 均已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：`min_idle_conns` 主动预热（未做）、探针读取 `h1_pool[]`、跳机稳定性。
+**当前状态**：crate + `src/upstream.rs` 接入 + `/api/pool` 的 `h1_pool[]` + 半读连接退役 + reaper / `min_idle_conns` / `DIAL_RETRIES` + 接入回归测试 + 压测验证（§10）+ **探针读取 `h1_pool[]`** 均已实现；**默认关**（不设 `XLITE_UPSTREAM_H1_POOL` 时行为与 main 逐字节一致）。剩余：`min_idle_conns` 主动预热（未做）、跳机稳定性。
