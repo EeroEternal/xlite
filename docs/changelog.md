@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **简化 `deploy/v88/STARTUP.md`，对齐 0.5.3 部署设置**：保留 mock / Redis / 双网关 / HAProxy / 分组跑测的操作步骤，明确 h2c 默认每 host 32 连接、明文 HTTP/1.1 默认 128（显式值同时覆盖两池），删除已移除开关的使用歧义；保留内存、采样口径、续跑和探针的必要注意事项。仅修改文档，不改变网关或压测脚本行为。
+
 ## [0.5.3] - 2026-10-01
 
 - **明文 HTTP/1.1 路径的 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 默认值抬到 128（未设 env 时；h2c 仍 32）**。背景：`#79` 收敛后明文 `http://` 无条件走 `crates/xlite-h1-pool`，但它复用的 `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` 默认值 **32** 是按 h2c 调的（h2c 的 32 = 「32 连接 × 每连接多流」，h1 的 32 = 「32 并发」）—— 设计稿 §9 明写「h1 池默认值应按 fd 预算给得比 h2c 大得多」，但收敛时**代码里没做**，等于把实测 **3.7×**（`32→128`：qps 111→335、ttfb 中位 10.7s→528ms，见 `h1-pool-loadtest-2026-10-01.md` §5.2）的杠杆留在地上。改动：`src/config.rs` 新增 `h1_max_conns_per_host` 字段与 `H1_DEFAULT_MAX_CONNS_PER_HOST = 128`，`resolve_h1_max_conns_per_host` 只在 env **未设/空/非数/0**（即 `positive_or` 判为「未配置」）时用 128；显式设置（含**调小**，如压测的 `MAX_CONNS=4`）则 h1 与 h2c 都原样遵守。`src/upstream.rs` 的 h1 池构建改用该字段（h2c 池仍用 `max_conns_per_host`）；`src/main.rs` 启动日志加 `h1_max_conns`，`fd_budget_warning` 的 fd 预算取两者较大者（此前按 32 报，会低报 h1 的 fd 占用）。**验证**：`cargo test -p xlite --lib` **51**（新增 `h1_cap_honours_an_explicit_env_and_defaults_higher_otherwise` 锁 6 种输入，`fd_budget_warning` 断言随文案更新）、`cargo test -p xlite --test upstream_h1_pool` 1、`cargo clippy -p xlite --lib --tests -- -D warnings` 干净；`ci_local.sh --tier t1 --all` 全绿。**边界**：`https`（reqwest，ALPN 可能协商 h2）不经此默认；h2c 默认仍 32；`deploy/v88/**` 未动（V88 用 h2c 且显式设 `MAX_CONNS=32`，两池都服从该显式值，离线封条包无需重打）。见 `docs/dev/h1-upstream-pool-architecture.md` §9。
