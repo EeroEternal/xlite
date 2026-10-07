@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **mock 农场补故障注入（`fail_rate` / `fail_status` / `abort_after`）：网关的 failover 路径从此可测**。背景：仓库自带的 `scripts/stream_mock_server.mjs` 永远 200、永远把流发完 ⇒ `src/upstream.rs` 的 `should_failover`（未发字节的 429/5xx ⇒ 换通道）与「上游半途死掉」两类路径对 mock 农场**完全不可测**，只能靠真 Go mock 或手工构造。改动：mock 新增三个 `_config` 参数（`fail_rate` 0~100 按比例直接回错误、`fail_status` 400~599、`abort_after` N>0 时流式发满 N 个内容块后半关闭 socket —— 已写字节冲出去后 FIN，无 finish_reason / `[DONE]`），启动参数 `--fail-rate/--fail-status/--abort-after` 同步；`fail_rate=100` 确定性全挂，自证用例不靠随机抽样。⚠️ 两处实现细节：① 故障判定在**写响应头之前**（failover 只对「未发过字节」的 429/5xx 生效）；② 中途断流用 `res.socket.end()` 而非 `res.destroy()` —— 后者会把缓冲里没发的字节一起丢掉（实测客户端收到 0 字节，红过一个用例后改为半关闭）。`_config` 回读形态未变（`batch` 仍是最后一个键，harness 的 `grep -o '"batch":[0-9]*}'` 约定不受影响）。**验证**：`scripts/loadtest/test_stream_mock_config.sh` **27 项**全过（新增 §7 共 7 项：503 注入、恢复 200、两个越界 400、`abort_after=3` ⇒ 恰 3 个内容块、无 `[DONE]`、`abort_after=0` 恢复正常收尾）；`node --check` 干净。**边界**：`fail_rate` 是按比例随机（100 之外不保证确定性）；注入的是**响应级**错误，不做半发头/慢头；`mix`/`mode` 仍不兑现（越界即 400）。
+
 - **简化 `deploy/v88/STARTUP.md`，对齐 0.5.3 部署设置**：保留 mock / Redis / 双网关 / HAProxy / 分组跑测的操作步骤，明确 h2c 默认每 host 32 连接、明文 HTTP/1.1 默认 128（显式值同时覆盖两池），删除已移除开关的使用歧义；保留内存、采样口径、续跑和探针的必要注意事项。仅修改文档，不改变网关或压测脚本行为。
 
 ## [0.5.3] - 2026-10-01

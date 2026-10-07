@@ -24,6 +24,14 @@ const cfg = {
   intervalMs: Number(arg("interval-ms", "10")),
   ttftMs: Number(arg("ttft-ms", "0")),
   batch: Number(arg("batch", "1")),
+  // 故障注入（failover / 半途断流用例）——网关的 `should_failover`（429/5xx 且未发字节
+  // ⇒ 换通道）与「上游半途死掉」此前对本 mock 完全不可测：mock 永远 200、永远发完。
+  //   failRate   ← `fail_rate`（0~100：多少比例的 chat 请求直接回 failStatus）
+  //   failStatus ← `fail_status`（400~599；failover 只认 429/5xx）
+  //   abortAfter ← `abort_after`（>0 时流式发满 N 个内容块后直接断连接；0 = 不断）
+  failRate: Number(arg("fail-rate", "0")),
+  failStatus: Number(arg("fail-status", "500")),
+  abortAfter: Number(arg("abort-after", "0")),
 };
 
 function readBody(req) {
@@ -65,6 +73,9 @@ function configJson() {
     out_tokens: cfg.chunks,
     mix: 0,
     mode: 2,
+    fail_rate: cfg.failRate,
+    fail_status: cfg.failStatus,
+    abort_after: cfg.abortAfter,
     batch: cfg.batch, // ← 必须最后
   });
 }
@@ -86,6 +97,9 @@ function applyConfig(url) {
     batch: [1, 10000, "batch"],
     mix: [0, 0, null], // 本 mock 没有 mix 实现，只接受 harness 传的 mix=0
     mode: [2, 2, null], // 本 mock 只有 harness 用的 mode=2（流式）
+    fail_rate: [0, 100, "failRate"],
+    fail_status: [400, 599, "failStatus"],
+    abort_after: [0, 100000, "abortAfter"],
   };
   const seen = new Set();
   for (const [key, raw] of url.searchParams) {
@@ -119,6 +133,9 @@ const server = http.createServer(async (req, res) => {
         interval_ms: cfg.intervalMs,
         ttft_ms: cfg.ttftMs,
         batch: cfg.batch,
+        fail_rate: cfg.failRate,
+        fail_status: cfg.failStatus,
+        abort_after: cfg.abortAfter,
         writes,
       }),
     );
@@ -174,9 +191,17 @@ const server = http.createServer(async (req, res) => {
 
   // 每个请求取一次「当前生效配置」的快照：`_config` 只影响**之后的**请求，
   // 不会把正在飞的流改半截。
-  const { ttftMs, intervalMs, chunks, batch } = cfg;
+  const { ttftMs, intervalMs, chunks, batch, failRate, failStatus, abortAfter } = cfg;
 
   try {
+    // 故障注入在**写响应头之前**判定：failover 只对「未发过字节的 429/5xx」换通道
+    // （src/upstream.rs `should_failover`），所以错误必须是完整的错误响应而不是断流。
+    // fail_rate=100 ⇒ 确定性全挂（自证用例就靠它）。
+    if (failRate > 0 && Math.random() * 100 < failRate) {
+      res.writeHead(failStatus, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `mock injected failure ${failStatus}` } }));
+      return;
+    }
     if (ttftMs > 0) {
       await sleep(ttftMs);
     }
@@ -235,6 +260,14 @@ const server = http.createServer(async (req, res) => {
         choices: [{ index: 0, delta: { content: `c${i} ` }, finish_reason: null }],
       };
       emit(`data: ${JSON.stringify(payload)}\n\n`);
+      if (abortAfter > 0 && i + 1 >= abortAfter) {
+        if (pending) write(pending);
+        // `res.destroy()` 会把缓冲里没发的字节一起丢掉（实测客户端收到 0 字节）；
+        // 半关闭 socket：已写的字节先冲出去，然后 FIN —— 对端看到的是「带数据的
+        // 截断流」（curl error 18），正是上游半途死掉的形态，无 finish / [DONE]。
+        res.socket?.end();
+        return;
+      }
       if (intervalMs > 0) {
         await sleep(intervalMs);
       }

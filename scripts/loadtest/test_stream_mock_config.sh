@@ -146,6 +146,23 @@ stream "$PORT_B" >/dev/null
 w1=$(health_writes "$PORT_B")
 eq "batch=5 ⇒ 同样 22 帧，ceil(22/5) = 5 次 write" "5" "$((w1 - w0))"
 
+echo "== 7. 故障注入（failover / 半途断流）=="
+# fail_rate=100 ⇒ 确定性全挂，不靠随机抽样
+write_cfg "$PORT_A" "fail_rate=100&fail_status=503&batch=1" >/dev/null
+eq "fail_rate=100 ⇒ chat 请求回 503" "503" "$(curl -s -m 3 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"model":"mock","stream":true}' "http://127.0.0.1:$PORT_A/v1/chat/completions")"
+write_cfg "$PORT_A" "fail_rate=0&batch=1" >/dev/null
+eq "fail_rate=0 恢复 ⇒ 200" "200" "$(curl -s -m 3 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"model":"mock","stream":true}' "http://127.0.0.1:$PORT_A/v1/chat/completions")"
+eq "越界 fail_rate=101" "400" "$(code_of "$PORT_A" 'fail_rate=101')"
+eq "越界 fail_status=399" "400" "$(code_of "$PORT_A" 'fail_status=399')"
+# abort_after=3 ⇒ 3 个内容块后断连接，无 finish / [DONE]
+write_cfg "$PORT_A" "out_tokens=20&token_interval=0&batch=1&abort_after=3" >/dev/null
+ab=$(stream "$PORT_A" || true)
+eq "abort_after=3 ⇒ 只到 3 个内容块" "3" "$(printf '%s' "$ab" | grep -c '"content"')"
+eq "半途断流没有 [DONE]" "0" "$(printf '%s' "$ab" | grep -c '\[DONE\]')"
+write_cfg "$PORT_A" "abort_after=0&batch=1" >/dev/null
+sa=$(stream "$PORT_A" || true)
+eq "abort_after=0 恢复 ⇒ 正常收尾 [DONE]" "1" "$(printf '%s' "$sa" | grep -c '\[DONE\]')"
+
 echo
 if [ "$FAILS" -eq 0 ]; then
   printf '\033[32m✓ test_stream_mock_config: %d 项全过\033[0m\n' "$PASSES"
