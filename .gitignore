@@ -17,6 +17,8 @@
 admin/dist/
 *.log
 xlite.db
+xlite.db-shm
+xlite.db-wal
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
