@@ -131,7 +131,14 @@ async fn pump_stream(reg: Register) {
     let out = reg.out;
     let mut pending = 0usize;
     loop {
-        let next = recv.next().await;
+        // Race the upstream against the downstream's departure: a dropped
+        // receiver must end this stream now, not whenever the upstream next
+        // speaks. Without it a silent upstream holds the stream open forever
+        // and the cancel never reaches the peer (D/F plan, P1).
+        let next = tokio::select! {
+            _ = out.closed() => break,
+            next = recv.next() => next,
+        };
         match next {
             Some(Ok(bytes)) => {
                 pending += bytes.len();

@@ -960,3 +960,411 @@ async fn a_raised_settings_cap_is_used_without_dialling_again() {
         "the raised cap must absorb the request on an existing connection"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cancellation propagation (P1 of docs/dev/loadtest-df-optimization-plan-2026-10.md).
+//
+// The bug these guard: `pump_stream` waited on `recv.next()` and only noticed a
+// departed downstream at the *next* `out.send` failure — so when the upstream
+// went silent, the cancel never reached it and the stream stayed open. Every
+// wait below is bounded; none may rely on the upstream sending again to wake
+// anything up.
+// ---------------------------------------------------------------------------
+
+/// The pump's per-stream body channel cap (`pump.rs` `BODY_CHANNEL`). A test
+/// that claims "the channel was full" checks against this.
+const BODY_CHANNEL_CAP: usize = 16;
+
+/// What the fake upstream observed: how many data chunks it managed to send,
+/// and — where it waits for one — the peer's reset reason.
+struct Seen {
+    label: &'static str,
+    sent: usize,
+    reset: Result<h2::Reason, String>,
+}
+
+/// Per-request behaviour by request path:
+///   * `/silent` — headers + one chunk, then silence; waits for the peer's
+///     reset and reports its reason.
+///   * `/flood` — headers + 64 chunks, no end of stream, then waits for the
+///     peer's reset: with a cap-16 body channel and no reads, this guarantees
+///     the pump is parked in `out.send` (saturated) when the cancel lands.
+///   * `/drip` — headers + 8 chunks spaced 20ms apart + end of stream.
+///   * `/reset` — headers + one chunk, then an explicit `RST_STREAM`.
+///   * `/tail` — headers + one 8191-byte chunk + end of stream (below the
+///     8 KiB release threshold, so its credit returns only at stream end).
+///   * anything else — headers + 8 chunks + end of stream.
+fn spawn_cancel_server(io: tokio::io::DuplexStream, seen: tokio::sync::mpsc::Sender<Seen>) {
+    tokio::spawn(async move {
+        let mut conn = match h2::server::Builder::new().handshake::<_, Bytes>(io).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        while let Some(req) = conn.accept().await {
+            let (request, mut respond) = match req {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let path = request.uri().path().to_string();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let _recv = request;
+                let resp = http::Response::builder().status(200).body(()).unwrap();
+                let mut send = match respond.send_response(resp, false) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let mut sent = 0usize;
+                let send_chunk =
+                    |bytes: &'static [u8], end: bool, send: &mut h2::SendStream<Bytes>| {
+                        send.send_data(Bytes::from_static(bytes), end).is_ok()
+                    };
+                match path.as_str() {
+                    "/silent" => {
+                        if !send_chunk(b"hello", false, &mut send) {
+                            return;
+                        }
+                        sent = 1;
+                        // Silent from here: the cancel must arrive without this
+                        // side ever sending again.
+                        let reset = std::future::poll_fn(|cx| send.poll_reset(cx)).await;
+                        let _ = seen
+                            .send(Seen {
+                                label: "silent",
+                                sent,
+                                reset: reset.map_err(|e| e.to_string()),
+                            })
+                            .await;
+                    }
+                    "/flood" => {
+                        for _ in 0..64 {
+                            if !send_chunk(b"x", false, &mut send) {
+                                return;
+                            }
+                            sent += 1;
+                        }
+                        let reset = std::future::poll_fn(|cx| send.poll_reset(cx)).await;
+                        let _ = seen
+                            .send(Seen {
+                                label: "flood",
+                                sent,
+                                reset: reset.map_err(|e| e.to_string()),
+                            })
+                            .await;
+                    }
+                    "/drip" => {
+                        for _ in 0..8 {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            if !send_chunk(b"hello", false, &mut send) {
+                                return;
+                            }
+                        }
+                        let _ = send.send_data(Bytes::new(), true);
+                    }
+                    "/reset" => {
+                        let _ = send.send_data(Bytes::from_static(b"hello"), false);
+                        // Let headers + data land first: this case is about the
+                        // pump ending on a reset, not winning a race.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        send.send_reset(h2::Reason::NO_ERROR);
+                    }
+                    "/tail" => {
+                        let _ = send.send_data(Bytes::from_static(&[b'y'; 8191]), true);
+                    }
+                    "/big" => {
+                        // 3 MiB beats the 2 MiB per-stream window: it can only
+                        // arrive if credit is released past the 8 KiB threshold.
+                        // Ends with a 500-byte tail below the threshold.
+                        let block = Bytes::from_static(&[b'y'; 65536]);
+                        let mut sent = 0usize;
+                        while sent < 3 * 1024 * 1024 {
+                            if send.send_data(block.clone(), false).is_err() {
+                                return;
+                            }
+                            sent += block.len();
+                        }
+                        let _ = send.send_data(Bytes::from_static(&[b'z'; 500]), true);
+                    }
+                    _ => {
+                        for _ in 0..8 {
+                            if !send_chunk(b"hello", false, &mut send) {
+                                return;
+                            }
+                        }
+                        let _ = send.send_data(Bytes::new(), true);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// A pinned-poll pool whose dials serve [`spawn_cancel_server`].
+fn cancel_pool(seen: tokio::sync::mpsc::Sender<Seen>, max_conns: usize) -> Pool {
+    let dial: Dial = Arc::new(move |_host: String| {
+        let seen = seen.clone();
+        Box::pin(async move {
+            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+            spawn_cancel_server(server_io, seen.clone());
+            Ok(Box::new(client_io) as BoxIo)
+        })
+    });
+    Pool::new(Config {
+        max_conns_per_host: max_conns,
+        stream_budget_per_conn: xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN,
+        pinned_poll: true,
+        dial,
+        idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
+    })
+}
+
+fn chat_request(path: &str) -> http::Request<()> {
+    http::Request::builder()
+        .method("GET")
+        .uri(format!("http://upstream{path}"))
+        .body(())
+        .unwrap()
+}
+
+/// Register `path` on `lease` and return its pump receiver.
+async fn open_stream(
+    lease: &mut xlite_h2_pool::Lease,
+    path: &str,
+) -> tokio::sync::mpsc::Receiver<Result<Bytes, String>> {
+    let (response, send_stream) = lease.send_request(chat_request(path), true).unwrap();
+    drop(send_stream);
+    let recv = response.await.unwrap().into_body();
+    lease.register(recv).await
+}
+
+/// The P1 regression: a silent upstream must see the downstream's cancel
+/// promptly — with the *reason* the peer actually sent — and without the
+/// upstream being forced to send another chunk. Before the fix the pump parked
+/// in `recv.next()` and the reset only left after the upstream spoke again.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_reaches_a_silent_upstream_without_another_chunk() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let pool = cancel_pool(tx, 2);
+    let mut lease = pool.acquire("upstream").await.unwrap();
+
+    let mut body = open_stream(&mut lease, "/silent").await;
+    let first = tokio::time::timeout(Duration::from_secs(2), body.recv())
+        .await
+        .expect("first chunk must arrive")
+        .expect("pump channel open")
+        .expect("pump bytes");
+    assert_eq!(&first[..], b"hello");
+
+    // The downstream walks away while the upstream is silent.
+    drop(body);
+    drop(lease);
+
+    let seen = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("cancel must reach a silent upstream inside the bound")
+        .expect("server task alive");
+    assert_eq!(seen.label, "silent");
+    assert_eq!(seen.sent, 1, "the upstream must not have sent again");
+    assert_eq!(
+        seen.reset,
+        Ok(h2::Reason::CANCEL),
+        "the peer reset must carry CANCEL (dropped RecvStream), not a \
+         connection error dressed up as a cancel"
+    );
+}
+
+/// A cancel while the pump's body channel is saturated must still reach the
+/// upstream: the test fills the channel and *waits until it is observably
+/// full* before dropping, so the saturated path is the one being exercised.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_with_a_full_body_channel_reaches_the_upstream() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let pool = cancel_pool(tx, 1);
+    let mut lease = pool.acquire("upstream").await.unwrap();
+
+    let body = open_stream(&mut lease, "/flood").await;
+
+    // Saturation sync: the pump hands chunks to a cap-16 channel; reading
+    // nothing, the channel must fill completely before the cancel.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if body.len() >= BODY_CHANNEL_CAP {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "body channel never filled: the saturated path is not being tested"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(body);
+    drop(lease);
+
+    let seen = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("cancel must reach the upstream while its channel is full")
+        .expect("server task alive");
+    assert_eq!(seen.label, "flood");
+    assert_eq!(
+        seen.sent, 64,
+        "the upstream must have flooded before the cancel"
+    );
+    assert_eq!(seen.reset, Ok(h2::Reason::CANCEL));
+
+    // The slot is given back locally even though the peer has not acked.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let stats = pool.all_stats();
+        if stats.iter().all(|(_, s)| s.in_flight == 0) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "in_flight never drained"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Cancelling one stream must not disturb a *concurrently active* sibling on
+/// the same connection: the sibling is mid-drip when the cancel lands and must
+/// still complete with every byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn canceling_one_stream_leaves_its_sibling_intact() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    // One connection for both streams, so they share the driver/pump task.
+    let pool = cancel_pool(tx, 1);
+
+    // Both streams are live on the same connection before anything is cancelled.
+    let mut noisy = pool.acquire("upstream").await.unwrap();
+    let mut noisy_body = open_stream(&mut noisy, "/silent").await;
+    let mut quiet = pool.acquire("upstream").await.unwrap();
+    let mut quiet_body = open_stream(&mut quiet, "/drip").await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), noisy_body.recv())
+        .await
+        .expect("first chunk must arrive")
+        .expect("pump channel open")
+        .expect("pump bytes");
+    assert_eq!(&first[..], b"hello");
+
+    // Cancel the silent stream while the sibling is still dripping.
+    drop(noisy_body);
+    drop(noisy);
+
+    let mut total = 0usize;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), quiet_body.recv())
+        .await
+        .expect("the sibling must keep flowing after its neighbour is cancelled")
+    {
+        total += chunk.expect("pump bytes").len();
+    }
+    assert_eq!(total, 8 * 5, "the sibling must receive every byte");
+    drop(quiet);
+    drop(quiet_body);
+
+    let seen = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("the cancelled stream's reset must reach the upstream")
+        .expect("server task alive");
+    assert_eq!(seen.label, "silent");
+    assert_eq!(seen.reset, Ok(h2::Reason::CANCEL));
+}
+
+/// Clean EOF and an upstream-side reset both terminate the pump: the receiver
+/// sees the bytes, then an end (or a pump error) — never a hang.
+#[tokio::test(flavor = "multi_thread")]
+async fn clean_eof_and_upstream_reset_both_terminate_the_pump() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let pool = cancel_pool(tx, 1);
+
+    // Clean end of stream: 8 chunks, then the channel closes.
+    let mut lease = pool.acquire("upstream").await.unwrap();
+    let mut body = open_stream(&mut lease, "/ok").await;
+    let mut total = 0usize;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), body.recv())
+        .await
+        .expect("a clean EOF must end the pump")
+    {
+        total += chunk.expect("pump bytes").len();
+    }
+    assert_eq!(total, 8 * 5);
+    drop(lease);
+
+    // Upstream-side reset: bytes then an error, then the channel closes.
+    let mut lease = pool.acquire("upstream").await.unwrap();
+    let mut body = open_stream(&mut lease, "/reset").await;
+    let mut saw_error = false;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), body.recv())
+        .await
+        .expect("an upstream reset must end the pump")
+    {
+        if chunk.is_err() {
+            saw_error = true;
+        }
+    }
+    assert!(saw_error, "an upstream reset must surface as a pump error");
+    drop(lease);
+}
+
+/// Flow-control credit accounting on one connection (5 MiB conn window,
+/// 2 MiB stream window, 8 KiB release threshold). What is actually proven:
+///   * a 3 MiB body only completes if credit is released **across the
+///     threshold** mid-stream — deleting the mid-stream release turns this
+///     test red (verified: NEG-A);
+///   * 700 bodies of 8191 B (below the threshold) plus a 3 MiB body all
+///     complete: large transfers and sequential requests cycle the windows
+///     indefinitely.
+/// What is NOT proven here: the *tail* release (`pending > 0` at stream end)
+/// is not isolated — h2 auto-releases a closed stream's connection credit
+/// (proto/streams/streams.rs `drop_stream_ref` → `release_closed_capacity`),
+/// so deleting the tail release leaves this test green (verified: NEG-B).
+/// The tail release is belt-and-braces (returns credit before the refs drop),
+/// not load-bearing.
+#[tokio::test(flavor = "multi_thread")]
+async fn flow_control_credit_is_released_in_full() {
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Seen>(4);
+    let pool = cancel_pool(tx, 1);
+
+    // Cross-threshold releases: 3 MiB > 2 MiB stream window.
+    let mut lease = pool.acquire("upstream").await.unwrap();
+    let mut body = open_stream(&mut lease, "/big").await;
+    let mut total = 0usize;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(10), body.recv())
+        .await
+        .expect("credit must be released across the threshold or this stalls at the window")
+    {
+        total += chunk.expect("pump bytes").len();
+    }
+    assert_eq!(total, 3 * 1024 * 1024 + 500);
+    drop(lease);
+
+    // Below-threshold bodies: 700 × 8191 B = 5.6 MiB > 5 MiB connection
+    // window. Every request recycles both windows through pump + h2's
+    // stream-close release; this must stay healthy for the long run.
+    for i in 0..700 {
+        let mut lease = pool.acquire("upstream").await.unwrap();
+        let mut body = open_stream(&mut lease, "/tail").await;
+        let mut total = 0usize;
+        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), body.recv())
+            .await
+            .unwrap_or_else(|_| panic!("stream {i}: tail credit leaked, connection window ran dry"))
+        {
+            total += chunk.expect("pump bytes").len();
+        }
+        assert_eq!(total, 8191, "stream {i} lost bytes");
+        drop(lease);
+    }
+
+    // The connection is still healthy after 5.6 MiB of window cycling.
+    let mut lease = pool.acquire("upstream").await.unwrap();
+    let mut body = open_stream(&mut lease, "/ok").await;
+    let mut total = 0usize;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), body.recv())
+        .await
+        .expect("follow-up stream must complete")
+    {
+        total += chunk.expect("pump bytes").len();
+    }
+    assert_eq!(total, 8 * 5);
+}
