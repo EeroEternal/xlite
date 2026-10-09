@@ -23,7 +23,7 @@ Components follow semantic roles before custom styling. Reuse baseline UI primit
 
 ### Entity list pattern (as implemented)
 
-Canonical reference: `admin/src/pages/api-keys.tsx`; `providers.tsx` and `models.tsx` use the same shape. New list pages must follow it instead of inventing a second row language.
+Canonical reference: `admin/src/pages/api-keys.tsx`; `models.tsx` uses the same shape. New list pages must follow it instead of inventing a second row language.
 
 Structure:
 
@@ -38,7 +38,7 @@ Structure:
 
 ### Entity detail / edit dialog (as implemented)
 
-Canonical references: the create/edit dialogs in `admin/src/pages/providers.tsx` and `admin/src/pages/api-keys.tsx`; the channel detail dialog in `admin/src/pages/models.tsx`.
+Canonical references: the model-instance dialog in `admin/src/pages/models.tsx` and the create/edit dialogs in `admin/src/pages/api-keys.tsx`.
 
 Shell:
 

@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react"
 import { Link, useLocation } from "react-router-dom"
-import { KeyRound, LayoutDashboard, Server, Settings, Waypoints } from "lucide-react"
+import { KeyRound, LayoutDashboard, Settings, Waypoints } from "lucide-react"
 import {
   Sidebar,
   SidebarContent,
@@ -15,7 +15,6 @@ import { cn } from "@/lib/utils"
 
 const items = [
   { href: "/", icon: LayoutDashboard, key: "nav.overview" },
-  { href: "/providers", icon: Server, key: "nav.providers" },
   { href: "/models", icon: Waypoints, key: "nav.models" },
   { href: "/api-keys", icon: KeyRound, key: "nav.apiKeys" },
   { href: "/settings", icon: Settings, key: "nav.settings" },

@@ -59,7 +59,7 @@ Always load this file (Overview + Hard rules + PR checklist below). Then open **
 
 ## Scope
 
-xlite Admin has exactly five top-level surfaces — **overview, providers, models (with channels), API keys, settings** — plus login. This is a **closed set**. There is no organization, project, route, user, role, quota, billing, or plugin domain, and no routing-strategy concept: the data plane is byte passthrough with weighted-random selection plus priority failover only. Do not add pages, nav entries, filters, columns, or copy for those concepts; adding a real capability is a product decision that starts in [`architecture.md`](architecture.md) and `AGENTS.md` rule 9, not in a page.
+xlite Admin has exactly four top-level surfaces — **overview, models (with providers and model instances), API keys, settings** — plus login. This is a **closed set**. There is no organization, project, route, user, role, quota, billing, or plugin domain, and no routing-strategy concept: the data plane is byte passthrough with weighted-random selection plus priority failover only. Do not add pages, nav entries, filters, columns, or copy for those concepts; adding a real capability is a product decision that starts in [`architecture.md`](architecture.md) and `AGENTS.md` rule 9, not in a page. Providers and models share one menu: a model row is a model instance (public name + one provider binding); providers are created inline from inner-provider presets (or custom) while adding a model, and the page shows only model instances.
 
 Applies to `admin/src/pages/*`, `admin/src/components/*`, and `admin/src/components/ui/*`. Third-party internals and code-highlight themes are out of scope for wrapper-controlled styling only.
 

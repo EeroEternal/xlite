@@ -9,7 +9,6 @@ import { ApiKeysPage } from "@/pages/api-keys"
 import { LoginPage } from "@/pages/login"
 import { ModelsPage } from "@/pages/models"
 import { OverviewPage } from "@/pages/overview"
-import { ProvidersPage } from "@/pages/providers"
 import { SettingsPage } from "@/pages/settings"
 
 function GuardedLayout() {
@@ -37,8 +36,8 @@ export default function App() {
                 <Route path="/login" element={<LoginRoute />} />
                 <Route path="/" element={<GuardedLayout />}>
                   <Route index element={<OverviewPage />} />
-                  <Route path="providers" element={<ProvidersPage />} />
                   <Route path="models" element={<ModelsPage />} />
+                  <Route path="providers" element={<Navigate to="/models" replace />} />
                   <Route path="api-keys" element={<ApiKeysPage />} />
                   <Route path="settings" element={<SettingsPage />} />
                 </Route>

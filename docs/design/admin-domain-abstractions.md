@@ -6,7 +6,7 @@ Keep the page → hook/resource → api-types → handler direction.
 
 | Domain | Types | Resources | Page |
 | --- | --- | --- | --- |
-| Providers | `api-types/providers.ts` | `resources/providers.ts` | `pages/providers.tsx` |
+| Providers | `api-types/providers.ts` | `resources/providers.ts` | `pages/models.tsx`（供应商随模型实例创建） |
 | Models / channels | `api-types/models.ts` | `resources/models.ts` | `pages/models.tsx` |
 | API keys | `api-types/api-keys.ts` | `resources/api-keys.ts` | `pages/api-keys.tsx` |
 | Overview / settings | `api-types/overview.ts`, `api-types/catalog.ts` | `resources/overview.ts`, `resources/catalog.ts` | `pages/overview.tsx`, `pages/settings.tsx` |

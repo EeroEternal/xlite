@@ -48,6 +48,6 @@ Shape rules:
 
 ## Canonical references
 
-- Level 1: `admin/src/components/ui/card.tsx` and the list cards in `admin/src/pages/api-keys.tsx` / `providers.tsx` / `models.tsx`; KPI tiles in `admin/src/pages/overview.tsx`.
-- Level 2: the enable/toggle strips in the entity dialogs (`admin/src/pages/providers.tsx`, `models.tsx`, `api-keys.tsx`) and the fact rows in `admin/src/pages/settings.tsx`.
+- Level 1: `admin/src/components/ui/card.tsx` and the list cards in `admin/src/pages/api-keys.tsx` / `models.tsx`; KPI tiles in `admin/src/pages/overview.tsx`.
+- Level 2: the enable/toggle strips in the entity dialogs (`admin/src/pages/models.tsx`, `api-keys.tsx`) and the fact rows in `admin/src/pages/settings.tsx`.
 - Tokens: [`tokens.md`](tokens.md) (`canvas`, `shadow-card`, `shadow-card-hover`).

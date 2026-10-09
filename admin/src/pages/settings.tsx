@@ -138,7 +138,7 @@ export function SettingsPage() {
             <DialogHeader>
               <DialogTitle>{t("settings.catalogImport")}</DialogTitle>
             </DialogHeader>
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+            <div className="min-h-0 flex-1 -mx-1 space-y-4 overflow-y-auto px-1">
               <div className="flex flex-wrap gap-2">
                 <input
                   ref={fileRef}
