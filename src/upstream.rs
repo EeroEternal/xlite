@@ -202,6 +202,13 @@ impl Upstream {
         self.pool.all_stats()
     }
 
+    /// Pool-wide data-path diagnostics (`GET /api/pool`): sampled stream
+    /// progress (stall signatures), pump channel depth, cancel counts/spans.
+    /// Read side only; the write side is relaxed atomics (see `xlite_h2_pool::diag`).
+    pub fn diag_stats(&self) -> xlite_h2_pool::DiagSnap {
+        self.pool.diag_snap()
+    }
+
     /// Connection-level stats for the native HTTP/1.1 pool (`GET /api/pool`).
     pub fn h1_pool_stats(&self) -> Vec<(String, xlite_h1_pool::PoolStats)> {
         self.h1.all_stats()

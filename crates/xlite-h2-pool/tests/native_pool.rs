@@ -714,6 +714,7 @@ async fn stats_track_connections_in_flight_and_dials() {
         pool.stats("never-dialled"),
         PoolStats {
             connections: 0,
+            conns: Vec::new(),
             in_flight: 0,
             dials: 0,
             reclaimed: 0,
@@ -1367,4 +1368,72 @@ async fn flow_control_credit_is_released_in_full() {
         total += chunk.expect("pump bytes").len();
     }
     assert_eq!(total, 8 * 5);
+}
+
+/// Diagnostics wiring (plan §4 light observability): a stream the pump carries
+/// is accounted exactly once, and `stats` carries the per-connection
+/// distribution. Write side is relaxed atomics; this asserts the plumbing, not
+/// the micro-cost (that is quantified on the rig).
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_account_pumped_streams_and_conns() {
+    let pool = pinned_pool();
+    let mut lease = pool.acquire("upstream").await.unwrap();
+    assert!(lease.pinned_poll(), "the diagnostics path needs the pump");
+
+    let request = http::Request::builder()
+        .method("GET")
+        .uri("http://upstream/")
+        .body(())
+        .unwrap();
+    let (response, send_stream) = lease.send_request(request, true).unwrap();
+    drop(send_stream);
+    let recv = response.await.unwrap().into_body();
+    let mut rx = lease.register(recv).await;
+    let mut total = 0usize;
+    while let Some(chunk) = rx.recv().await {
+        total += chunk.expect("pump bytes").len();
+    }
+    assert_eq!(total, 8 * 5, "pump forwards every byte");
+
+    let snap = pool.diag_snap();
+    assert_eq!(snap.streams_pumped, 1, "one stream pumped through");
+    assert_eq!(snap.pumps_active, 0, "no pump owns a stream now");
+    assert_eq!(snap.registers_pending, 0, "register channel drained");
+    assert!(snap.slots.is_empty(), "progress slots freed at stream end");
+
+    let stats = pool.stats("upstream");
+    assert_eq!(stats.conns.len(), 1, "one live connection");
+    assert_eq!(stats.conns[0].in_flight, 1, "this lease is in flight");
+    drop(lease);
+}
+
+/// A cancel the pump observes must be counted, and the cancel->end span
+/// recorded. The `/silent` fixture keeps the stream open, so the drop of the
+/// body receiver is the only thing that can end it (the P1 path).
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_account_cancels() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let pool = cancel_pool(tx, 1);
+    let mut lease = pool.acquire("upstream").await.unwrap();
+
+    let mut body = open_stream(&mut lease, "/silent").await;
+    let _first = tokio::time::timeout(Duration::from_secs(2), body.recv())
+        .await
+        .expect("first chunk")
+        .expect("pump bytes");
+    drop(body);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let snap = pool.diag_snap();
+        if snap.cancels_seen == 1 && snap.pumps_active == 0 && snap.streams_pumped == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cancel never accounted: {snap:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(lease);
 }

@@ -151,6 +151,9 @@ pub(crate) struct ConnEntry {
     /// When [`Config::pinned_poll`] is on: the channel this connection's task
     /// listens on for the `RecvStream`s it polls (merged driver + pump).
     pub(crate) pump: Option<tokio::sync::mpsc::Sender<crate::pump::Register>>,
+    /// Pool-wide diagnostics handle, cloned in so `Lease::register` can hand a
+    /// stream's progress slot to the pump without a global lookup.
+    pub(crate) diag: std::sync::Arc<crate::diag::Diag>,
 }
 
 pub(crate) struct HostState {
@@ -248,10 +251,13 @@ impl HostState {
 }
 
 /// Point-in-time snapshot of one pool's state (for `/metrics` / diagnostics).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct PoolStats {
     /// Live connections.
     pub connections: usize,
+    /// Per-connection snapshot (`in_flight`, peer cap) — read off the
+    /// connections' existing atomics, so it costs the data path nothing.
+    pub conns: Vec<crate::diag::ConnSnap>,
     /// Streams currently reserved across those connections.
     pub in_flight: usize,
     /// Connections dialled over this pool's lifetime.
@@ -348,6 +354,9 @@ pub struct Pool {
     /// upstream authority, so after the first request this always hits and the
     /// per-acquire `String` allocation + map lock disappear.
     last_host: ArcSwapOption<LastHost>,
+    /// Lightweight data-path diagnostics (sampled stream progress, pump
+    /// channel depth, cancel spans). Read side: [`Pool::diag_snap`].
+    diag: std::sync::Arc<crate::diag::Diag>,
 }
 
 /// Signal every waiter on this host that the slot landscape changed.
@@ -367,6 +376,7 @@ impl Pool {
             dial: config.dial,
             idle_timeout: config.idle_timeout,
             hosts: Mutex::new(HashMap::new()),
+            diag: std::sync::Arc::new(crate::diag::Diag::new()),
             last_host: ArcSwapOption::empty(),
         }
     }
@@ -549,6 +559,7 @@ impl Pool {
             idle_since_ms: AtomicU64::new(monotonic_ms()),
             generation_tx: state.generation_tx.clone(),
             pump: pump_tx,
+            diag: std::sync::Arc::clone(&self.diag),
         });
 
         // Drive the connection to completion; when it closes, drop it from the
@@ -687,6 +698,7 @@ impl Pool {
         let Some(state) = hosts.get(host) else {
             return PoolStats {
                 connections: 0,
+                conns: Vec::new(),
                 in_flight: 0,
                 dials: 0,
                 reclaimed: 0,
@@ -702,20 +714,25 @@ impl Pool {
                 wait_buckets: [0; WAIT_BUCKETS],
             };
         };
-        let (connections, in_flight, peer_cap) = {
+        let (connections, in_flight, peer_cap, conns_snap) = {
             let conns = state.conns.load();
-            let in_flight = conns
+            let conns_snap: Vec<crate::diag::ConnSnap> = conns
                 .iter()
-                .map(|c| c.in_flight.load(Ordering::Acquire))
-                .sum();
+                .map(|c| crate::diag::ConnSnap {
+                    in_flight: c.in_flight.load(Ordering::Acquire),
+                    cap: c.cap.load(Ordering::Acquire),
+                })
+                .collect();
+            let in_flight = conns_snap.iter().map(|c| c.in_flight).sum();
             // The minimum is what actually applies: every connection here is to the
             // same peer, and they only differ if it changed its SETTINGS
             // mid-flight (see `publish_peer_cap`).
             let peer_cap = conns.iter().map(|c| c.cap.load(Ordering::Acquire)).min();
-            (conns.len(), in_flight, peer_cap)
+            (conns.len(), in_flight, peer_cap, conns_snap)
         };
         PoolStats {
             connections,
+            conns: conns_snap,
             in_flight,
             dials: state.dials.load(Ordering::Relaxed),
             reclaimed: state.reclaimed.load(Ordering::Relaxed),
@@ -732,6 +749,13 @@ impl Pool {
             // independent, which is fine for a rate/percentile view.
             wait_buckets: std::array::from_fn(|i| state.wait_buckets[i].load(Ordering::Relaxed)),
         }
+    }
+
+    /// Pool-wide diagnostics snapshot: sampled stream progress, pump channel
+    /// depth, cancel counts/spans. Read side only — the write side is relaxed
+    /// atomics on per-stream state (see [`crate::diag`]).
+    pub fn diag_snap(&self) -> crate::diag::DiagSnap {
+        self.diag.snapshot()
     }
 
     /// Point-in-time stats for **every** host this pool has dialed, sorted by host.

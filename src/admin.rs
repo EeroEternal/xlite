@@ -233,6 +233,12 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "host": host,
                 "connections": s.connections,
+                // Per-connection stream distribution (read-side free): who is
+                // actually carrying the load, and each connection's live cap.
+                "conns": s.conns.iter().map(|c| json!({
+                    "in_flight": c.in_flight,
+                    "cap": c.cap,
+                })).collect::<Vec<_>>(),
                 "in_flight": s.in_flight,
                 "peer_cap": s.peer_cap,
                 "effective_streams_per_conn": per_conn,
@@ -289,11 +295,31 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
             })
         })
         .collect();
+    // Data-path diagnostics (sampled): a stream whose `last_data_ms` is old
+    // while `in_flight` says it is live is where a 600s stall shows up.
+    // `cancel_prop_*` is the internal cancel→stream-end span; wire latency was
+    // measured separately in the field certification (§5.4/5.5).
+    let d = state.upstream.diag_stats();
+    let diag = json!({
+        "registers_pending": d.registers_pending,
+        "pumps_active": d.pumps_active,
+        "streams_pumped": d.streams_pumped,
+        "cancels_seen": d.cancels_seen,
+        "cancel_prop_last_ms": d.cancel_prop_last_ms,
+        "cancel_prop_max_ms": d.cancel_prop_max_ms,
+        "streams": d.slots.iter().map(|s| json!({
+            "start_ms": s.start_ms,
+            "last_data_ms": s.last_data_ms,
+            "bytes": s.bytes,
+            "cancel_seen": s.cancel_ms > 0,
+        })).collect::<Vec<_>>(),
+    });
     ok(json!({
         "stream_budget_per_conn": stream_budget,
         "max_conns_per_host": state.config.max_conns_per_host,
         "hosts": hosts,
         "h1_pool": h1_pool,
+        "diag": diag,
     }))
     .into_response()
 }

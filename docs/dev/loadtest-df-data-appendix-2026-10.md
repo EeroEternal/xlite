@@ -268,3 +268,15 @@ top 符号（>0.5% 档）：w8 —— copy_user 7.30% / h2::Actions::reset 3.08%
 `RESULT elapsed=125.4 norm_ok=4201 norm_err=0 norm_rate=33.50/s ttft_avg=4.344 ttft_p95=4.596 dur_avg=5.812 statuses={200: 4201}`（基线）；
 `RESULT elapsed=125.4 norm_ok=4200 norm_err=0 norm_rate=33.49/s ttft_avg=4.393 ttft_p95=4.653 dur_avg=5.850 cancel_ok=38835 cancel_err=0 cancel_rate=309.63/s statuses={200: 4200}`（风暴）。
 恢复探针：两臂均 10/10。
+
+### F.6 §8.14 诊断开销交错对照 + 冒烟（2026-10-11，F@40k × w24 × 300s）
+
+| 序 | 二进制 | 窗口速率 | TTFT avg | dur avg | 网关核 | 失败% |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | xlite-after（ab25593，无诊断） | 592.6/s | 560.7ms | 1m6s | 15.8 | 0.00 |
+| 2 | xlite-diag（含诊断） | 486.3/s | 565.3ms | 1m10s | 17.5 | 0.00 |
+| 3 | xlite-after（同上） | 476.8/s | 575.4ms | 1m11s | 18.3 | 0.00 |
+
+（首轮 11:55 的 xlite-diag 单跑为 447.2/s@19.5 核——被本交错对照证明是台架漂移而非诊断开销：diag 轮落在两侧基线之间。漂移特征：流周期 65s→71s 拉长、网关核 15.8→18.3 上浮，会话级连续压测后 mock 农场状态波动所致，±20% 为该时段对比噪声底线。）
+
+`/api/pool` 冒烟（诊断版，跑动中抓取）：`diag.streams=[{bytes: 16562, last_data_ms: 1500, start_ms: 5xx, cancel_seen: false}]`、`pumps_active=1`、`hosts[].conns[0]={cap: 250, in_flight: 1}`——采样流实时进展与逐连接分布均活体可见。构建 MD5 `362a5b78ba7baa2b`。
