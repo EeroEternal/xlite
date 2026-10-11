@@ -254,3 +254,17 @@ B 段跨机（网关+k6=10.99.255.101 → mock=10.99.255.102:8081-8104，1GbE �
 | w24 | 516.9/s（203,375 迭代） | 16.6 | 18.6 | 54.2 | 691MB/s | 431,318 |
 
 top 符号（>0.5% 档）：w8 —— copy_user 7.30% / h2::Actions::reset 3.08% / mpsc::Sender::send 3.01% / Pool::dial_and_insert 2.85% / DynConnection::recv 2.44% / nft_do_chain 2.39% / nf_conntrack 2.32% / futures_unordered 2.16% / inet_lookup 2.03% / UpstreamBody 1.48%；w24 —— **queued_spin_lock_slowpath 7.33%** / copy_user 4.00% / nf_conntrack 2.69% / mpsc::Sender::send 2.23% / nft_do_chain 2.17% / dial_and_insert 1.78% / hyper conn 1.73% / futures_unordered 1.71% / DynConnection::recv 1.55% / inet_lookup 1.49%。分类合计见 §8.12。
+
+### F.5 §8.13 取消压力回归（2026-10-11，快吐字形 500 块×10ms，workers=24）
+
+| 快照 | 基线 RSS_kb | 风暴 RSS_kb |
+| --- | --- | --- |
+| before | 10,908 | 10,888 |
+| after | 34,304 | 55,284 |
+| +5s | 34,056 | 54,180 |
+| +15s | 34,080 | 53,340 |
+
+对 mock 连接数：两臂均 116→152（池化稳定）；`in_flight` 快照均为 0。客户端输出原文：
+`RESULT elapsed=125.4 norm_ok=4201 norm_err=0 norm_rate=33.50/s ttft_avg=4.344 ttft_p95=4.596 dur_avg=5.812 statuses={200: 4201}`（基线）；
+`RESULT elapsed=125.4 norm_ok=4200 norm_err=0 norm_rate=33.49/s ttft_avg=4.393 ttft_p95=4.653 dur_avg=5.850 cancel_ok=38835 cancel_err=0 cancel_rate=309.63/s statuses={200: 4200}`（风暴）。
+恢复探针：两臂均 10/10。
