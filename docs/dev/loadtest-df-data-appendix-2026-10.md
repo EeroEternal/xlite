@@ -245,3 +245,12 @@ B 段跨机（网关+k6=10.99.255.101 → mock=10.99.255.102:8081-8104，1GbE �
 | F@10k | 3,000块×20ms | 148.1/s | 95%（155 需求） | 513ms | 1m1s | 0.00 | **97MB/s** | 46k |
 
 窗口边界：F@5k (30.1s,0)→(300.1s,20,000)；F@10k (29.5s,0)→(299.5s,40,000)（= VU×4 周期量化）。测量事故：首轮三臂因农场被还原为默认短流而错置流形（仅作链路饱和证据）；NIC 列标签错位已更正（"errs"=rx 包计数，真错误/drop 全程 0）。
+
+### F.4 §8.12 perf 采样（F@40k 回环，30s 稳态采样窗，2026-10-11）
+
+| 臂 | 整轮速率 | 网关核 | k6 核 | mock 核 | lo 速率 | retrans |
+| --- | --- | --- | --- | --- | --- | --- |
+| w8 | 257.4/s（111,876 迭代） | 7.6 | 14.1 | 52.1 | 324MB/s | 281,255 |
+| w24 | 516.9/s（203,375 迭代） | 16.6 | 18.6 | 54.2 | 691MB/s | 431,318 |
+
+top 符号（>0.5% 档）：w8 —— copy_user 7.30% / h2::Actions::reset 3.08% / mpsc::Sender::send 3.01% / Pool::dial_and_insert 2.85% / DynConnection::recv 2.44% / nft_do_chain 2.39% / nf_conntrack 2.32% / futures_unordered 2.16% / inet_lookup 2.03% / UpstreamBody 1.48%；w24 —— **queued_spin_lock_slowpath 7.33%** / copy_user 4.00% / nf_conntrack 2.69% / mpsc::Sender::send 2.23% / nft_do_chain 2.17% / dial_and_insert 1.78% / hyper conn 1.73% / futures_unordered 1.71% / DynConnection::recv 1.55% / inet_lookup 1.49%。分类合计见 §8.12。
