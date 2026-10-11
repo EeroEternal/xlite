@@ -280,3 +280,16 @@ top 符号（>0.5% 档）：w8 —— copy_user 7.30% / h2::Actions::reset 3.08%
 （首轮 11:55 的 xlite-diag 单跑为 447.2/s@19.5 核——被本交错对照证明是台架漂移而非诊断开销：diag 轮落在两侧基线之间。漂移特征：流周期 65s→71s 拉长、网关核 15.8→18.3 上浮，会话级连续压测后 mock 农场状态波动所致，±20% 为该时段对比噪声底线。）
 
 `/api/pool` 冒烟（诊断版，跑动中抓取）：`diag.streams=[{bytes: 16562, last_data_ms: 1500, start_ms: 5xx, cancel_seen: false}]`、`pumps_active=1`、`hosts[].conns[0]={cap: 250, in_flight: 1}`——采样流实时进展与逐连接分布均活体可见。构建 MD5 `362a5b78ba7baa2b`。
+
+### F.7 §8.15 停顿场景复跑（2026-10-11，专用 mock :8199 + 诊断网关 MAX_CONNS=1）
+
+B 形（1h interval）快照原文：
+`[B+3s] in_flight=1 conns=[{cap:250, in_flight:1}] pumps=1 pending=0 pumped=1 cancels=0 streams=[{bytes:182, cancel_seen:False, last_data_ms:687, start_ms:687}]`
+`[B+30s]` 同上逐字一致；`[B-after-kill]` 同上（kill 未命中 curl 子进程，后由进程收尾记入 cancels=41）。
+
+C 形：风暴 `RESULT elapsed=81.4 cancel_ok=0 err=400`（客户端计数缺陷见 §8.13，泵侧记账为准：pumped=250/cancels=250 恰好停在墙），楔死请求 `code=000 starttransfer=0.000000s exit=28`，快照 `in_flight=1 conns=[{cap:250,in_flight:1}] pumps=0 streams=[]`（+3s/+13s 一致）。
+
+Go mock 并发首块探测（chunktime.py，10 并发直连）：
+- `token_interval=3600000`：10/10 超时（30s），单流对照 chunk1=0.264s
+- `token_interval=20`：10/10 于 **0.30s** 内到齐（0.126~0.288s）
+风暴流节拍：chunk1 以 ≈ttft（200ms）串行投递（第 N 条 ≈ N×200ms，第 50 条 ≈10s=客户端超时线）。
