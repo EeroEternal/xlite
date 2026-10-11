@@ -292,4 +292,8 @@ C 形：风暴 `RESULT elapsed=81.4 cancel_ok=0 err=400`（客户端计数缺陷
 Go mock 并发首块探测（chunktime.py，10 并发直连）：
 - `token_interval=3600000`：10/10 超时（30s），单流对照 chunk1=0.264s
 - `token_interval=20`：10/10 于 **0.30s** 内到齐（0.126~0.288s）
-风暴流节拍：chunk1 以 ≈ttft（200ms）串行投递（第 N 条 ≈ N×200ms，第 50 条 ≈10s=客户端超时线）。
+风暴流节拍：chunk1 以 ≈ttft（200ms）节拍逐条投递（第 N 条 ≈ N×200ms，第 50 条 ≈10s=客户端超时线）。
+
+**原始证据路径（台架 60001 `bodesi@117.160.123.99`，机器回收即失效）**：`~/stall.log`（B 形与探针输出）、`~/wedge.log`（C 形输出）、`~/stall/`（`stall.client`、`wedge2.client`、`storm.log`、`stall.out`）；工具与编排脚本 `~/p1/{stall_demo.sh,wedge_demo.sh,chunktime.py,fastcancel.py,mixstress.py}`；诊断构建 `~/p1/xlite-diag`（MD5 `362a5b78ba7baa2b`）。
+
+**计数口径（基线说明）**：`streams_pumped` / `cancels_seen` 为**自网关启动起的累计计数，非并发**——B 形快照时基线为 pumped=1；C 形风暴后 `pumped=250 / cancels=250` 是累计值，与 SETTINGS 并发上限的数值相等属巧合记录，**不作为额度机制证明**（内部机制未定）。`streams[]` 为 **64 槽位采样且仅列在途流**（流结束即释放槽位）；`last_data_ms` 更新点 = 泵收到数据后、向下游发送前。快照仅记**相对时标**（B+3s/B+10s/B+30s、wedge+3s/wedge+13s），绝对时刻未单独记录。
