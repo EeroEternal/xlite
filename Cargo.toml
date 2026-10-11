@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "xlite"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 description = "Thin OpenAI-compatible AI gateway. Simple channel routing, streaming passthrough."
 

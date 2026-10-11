@@ -95,7 +95,7 @@ docker run -d --name xlite-gw --network host \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD='<自己定>' \
   -e LISTEN_HOST=0.0.0.0 -e PORT=8006 \
-  xlite:0.5.4
+  xlite:0.5.5
 ```
 
 **③ 裸机 / systemd**
@@ -396,7 +396,7 @@ PY
 docker run --rm --network host \
   -e REDIS_URL='redis://10.56.88.22:6379' \
   -v /tmp/mock-24.custom.yaml:/tmp/cat.yaml:ro \
-  xlite:0.5.4 import /tmp/cat.yaml
+  xlite:0.5.5 import /tmp/cat.yaml
 ```
 
 ⚠️ `--replace` 是**先清空整表再导**（已有的 provider / model / key 全没）——只想合并就别加它。
