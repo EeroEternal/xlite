@@ -8,7 +8,7 @@
 | `10.56.88.24`、`10.56.88.26` | xlite，两台配置一致 | 8080 |
 | `10.56.88.29` | 24 个 h2c mock + k6 | 8081–8104 |
 
-链路：`k6 → HAProxy → xlite → h2c mock`。准备好两台网关上的 `xlite:0.5.3` 镜像，以及 `.29` 上的 mock 包和 k6 镜像。`deploy/v88/` 必须整目录拷贝。
+链路：`k6 → HAProxy → xlite → h2c mock`。准备好两台网关上的 `xlite:0.5.4` 镜像，以及 `.29` 上的 mock 包和 k6 镜像。`deploy/v88/` 必须整目录拷贝。
 
 ## 1. 启动 mock（在 .29）
 
@@ -58,7 +58,7 @@ docker run -d --name xlite-gw --network host --restart unless-stopped \
   -e REDIS_URL=redis://10.56.88.22:6379 \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD -e LISTEN_HOST=0.0.0.0 -e PORT=8080 \
-  xlite:0.5.3
+  xlite:0.5.4
 
 curl -fsS http://127.0.0.1:8080/health    # version 应为 0.5.3
 curl -fsS http://127.0.0.1:8080/ready     # Redis 就绪

@@ -65,7 +65,16 @@ standing="$(cat AGENTS.md .agents/skills/*/SKILL.md 2>/dev/null || true)"
 # is still unexecuted) — now match the released [0.5.3] section. Their conclusions are
 # summarised there, but the design reasoning and the full data tables live only in them.
 # Retained for the same reason as the v0.5.1/v0.5.2 batches; prune after relocating.
-keep=" loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md loadtest-report-2026-09-28.md loadtest-report-2026-09-29.md performance-tuning-guide.md rfc-adaptive-h2-pool-architecture.md data/loadtest-metrics-2026-09-29.json h1-upstream-pool-architecture.md h1-pool-loadtest-2026-10-01.md extension-points-snapshot-2026-09.md "
+#
+# v0.5.4 promotion (2026-10-11): the D/F campaign's drafts — the optimization
+# plan (`loadtest-df-optimization-plan-2026-10.md`, §4~8 hold the P0~P3 and
+# four-tier acceptance record incl. the GPT-6 review corrections, indexed from
+# docs/README.md) and its full data appendix (`loadtest-df-data-appendix-2026-10.md`,
+# 50-round k6 metrics + frame evidence + fingerprints, cited by the plan) — now
+# match the released [0.5.4] section. Conclusions are summarised there; the
+# reasoning, window bounds and raw tables live only in them.
+# Retained for the same reason as the v0.5.1~v0.5.3 batches; prune after relocating.
+keep=" loadtest-df-optimization-plan-2026-10.md loadtest-df-data-appendix-2026-10.md loadtest-newapi-controlled-2026-09.md loadtest-backpressure-strategy.md loadtest-bottleneck-cpu-affinity.md loadtest-dual-0927-vs-0924-2026-09.md loadtest-execution-plan-2026-09-28.md loadtest-xg-0928-vs-newapi-0925-2026-09.md loadtest-xg-vs-newapi-dual-2026-09.md loadtest-report-2026-09-28.md loadtest-report-2026-09-29.md performance-tuning-guide.md rfc-adaptive-h2-pool-architecture.md data/loadtest-metrics-2026-09-29.json h1-upstream-pool-architecture.md h1-pool-loadtest-2026-10-01.md extension-points-snapshot-2026-09.md "
 
 findings=0
 # Recursive: an empty directory cannot be committed, so only files are judged, each
