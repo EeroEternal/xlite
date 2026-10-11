@@ -9,6 +9,7 @@
 | [manual/xlite.md](manual/xlite.md) | Operator env, YAML, HTTP/2 |
 | [manual/lab-loadtest.md](manual/lab-loadtest.md) | Mock-24、实验室两台机、客户现场拓扑 |
 | [manual/v88-rig.md](manual/v88-rig.md) | 与 New API V88 对标的 k6 喂法 |
+| [manual/loadtest-tune.md](manual/loadtest-tune.md) | 压测调参评估：tune.sh 三步法为你的负载选 worker 线程数 |
 | [dev/loadtest-newapi-controlled-2026-09.md](dev/loadtest-newapi-controlled-2026-09.md) | 受控对照：客户 New API 镜像在实验台的复现与更正 |
 | [dev/loadtest-dual-0927-vs-0924-2026-09.md](dev/loadtest-dual-0927-vs-0924-2026-09.md) | 双节点对标实测：0927 轮 XG vs 0924 轮 New API |
 | [dev/loadtest-xg-0928-vs-newapi-0925-2026-09.md](dev/loadtest-xg-0928-vs-newapi-0925-2026-09.md) | 0928 轮 XG 新 rig 单节点 vs 0925~0928 轮 New API 双节点：B 组对照（吞吐 +37~42%、真实并发 2×） |
