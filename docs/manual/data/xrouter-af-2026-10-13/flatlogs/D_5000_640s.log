@@ -1,0 +1,854 @@
+COMPLETE A-F GROUP COVERAGE / TWO DOCUMENTED EXECUTION BATCHES
+Gateway=xlite, sample=0.5, batch=1, stage=formal-xlite-D-5000, valid=True
+Whole QPS=76.143; steady success QPS=79.119; estimated activity=4993.835/5000
+Failure reasons=[]
+Group execution config={'source': '../sources/r11/results', 'k6_memory_limit': '9GiB', 'cpu_quotas': {'gateway': 28, 'k6': 56, 'farm': 28}, 'memory_gib': {'gateway': 64, 'k6': 192, 'farm': 64}}
+TTFT P50 shard range=502.053–502.117ms; P99 shard range=505.568–508.912ms (NOT global quantiles)
+
+===== ORIGINAL SHARD 0 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5262    7.203427/s
+    checks_succeeded...: 100.00% 5262 out of 5262
+    checks_failed......: 0.00%   0 out of 5262
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1779   2.435366/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.993501     min=0            max=28          
+    chunk_samples_added............: 113856 155.86344/s
+    gateway_overhead_ms............: p(50)=3.791388     p(90)=4.666126     p(95)=4.959252     p(99)=6.903041     avg=3.728902     min=-31.970586   max=41.781217   
+    steady_completed_requests......: 3172   4.342317/s
+    steady_http_duration_ms........: p(50)=60494.751195 p(90)=60496.462984 p(95)=60496.967049 p(99)=60499.345599 avg=60494.787436 min=60491.968139 max=60532.502103
+    steady_successful_requests.....: 3172   4.342317/s
+    steady_ttft_ms.................: p(50)=502.09613    p(90)=502.888139   p(95)=503.281261   p(99)=507.299623   avg=502.271299   min=500.753882   max=536.762693  
+    successful_requests............: 3483   4.768061/s
+    timestamp_diagnostic_bodies....: 1779   2.435366/s
+    ttft_ms........................: p(50)=502.096006   p(90)=502.879442   p(95)=503.239708   p(99)=507.286022   avg=502.267881   min=500.753882   max=536.762693  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3483
+    http_reqs......................: 3483   4.768061/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3483   4.768061/s
+    vus............................: 8      min=8         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 1 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5215    7.138997/s
+    checks_succeeded...: 100.00% 5215 out of 5215
+    checks_failed......: 0.00%   0 out of 5215
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1736   2.376471/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11          avg=9.999433     min=0            max=32          
+    chunk_samples_added............: 111104 152.094167/s
+    gateway_overhead_ms............: p(50)=3.804876     p(90)=4.619346     p(95)=4.914878     p(99)=6.563954    avg=3.671531     min=-26.803596   max=30.188013   
+    steady_completed_requests......: 3168   4.336786/s
+    steady_http_duration_ms........: p(50)=60494.618123 p(90)=60496.325802 p(95)=60496.826763 p(99)=60498.69595 avg=60494.867376 min=60492.056754 max=60999.105554
+    steady_successful_requests.....: 3168   4.336786/s
+    steady_ttft_ms.................: p(50)=502.088496   p(90)=502.900629   p(95)=503.227899   p(99)=508.021327  avg=502.481481   min=500.70081    max=1005.338901 
+    successful_requests............: 3479   4.762525/s
+    timestamp_diagnostic_bodies....: 1736   2.376471/s
+    ttft_ms........................: p(50)=502.083873   p(90)=502.886833   p(95)=503.195968   p(99)=507.810476  avg=502.44475    min=500.70081    max=1005.338901 
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s        avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s        avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3479
+    http_reqs......................: 3479   4.762525/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s        avg=1m0s         min=1m0s         max=1m1s        
+    iterations.....................: 3479   4.762525/s
+    vus............................: 6      min=6         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 2 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5206    7.129458/s
+    checks_succeeded...: 100.00% 5206 out of 5206
+    checks_failed......: 0.00%   0 out of 5206
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1726   2.363704/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.992694     min=0            max=25          
+    chunk_samples_added............: 110464 151.277082/s
+    gateway_overhead_ms............: p(50)=3.77798      p(90)=4.640974     p(95)=5.058164     p(99)=7.493567     avg=3.668673     min=-50.888307   max=29.143669   
+    steady_completed_requests......: 3168   4.338479/s
+    steady_http_duration_ms........: p(50)=60494.577669 p(90)=60496.376755 p(95)=60496.791972 p(99)=60498.714931 avg=60494.688339 min=60492.136814 max=60522.530646
+    steady_successful_requests.....: 3168   4.338479/s
+    steady_ttft_ms.................: p(50)=502.098319   p(90)=502.894289   p(95)=503.176104   p(99)=506.412512   avg=502.289629   min=500.830923   max=556.591415  
+    successful_requests............: 3480   4.765754/s
+    timestamp_diagnostic_bodies....: 1726   2.363704/s
+    ttft_ms........................: p(50)=502.098067   p(90)=502.881369   p(95)=503.154194   p(99)=506.505422   avg=502.285734   min=500.830923   max=556.591415  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3480
+    http_reqs......................: 3480   4.765754/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3480   4.765754/s
+    vus............................: 4      min=4         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 3 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5181    7.09142/s
+    checks_succeeded...: 100.00% 5181 out of 5181
+    checks_failed......: 0.00%   0 out of 5181
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1700   2.326851/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.99784      min=0            max=35          
+    chunk_samples_added............: 108800 148.91846/s
+    gateway_overhead_ms............: p(50)=3.773063     p(90)=4.613028     p(95)=4.852175     p(99)=6.295789     avg=3.698851     min=-20.047105   max=27.970692   
+    steady_completed_requests......: 3169   4.337524/s
+    steady_http_duration_ms........: p(50)=60494.468962 p(90)=60496.311215 p(95)=60496.721294 p(99)=60498.056822 avg=60494.644651 min=60491.948556 max=60549.197583
+    steady_successful_requests.....: 3169   4.337524/s
+    steady_ttft_ms.................: p(50)=502.073522   p(90)=502.820883   p(95)=503.189787   p(99)=507.440853   avg=502.289602   min=500.857245   max=557.58198   
+    successful_requests............: 3481   4.764569/s
+    timestamp_diagnostic_bodies....: 1700   2.326851/s
+    ttft_ms........................: p(50)=502.069948   p(90)=502.816473   p(95)=503.165984   p(99)=507.129259   avg=502.273224   min=500.857245   max=557.58198   
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3481
+    http_reqs......................: 3481   4.764569/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3481   4.764569/s
+    vus............................: 7      min=7         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 4 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5211    7.133856/s
+    checks_succeeded...: 100.00% 5211 out of 5211
+    checks_failed......: 0.00%   0 out of 5211
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1727   2.364262/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.999548     min=0            max=36          
+    chunk_samples_added............: 110528 151.312763/s
+    gateway_overhead_ms............: p(50)=3.774342     p(90)=4.584626     p(95)=4.910309     p(99)=6.154997     avg=3.69253      min=-19.588799   max=22.911807   
+    steady_completed_requests......: 3171   4.341097/s
+    steady_http_duration_ms........: p(50)=60494.480739 p(90)=60496.324867 p(95)=60496.780221 p(99)=60497.938016 avg=60494.638757 min=60491.995732 max=60551.566746
+    steady_successful_requests.....: 3171   4.341097/s
+    steady_ttft_ms.................: p(50)=502.077912   p(90)=502.873759   p(95)=503.176342   p(99)=504.831932   avg=502.232815   min=500.758189   max=564.631202  
+    successful_requests............: 3484   4.769594/s
+    timestamp_diagnostic_bodies....: 1727   2.364262/s
+    ttft_ms........................: p(50)=502.078355   p(90)=502.896715   p(95)=503.210184   p(99)=505.745771   avg=502.262026   min=500.758189   max=564.631202  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3484
+    http_reqs......................: 3484   4.769594/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3484   4.769594/s
+    vus............................: 7      min=7         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 5 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5171    7.078939/s
+    checks_succeeded...: 100.00% 5171 out of 5171
+    checks_failed......: 0.00%   0 out of 5171
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1688   2.31082/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11         p(99)=11           avg=9.998408    min=0            max=32       
+    chunk_samples_added............: 108032 147.892458/s
+    gateway_overhead_ms............: p(50)=3.752631     p(90)=4.571402     p(95)=4.804157   p(99)=6.481894     avg=3.664883    min=-28.307588   max=24.954589
+    steady_completed_requests......: 3170   4.339632/s
+    steady_http_duration_ms........: p(50)=60494.444235 p(90)=60496.316965 p(95)=60496.7831 p(99)=60498.323614 avg=60494.63165 min=60492.004916 max=60528.044
+    steady_successful_requests.....: 3170   4.339632/s
+    steady_ttft_ms.................: p(50)=502.081929   p(90)=502.847161   p(95)=503.155141 p(99)=506.392619   avg=502.27095   min=500.748277   max=538.23832
+    successful_requests............: 3483   4.768119/s
+    timestamp_diagnostic_bodies....: 1688   2.31082/s
+    ttft_ms........................: p(50)=502.07915    p(90)=502.844749   p(95)=503.147954 p(99)=506.072493   avg=502.261079  min=500.748277   max=538.23832
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s       p(99)=1m0s         avg=1m0s        min=1m0s         max=1m0s     
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s       p(99)=1m0s         avg=1m0s        min=1m0s         max=1m0s     
+    http_req_failed................: 0.00%  0 out of 3483
+    http_reqs......................: 3483   4.768119/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s       p(99)=1m0s         avg=1m0s        min=1m0s         max=1m0s     
+    iterations.....................: 3483   4.768119/s
+    vus............................: 7      min=7         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 6 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5242    7.174887/s
+    checks_succeeded...: 100.00% 5242 out of 5242
+    checks_failed......: 0.00%   0 out of 5242
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1759   2.407597/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.996003     min=0            max=30          
+    chunk_samples_added............: 112576 154.086239/s
+    gateway_overhead_ms............: p(50)=3.786207     p(90)=4.608422     p(95)=4.860108     p(99)=6.40688      avg=3.659156     min=-27.3528     max=37.154422   
+    steady_completed_requests......: 3170   4.338877/s
+    steady_http_duration_ms........: p(50)=60494.562504 p(90)=60496.369262 p(95)=60496.742602 p(99)=60498.129036 avg=60494.675124 min=60492.013293 max=60538.245369
+    steady_successful_requests.....: 3170   4.338877/s
+    steady_ttft_ms.................: p(50)=502.057093   p(90)=502.821388   p(95)=503.071765   p(99)=505.834267   avg=502.258114   min=500.628286   max=546.070987  
+    successful_requests............: 3483   4.767289/s
+    timestamp_diagnostic_bodies....: 1759   2.407597/s
+    ttft_ms........................: p(50)=502.053255   p(90)=502.818412   p(95)=503.070522   p(99)=506.070548   avg=502.257811   min=500.628286   max=546.070987  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3483
+    http_reqs......................: 3483   4.767289/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3483   4.767289/s
+    vus............................: 8      min=8         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 7 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5204    7.123971/s
+    checks_succeeded...: 100.00% 5204 out of 5204
+    checks_failed......: 0.00%   0 out of 5204
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1722   2.357317/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.999183    min=0            max=30          
+    chunk_samples_added............: 110208 150.868289/s
+    gateway_overhead_ms............: p(50)=3.858056     p(90)=4.672457     p(95)=5.034123     p(99)=6.937663     avg=3.769124    min=-24.559461   max=26.259516   
+    steady_completed_requests......: 3170   4.339544/s
+    steady_http_duration_ms........: p(50)=60494.610312 p(90)=60496.386409 p(95)=60496.769477 p(99)=60498.809222 avg=60494.68771 min=60492.007327 max=60531.160594
+    steady_successful_requests.....: 3170   4.339544/s
+    steady_ttft_ms.................: p(50)=502.055666   p(90)=502.866391   p(95)=503.153201   p(99)=506.390878   avg=502.242646  min=500.752294   max=533.345571  
+    successful_requests............: 3482   4.766654/s
+    timestamp_diagnostic_bodies....: 1722   2.357317/s
+    ttft_ms........................: p(50)=502.055666   p(90)=502.861937   p(95)=503.128121   p(99)=506.456833   avg=502.241595  min=500.752294   max=533.345571  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s        min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s        min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3482
+    http_reqs......................: 3482   4.766654/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s        min=1m0s         max=1m0s        
+    iterations.....................: 3482   4.766654/s
+    vus............................: 7      min=7         max=313
+    vus_max........................: 313    min=313       max=313
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 8 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5205    7.124911/s
+    checks_succeeded...: 100.00% 5205 out of 5205
+    checks_failed......: 0.00%   0 out of 5205
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1735   2.37497/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.996416     min=0            max=26          
+    chunk_samples_added............: 111040 151.998099/s
+    gateway_overhead_ms............: p(50)=3.787042     p(90)=4.597625     p(95)=4.836321     p(99)=6.206101     avg=3.634655     min=-21.696868   max=20.280453   
+    steady_completed_requests......: 3159   4.324225/s
+    steady_http_duration_ms........: p(50)=60494.459071 p(90)=60496.306706 p(95)=60496.694167 p(99)=60498.140586 avg=60494.610303 min=60492.063063 max=60528.399143
+    steady_successful_requests.....: 3159   4.324225/s
+    steady_ttft_ms.................: p(50)=502.066822   p(90)=502.820267   p(95)=503.115105   p(99)=506.581657   avg=502.253082   min=500.803196   max=544.408193  
+    successful_requests............: 3470   4.749941/s
+    timestamp_diagnostic_bodies....: 1735   2.37497/s
+    ttft_ms........................: p(50)=502.061315   p(90)=502.810854   p(95)=503.09754    p(99)=505.966917   avg=502.237358   min=500.803196   max=544.408193  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3470
+    http_reqs......................: 3470   4.749941/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3470   4.749941/s
+    vus............................: 5      min=5         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 9 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5206    7.127696/s
+    checks_succeeded...: 100.00% 5206 out of 5206
+    checks_failed......: 0.00%   0 out of 5206
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1735   2.375442/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.997893     min=0            max=27          
+    chunk_samples_added............: 111040 152.028317/s
+    gateway_overhead_ms............: p(50)=3.855802     p(90)=4.700336     p(95)=5.109981     p(99)=7.187619     avg=3.782539     min=-21.985713   max=24.710636   
+    steady_completed_requests......: 3159   4.325085/s
+    steady_http_duration_ms........: p(50)=60494.600865 p(90)=60496.434408 p(95)=60496.885301 p(99)=60498.597268 avg=60494.727453 min=60492.073407 max=60536.053603
+    steady_successful_requests.....: 3159   4.325085/s
+    steady_ttft_ms.................: p(50)=502.082328   p(90)=502.871981   p(95)=503.196319   p(99)=509.176791   avg=502.326237   min=500.782953   max=541.345179  
+    successful_requests............: 3471   4.752254/s
+    timestamp_diagnostic_bodies....: 1735   2.375442/s
+    ttft_ms........................: p(50)=502.082328   p(90)=502.858607   p(95)=503.188671   p(99)=508.147727   avg=502.309559   min=500.782953   max=541.345179  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3471
+    http_reqs......................: 3471   4.752254/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3471   4.752254/s
+    vus............................: 7      min=7         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 10 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5213    7.136124/s
+    checks_succeeded...: 100.00% 5213 out of 5213
+    checks_failed......: 0.00%   0 out of 5213
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1740   2.381902/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.998527     min=0            max=30          
+    chunk_samples_added............: 111360 152.441742/s
+    gateway_overhead_ms............: p(50)=3.789539     p(90)=4.715041     p(95)=5.179575     p(99)=7.606903     avg=3.692696     min=-23.44529    max=25.954928   
+    steady_completed_requests......: 3162   4.328491/s
+    steady_http_duration_ms........: p(50)=60494.568855 p(90)=60496.409851 p(95)=60496.889334 p(99)=60498.752568 avg=60494.867302 min=60492.128964 max=60998.904084
+    steady_successful_requests.....: 3162   4.328491/s
+    steady_ttft_ms.................: p(50)=502.104492   p(90)=502.893722   p(95)=503.24198    p(99)=508.946337   avg=502.471213   min=500.780744   max=1006.095047 
+    successful_requests............: 3473   4.754222/s
+    timestamp_diagnostic_bodies....: 1740   2.381902/s
+    ttft_ms........................: p(50)=502.101186   p(90)=502.892679   p(95)=503.24993    p(99)=508.912035   avg=502.450066   min=500.780744   max=1006.095047 
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3473
+    http_reqs......................: 3473   4.754222/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m1s        
+    iterations.....................: 3473   4.754222/s
+    vus............................: 11     min=10        max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 11 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5194    7.110246/s
+    checks_succeeded...: 100.00% 5194 out of 5194
+    checks_failed......: 0.00%   0 out of 5194
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1724   2.360043/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.99835      min=0            max=32          
+    chunk_samples_added............: 110336 151.042769/s
+    gateway_overhead_ms............: p(50)=3.810617     p(90)=4.610989     p(95)=4.929354     p(99)=6.495035     avg=3.715063     min=-43.326336   max=33.820002   
+    steady_completed_requests......: 3158   4.323095/s
+    steady_http_duration_ms........: p(50)=60494.576421 p(90)=60496.412407 p(95)=60496.803662 p(99)=60498.281976 avg=60494.669897 min=60492.034233 max=60517.939885
+    steady_successful_requests.....: 3158   4.323095/s
+    steady_ttft_ms.................: p(50)=502.071506   p(90)=502.832892   p(95)=503.10236    p(99)=507.725906   avg=502.246647   min=500.818515   max=528.548093  
+    successful_requests............: 3470   4.750203/s
+    timestamp_diagnostic_bodies....: 1724   2.360043/s
+    ttft_ms........................: p(50)=502.071069   p(90)=502.828672   p(95)=503.091122   p(99)=506.581727   avg=502.244532   min=500.818515   max=548.862697  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3470
+    http_reqs......................: 3470   4.750203/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3470   4.750203/s
+    vus............................: 3      min=3         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 12 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5195    7.110794/s
+    checks_succeeded...: 100.00% 5195 out of 5195
+    checks_failed......: 0.00%   0 out of 5195
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1724   2.359771/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=10.000073    min=0            max=29          
+    chunk_samples_added............: 110336 151.025332/s
+    gateway_overhead_ms............: p(50)=3.862634     p(90)=4.694176     p(95)=5.068634     p(99)=7.646135     avg=3.855694     min=-6.864799    max=41.013055   
+    steady_completed_requests......: 3159   4.323965/s
+    steady_http_duration_ms........: p(50)=60494.552525 p(90)=60496.375529 p(95)=60496.787644 p(99)=60498.749561 avg=60494.866297 min=60492.168359 max=61007.492631
+    steady_successful_requests.....: 3159   4.323965/s
+    steady_ttft_ms.................: p(50)=502.094733   p(90)=502.86518    p(95)=503.10707    p(99)=505.796035   avg=502.403781   min=500.812025   max=1004.809892 
+    successful_requests............: 3471   4.751023/s
+    timestamp_diagnostic_bodies....: 1724   2.359771/s
+    ttft_ms........................: p(50)=502.086466   p(90)=502.848306   p(95)=503.100209   p(99)=505.568266   avg=502.373298   min=500.812025   max=1004.809892 
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m1s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m1s        
+    http_req_failed................: 0.00%  0 out of 3471
+    http_reqs......................: 3471   4.751023/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m1s        
+    iterations.....................: 3471   4.751023/s
+    vus............................: 6      min=6         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 13 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5164    7.068993/s
+    checks_succeeded...: 100.00% 5164 out of 5164
+    checks_failed......: 0.00%   0 out of 5164
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1693   2.317546/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.998828     min=0           max=33          
+    chunk_samples_added............: 108352 148.322915/s
+    gateway_overhead_ms............: p(50)=3.766973     p(90)=4.615785     p(95)=4.995946     p(99)=7.726905     avg=3.655853     min=-30.557324  max=35.495568   
+    steady_completed_requests......: 3162   4.328458/s
+    steady_http_duration_ms........: p(50)=60494.403978 p(90)=60496.370426 p(95)=60496.835577 p(99)=60498.723512 avg=60494.646893 min=60492.01249 max=60545.227469
+    steady_successful_requests.....: 3162   4.328458/s
+    steady_ttft_ms.................: p(50)=502.093191   p(90)=502.863225   p(95)=503.129474   p(99)=506.164531   avg=502.272412   min=500.801557  max=554.760896  
+    successful_requests............: 3471   4.751447/s
+    timestamp_diagnostic_bodies....: 1693   2.317546/s
+    ttft_ms........................: p(50)=502.090927   p(90)=502.851203   p(95)=503.111484   p(99)=506.150725   avg=502.268497   min=500.801557  max=554.760896  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s        max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s        max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3471
+    http_reqs......................: 3471   4.751447/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s        max=1m0s        
+    iterations.....................: 3471   4.751447/s
+    vus............................: 5      min=5         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 14 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5223    7.149236/s
+    checks_succeeded...: 100.00% 5223 out of 5223
+    checks_failed......: 0.00%   0 out of 5223
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1753   2.399504/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.995944     min=0            max=29          
+    chunk_samples_added............: 112192 153.56827/s
+    gateway_overhead_ms............: p(50)=3.811626     p(90)=4.654054     p(95)=5.022327     p(99)=7.359062     avg=3.763201     min=-19.134989   max=33.377694   
+    steady_completed_requests......: 3160   4.325404/s
+    steady_http_duration_ms........: p(50)=60494.615894 p(90)=60496.379757 p(95)=60496.828066 p(99)=60498.583013 avg=60494.712916 min=60491.914371 max=60546.001423
+    steady_successful_requests.....: 3160   4.325404/s
+    steady_ttft_ms.................: p(50)=502.119632   p(90)=502.901924   p(95)=503.274313   p(99)=507.112242   avg=502.300018   min=500.78987    max=554.311085  
+    successful_requests............: 3470   4.749732/s
+    timestamp_diagnostic_bodies....: 1753   2.399504/s
+    ttft_ms........................: p(50)=502.117483   p(90)=502.892761   p(95)=503.245482   p(99)=506.542279   avg=502.294918   min=500.78987    max=554.311085  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3470
+    http_reqs......................: 3470   4.749732/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3470   4.749732/s
+    vus............................: 6      min=6         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+
+
+===== ORIGINAL SHARD 15 =====
+
+
+  █ THRESHOLDS 
+
+    checks
+    ✓ 'rate==1' rate=100.00%
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 5241    7.174071/s
+    checks_succeeded...: 100.00% 5241 out of 5241
+    checks_failed......: 0.00%   0 out of 5241
+
+    ✓ status 200
+    ✓ body ok
+
+    CUSTOM
+    body_samples...................: 1770   2.42284/s
+    chunk_interval_ms..............: p(50)=10           p(90)=11           p(95)=11           p(99)=11           avg=9.99646      min=0            max=32          
+    chunk_samples_added............: 113280 155.061771/s
+    gateway_overhead_ms............: p(50)=3.842053     p(90)=4.66197      p(95)=4.997953     p(99)=6.533746     avg=3.725471     min=-26.460076   max=23.973767   
+    steady_completed_requests......: 3159   4.324154/s
+    steady_http_duration_ms........: p(50)=60494.632652 p(90)=60496.338829 p(95)=60496.817519 p(99)=60498.119731 avg=60494.688472 min=60492.063481 max=60536.979699
+    steady_successful_requests.....: 3159   4.324154/s
+    steady_ttft_ms.................: p(50)=502.075296   p(90)=502.824064   p(95)=503.198956   p(99)=506.181677   avg=502.246946   min=500.716068   max=544.636957  
+    successful_requests............: 3471   4.751231/s
+    timestamp_diagnostic_bodies....: 1770   2.42284/s
+    ttft_ms........................: p(50)=502.073086   p(90)=502.813102   p(95)=503.184584   p(99)=506.175235   avg=502.24238    min=500.716068   max=544.636957  
+
+    HTTP
+    http_req_duration..............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+      { expected_response:true }...: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    http_req_failed................: 0.00%  0 out of 3471
+    http_reqs......................: 3471   4.751231/s
+
+    EXECUTION
+    iteration_duration.............: p(50)=1m0s         p(90)=1m0s         p(95)=1m0s         p(99)=1m0s         avg=1m0s         min=1m0s         max=1m0s        
+    iterations.....................: 3471   4.751231/s
+    vus............................: 7      min=7         max=312
+    vus_max........................: 312    min=312       max=312
+
+    NETWORK
+    data_received..................: 4.3 GB 5.9 MB/s
+    data_sent......................: 2.6 MB 3.5 kB/s
+
+
+

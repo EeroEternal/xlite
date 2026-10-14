@@ -1,0 +1,3 @@
+# Preserve original console padding and CSV CRLF bytes as evidence.
+flatlogs/*.log -text -whitespace
+comparison.csv -text -whitespace

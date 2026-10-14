@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **新增xlite-only A–F完整复测执行入口**（`scripts/loadtest/xlite_af_1013.py`）。用户暂停New API后，以独立新批次测量36个50%采样正式阶段及6个直连预检，复用已验证的隔离台架与冻结输入门禁；不启动New API、不拼接旧结果。有限服务日志采集失败不会阻断其他容器清理；新增范围/清理回归测试，生产实现与默认参数未改。
+  [完整结果](manual/xlite-af-results-2026-10-13.md)：A/B/C/E在r10、D/F在r11共36正式阶段零错误、672摘要复算。D直连曾客户端OOM，D/F加9GiB客户端软限制、硬资源不变；组级配置差异明确，不冒称单批执行。正式目录37个平铺log，详细工件另存。
+  [公开数据与Excel](manual/data/xrouter-af-2026-10-13/README.md)随测试分支归档，包含2881文件的完整证据包、37份平铺日志、CSV/JSON和SHA256清单；新增独立离线导出入口`sonic_af_1013_report.py`。展示名xrouter，保留原执行身份与两批次配置边界，不改网关实现。
+
+- **新增 New API Sonic / xlite 同机 A–F 复测计划与隔离执行器**（`docs/manual/sonic-af-retest-2026-10-13.md`、`scripts/loadtest/sonic_af_1013.{js,py}`）。固定六档低于20k、双方50%响应体采样，先进行100%语义冒烟及各组直连容量预检；独立网络与测试SQLite，轮流测量并在失败时停止，保留原始分片和资源记录。沿用旧xlite二进制以保持连续性；不改生产参数、不使用原台架外部数据库，也不预先宣称性能结果。
+
 - **新增 1013 B 组 single 复测任务与独立 loopback 执行器**（`docs/manual/single-retest-2026-10-13.md`、`scripts/loadtest/single_1013.{js,py}`、`single_1013_report.py`）。使用 24 个 Rust mock 进程、单个 xlite 与客户端 k6，固定 500ms 首块等待、500 帧、10ms 间隔和 `batch=1`；档位为 1k/2k/5k/10k/15k/18k，分开保留全量诊断与约 50% 响应体采样线。执行器记录版本/哈希、原始 summary、cgroup 资源样本和退出码，先验农场/客户端容量，失败不继续升档；随机采样采用样本数相关门槛，100% 采样要求精确全量。报告器仅接受全部阶段有效完成的工件，分片分位数不求平均；不改系统网络或现有部署。[结果报告](manual/single-retest-results-2026-10-13.md)：11 阶段零 HTTP/流校验失败、176 分片复算；记录旧配置 15k EOF 失败、CPU 节流和顶档在途不足。**边界**：历史 New API 目录缺脚本/镜像/mock 元信息，本次没有 20k 同档测试；QPS 超过历史参考不等于严格同口径的产品胜负。
 
 ## [0.5.5] - 2026-10-11

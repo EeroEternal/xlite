@@ -1,0 +1,29 @@
+{
+  "display_product": "xrouter",
+  "executed_gateway_identity": "xlite",
+  "source_commit": "ad4e65342d00f07f2ec5cc93224089e28084b44a",
+  "coverage": "Whole group curves from two terminal executions; not a single combined DONE",
+  "group_sources": {
+    "A": "r10",
+    "B": "r10",
+    "C": "r10",
+    "D": "r11",
+    "E": "r10",
+    "F": "r11"
+  },
+  "formal_stages": 36,
+  "preflight_stages": 6,
+  "raw_valid_stage_summaries": 672,
+  "formal_requests": 10549562,
+  "formal_body_samples": 5276182,
+  "raw_archive": "raw-evidence.tgz",
+  "raw_archive_sha256": "30b78a563a6ac03be445ac4e6f61a03ccace0f3b0d26ca03771bc5b009886f91",
+  "raw_archive_file_count": 2881,
+  "original_batch_archive_sha256": {
+    "r10.tgz": "3a5437d2442c4417aa3deb2cf188d50fc7f5b4e2c8c165a7e2601e7e1f29b606",
+    "r11.tgz": "3365566e33ab813c65484f1036edf04267b84b709025f3eac8139ad196a80e22"
+  },
+  "archive_notes": "Files are byte-identical to assembled evidence. Only tar ownership and modification-time metadata are normalized. Original batch tgz files are not duplicated; their full extracted source files are included.",
+  "workbook_sha256": "c709ab04262ebeaa00d50a58c55bd49d2b8b6a0e6f951b05581c5909564d1ca4",
+  "report_exporter_sha256": "519ecf29a74f9779dd0694d2b404908d5534da2037627f4592f58219743c7858"
+}
