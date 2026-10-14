@@ -19,6 +19,8 @@
 | [dev/loadtest-report-2026-09-29.md](dev/loadtest-report-2026-09-29.md) | 现场全量压测基准与深度性能分析报告（6 大场景 110 组阶梯全量数据，组 A 顶出 3,355 QPS / 112 万请求，长短流优化空间剖析） |
 | [dev/loadtest-df-data-appendix-2026-10.md](dev/loadtest-df-data-appendix-2026-10.md) | D/F 战役实测数据全录（44 轮 k6 全指标、帧级证据、资源账、构建/配置指纹） |
 | [dev/loadtest-df-optimization-plan-2026-10.md](dev/loadtest-df-optimization-plan-2026-10.md) | D/F 长流优化方案：取消传播、连接分散实验、资源观测与验收标准（P0~P3 与 §8 四轮验收已执行，数据见附录） |
+| [dev/loadtest-1006-xlite-vs-newapi-2026-10.md](dev/loadtest-1006-xlite-vs-newapi-2026-10.md) | 1006 轮 xlite vs New API：高载在途流 1.6×–6.7×；同批数据里一次未归因的低载 TTFT 抬高（555/605→707ms） |
+| [dev/loadtest-haproxy-205ms-2026-10.md](dev/loadtest-haproxy-205ms-2026-10.md) | 归因 HAProxy 跳的 ~205ms 首字延迟（经 HAProxy 708ms vs 直连 503ms）、对照纪律，与 AI 流式网关的代理配置 |
 | [dev/performance-tuning-guide.md](dev/performance-tuning-guide.md) | Xlite 高并发与极限负载调优实战指南（参数矩阵、长短流策略、四层链路协同与打擂话术） |
 | [dev/rfc-adaptive-h2-pool-architecture.md](dev/rfc-adaptive-h2-pool-architecture.md) | RFC: HTTP/2 自适应最小负载连接池架构设计方案（P2C 调度、Soft-Cap 异步预热、长短流隔离，供外部专家审计） |
 | [../deploy/README.md](../deploy/README.md) | 24 mock + Redis，Docker 镜像启动 |
