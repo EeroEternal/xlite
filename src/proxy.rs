@@ -11,7 +11,10 @@ use futures_util::StreamExt;
 use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::time::Instant;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use crate::admin::AppState;
 use crate::store::Channel;
@@ -204,10 +207,10 @@ async fn try_channel(
     if should_failover(upstream.status, false) {
         // Read the status before draining: `drain_error_body` consumes `upstream`.
         let status = upstream.status;
-        let _ = drain_error_body(upstream).await;
+        let _ = drain_error_body(upstream, state.config.upstream_stall_timeout).await;
         return Err(format!("upstream {} returned {}", channel.base_url, status));
     }
-    Ok(forward_response(upstream, started).await)
+    Ok(forward_response(upstream, started, state.config.upstream_stall_timeout).await)
 }
 
 /// Response header stamped when `XLITE_UPSTREAM_TTFT_HEADER` is on.
@@ -219,7 +222,11 @@ fn with_head<S: Stream>(head: Option<S::Item>, rest: S) -> impl Stream<Item = S:
     stream::iter(head).chain(rest)
 }
 
-async fn forward_response(upstream: UpstreamResponse, started: Option<Instant>) -> Response {
+async fn forward_response(
+    upstream: UpstreamResponse,
+    started: Option<Instant>,
+    stall_timeout: Duration,
+) -> Response {
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY));
     let content_type = upstream
@@ -233,7 +240,7 @@ async fn forward_response(upstream: UpstreamResponse, started: Option<Instant>) 
     // see its client-visible first byte move later, which is why this is off by
     // default and why it never feeds the V88 comparison table: New API emits no
     // equivalent header, so the column would be one-sided (docs/manual/v88-rig.md).
-    let mut body = upstream.body;
+    let mut body = StallGuard::new(upstream.body, stall_timeout);
     let mut head: Option<Result<Bytes, std::io::Error>> = None;
     if let Some(t0) = started {
         head = body.next().await;
@@ -253,11 +260,88 @@ async fn forward_response(upstream: UpstreamResponse, started: Option<Instant>) 
         })
 }
 
-/// Read (and discard) an error body before failing over, capped so a broken
-/// upstream streaming an unbounded error body cannot stall the failover.
-async fn drain_error_body(upstream: UpstreamResponse) {
+/// End a response body with a `TimedOut` error when the upstream has produced
+/// no bytes for `timeout`, so a hung upstream cannot park a gateway stream (and
+/// its pool lease) until the client gives up.
+///
+/// The deadline is re-armed on **every** item, so it only fires on true
+/// silence — a slow but progressing stream keeps resetting it. `Duration::ZERO`
+/// disables the guard entirely (the pre-existing "wait as long as the upstream
+/// does" behaviour). See [`crate::config::Config::upstream_stall_timeout`].
+struct StallGuard<S> {
+    inner: S,
+    timeout: Duration,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    fired: bool,
+}
+
+impl<S> StallGuard<S> {
+    fn new(inner: S, timeout: Duration) -> Self {
+        let sleep = (!timeout.is_zero()).then(|| Box::pin(tokio::time::sleep(timeout)));
+        Self {
+            inner,
+            timeout,
+            sleep,
+            fired: false,
+        }
+    }
+}
+
+impl<S> Stream for StallGuard<S>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.fired {
+            return Poll::Ready(None);
+        }
+        match Stream::poll_next(Pin::new(&mut this.inner), cx) {
+            Poll::Ready(Some(item)) => {
+                if let Some(sleep) = this.sleep.as_mut() {
+                    sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + this.timeout);
+                }
+                Poll::Ready(Some(item))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => {
+                // Polling the timer with the caller's `cx` after `inner` yields
+                // `Pending` is what makes a silent upstream wake us — and polling
+                // `inner` first ensures data ready at the deadline is delivered
+                // instead of being truncated by the timer.
+                if let Some(sleep) = this.sleep.as_mut()
+                    && sleep.as_mut().poll(cx).is_ready()
+                {
+                    this.fired = true;
+                    this.sleep = None;
+                    return Poll::Ready(Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("upstream produced no data for {}s", this.timeout.as_secs()),
+                    ))));
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Read (and discard) an error body before failing over, capped in both size and
+/// per-chunk silence so a broken upstream streaming an unbounded or hung error
+/// body cannot stall the failover.
+async fn drain_error_body(upstream: UpstreamResponse, stall_timeout: Duration) {
+    drain_stream(upstream.body, stall_timeout).await;
+}
+
+async fn drain_stream<S>(stream: S, stall_timeout: Duration)
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
     const MAX_DRAIN: usize = 64 * 1024;
-    let mut body = upstream.body;
+    let mut body = StallGuard::new(stream, stall_timeout);
     let mut seen = 0usize;
     while let Some(chunk) = body.next().await {
         match chunk {
@@ -336,6 +420,100 @@ mod tests {
 
         let out: Vec<u8> = with_head(None, stream::iter(vec![2u8, 3])).collect().await;
         assert_eq!(out, vec![2, 3], "gate off must leave the stream untouched");
+    }
+
+    /// The whole point of the guard: a silent upstream must not park the stream
+    /// forever. It fires once, ends the stream, and does not error repeatedly.
+    #[tokio::test(start_paused = true)]
+    async fn stall_guard_fires_after_silence_and_ends_the_stream() {
+        let inner = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(b"a"))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let mut guarded = StallGuard::new(inner, Duration::from_secs(5));
+
+        assert_eq!(
+            &guarded.next().await.expect("first chunk").unwrap()[..],
+            b"a",
+            "data before the deadline passes through untouched"
+        );
+        let err = guarded
+            .next()
+            .await
+            .expect("the guard has to end the stream")
+            .expect_err("after a silent gap the body must carry the timeout error");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            guarded.next().await.is_none(),
+            "the stream must be finished, not erroring on every poll"
+        );
+    }
+
+    /// Every arriving chunk must re-arm the deadline: a stream that emits at
+    /// t=0s, t=4s, t=8s under a 5s stall timeout must deliver all three chunks
+    /// and only time out at t=13s (not at the initial t=5s deadline).
+    #[tokio::test(start_paused = true)]
+    async fn stall_guard_resets_deadline_on_every_chunk() {
+        let t0 = tokio::time::Instant::now();
+        let inner = stream::unfold(0u32, |step| async move {
+            match step {
+                0 => Some((Ok(Bytes::from_static(b"a")), 1)),
+                1 => {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    Some((Ok(Bytes::from_static(b"b")), 2))
+                }
+                2 => {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    Some((Ok(Bytes::from_static(b"c")), 3))
+                }
+                _ => std::future::pending().await,
+            }
+        });
+        let mut guarded = StallGuard::new(Box::pin(inner), Duration::from_secs(5));
+
+        assert_eq!(&guarded.next().await.unwrap().unwrap()[..], b"a");
+        assert_eq!(&guarded.next().await.unwrap().unwrap()[..], b"b");
+        assert_eq!(&guarded.next().await.unwrap().unwrap()[..], b"c");
+        assert_eq!(t0.elapsed(), Duration::from_secs(8));
+
+        let err = guarded
+            .next()
+            .await
+            .expect("silence after third chunk must fire")
+            .expect_err("must be TimedOut");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(
+            t0.elapsed(),
+            Duration::from_secs(13),
+            "timer must fire 5s after the last chunk (t=8s + 5s), not at t=5s"
+        );
+    }
+
+    /// `Duration::ZERO` is the default and must reproduce the old behaviour:
+    /// wait as long as the upstream does, with no timer at all.
+    #[tokio::test(start_paused = true)]
+    async fn stall_guard_disabled_never_fires() {
+        let inner = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(b"a"))])
+            .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        let mut guarded = StallGuard::new(inner, Duration::ZERO);
+        assert!(guarded.next().await.is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3600), guarded.next())
+                .await
+                .is_err(),
+            "a disabled guard must keep waiting, like the pre-change code did"
+        );
+    }
+
+    /// An upstream that returns 5xx headers and then stalls mid-error-body must
+    /// not block failover forever when `upstream_stall_timeout` is configured.
+    #[tokio::test(start_paused = true)]
+    async fn drain_stream_stops_when_error_body_stalls() {
+        let t0 = tokio::time::Instant::now();
+        let stalled_err_body = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"err",
+        ))])
+        .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+        drain_stream(stalled_err_body, Duration::from_secs(5)).await;
+        assert_eq!(t0.elapsed(), Duration::from_secs(5));
     }
 
     #[test]

@@ -397,6 +397,8 @@ mod tests {
             upstream_stream_cap: usize::MAX,
             catalog_reload_secs: 0,
             upstream_ttft_header: false,
+            upstream_stall_timeout: std::time::Duration::ZERO,
+            upstream_header_timeout: std::time::Duration::ZERO,
         };
         Catalog::connect(&cfg).await.expect("connect")
     }

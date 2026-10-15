@@ -1,6 +1,7 @@
 //! Upstream HTTP client. h2c uses the native pool (Go-style stream accounting);
 //! everything else uses reqwest.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -121,6 +122,9 @@ pub struct Upstream {
     /// Native HTTP/1.1 pool — it owns every cleartext `http://` upstream.
     h1: Arc<H1Pool>,
     http: Client,
+    /// Bound on the request→response-headers wait (see
+    /// [`Config::upstream_header_timeout`]). `Duration::ZERO` = unbounded.
+    header_timeout: Duration,
 }
 
 pub struct UpstreamBody {
@@ -189,6 +193,34 @@ impl Upstream {
             pool: Arc::new(pool),
             h1,
             http,
+            header_timeout: cfg.upstream_header_timeout,
+        }
+    }
+
+    /// Bound the "request sent → response headers received" wait by
+    /// [`Config::upstream_header_timeout`]; a pass-through when it is
+    /// `Duration::ZERO`.
+    ///
+    /// Only the headers wait is wrapped: the dial and the pool-queue wait happen
+    /// before this point, so legitimate backpressure is not turned into a 502.
+    async fn await_headers<T, E>(
+        &self,
+        fut: impl Future<Output = Result<T, E>>,
+        what: &str,
+    ) -> Result<T>
+    where
+        E: std::fmt::Display,
+    {
+        if self.header_timeout.is_zero() {
+            return fut.await.map_err(|e| anyhow::anyhow!("{what}: {e}"));
+        }
+        match tokio::time::timeout(self.header_timeout, fut).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(anyhow::anyhow!("{what}: {e}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "upstream returned no response headers within {}s",
+                self.header_timeout.as_secs()
+            )),
         }
     }
 
@@ -269,10 +301,9 @@ impl Upstream {
             builder = builder.header(name.clone(), value.clone());
         }
         let request = builder.body(Full::new(body)).context("build h1 request")?;
-        let response = lease
-            .send_request(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("h1 send_request: {e}"))?;
+        let response = self
+            .await_headers(lease.send_request(request), "h1 send_request")
+            .await?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -328,9 +359,7 @@ impl Upstream {
                 .map_err(|e| anyhow::anyhow!("h2 send_data: {e}"))?;
         }
         drop(send_stream);
-        let response = response_future
-            .await
-            .map_err(|e| anyhow::anyhow!("h2 response: {e}"))?;
+        let response = self.await_headers(response_future, "h2 response").await?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -371,7 +400,9 @@ impl Upstream {
         for (name, value) in extra {
             req = req.header(name.clone(), value.clone());
         }
-        let response = req.body(body).send().await.context("upstream request")?;
+        let response = self
+            .await_headers(req.body(body).send(), "upstream request")
+            .await?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -524,6 +555,8 @@ mod tests {
             upstream_stream_cap: 250,
             catalog_reload_secs: 0,
             upstream_ttft_header: false,
+            upstream_stall_timeout: Duration::ZERO,
+            upstream_header_timeout: Duration::ZERO,
         };
         let up = Upstream::new(&cfg);
         assert!(up.pool_stats().is_empty());
@@ -638,6 +671,66 @@ mod tests {
         assert_eq!(
             upstream_url("http://h:1", "api/v1/chat"),
             "http://h:1/api/v1/chat"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_headers_times_out_pending_future_and_passes_ready_through() {
+        let mut cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: true,
+            admin_password: "x".into(),
+            session_secret: None,
+            max_conns_per_host: 3,
+            h1_max_conns_per_host: 3,
+            upstream_stream_cap: 250,
+            catalog_reload_secs: 0,
+            upstream_ttft_header: false,
+            upstream_stall_timeout: Duration::ZERO,
+            upstream_header_timeout: Duration::from_secs(5),
+        };
+        let up = Upstream::new(&cfg);
+
+        // Ready Ok and Err pass through with the caller's context label.
+        let ok = up
+            .await_headers(std::future::ready(Ok::<u32, &str>(42)), "h2 response")
+            .await
+            .unwrap();
+        assert_eq!(ok, 42);
+        let err = up
+            .await_headers(std::future::ready(Err::<u32, &str>("boom")), "h2 response")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("h2 response: boom"), "{err}");
+
+        // A pending future fails once `header_timeout` elapses.
+        let t0 = tokio::time::Instant::now();
+        let timed_out = up
+            .await_headers(std::future::pending::<Result<u32, &str>>(), "h2 response")
+            .await
+            .unwrap_err();
+        assert_eq!(t0.elapsed(), Duration::from_secs(5));
+        assert!(
+            timed_out
+                .to_string()
+                .contains("upstream returned no response headers within 5s"),
+            "{timed_out}"
+        );
+
+        // `Duration::ZERO` disables the header timeout completely.
+        cfg.upstream_header_timeout = Duration::ZERO;
+        let up_disabled = Upstream::new(&cfg);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(3600),
+                up_disabled
+                    .await_headers(std::future::pending::<Result<u32, &str>>(), "h2 response"),
+            )
+            .await
+            .is_err(),
+            "disabled header_timeout must keep waiting"
         );
     }
 }

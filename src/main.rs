@@ -134,6 +134,8 @@ async fn run_server() -> Result<()> {
             config.upstream_stream_cap.to_string()
         },
         upstream_ttft_header = config.upstream_ttft_header,
+        upstream_stall_timeout_secs = config.upstream_stall_timeout.as_secs(),
+        upstream_header_timeout_secs = config.upstream_header_timeout.as_secs(),
         "starting"
     );
     for warning in legacy_env_warnings_from_env() {

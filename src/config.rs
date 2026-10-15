@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 
 #[derive(Clone, Debug)]
@@ -40,6 +42,37 @@ pub struct Config {
     /// default, and never used for the V88 comparison table: New API emits no
     /// equivalent header, so the column would be one-sided.
     pub upstream_ttft_header: bool,
+    /// End an upstream response body with an error when it has produced no bytes
+    /// for this long. `Duration::ZERO` (the default, from an unset / invalid / 0
+    /// env) keeps the pre-existing behaviour: wait as long as the upstream does.
+    ///
+    /// This is a **liveness guard, not a throughput knob**: it bounds how long a
+    /// hung upstream can park a gateway stream (and its pool lease), at the cost
+    /// of turning the hang into an error. It must therefore be set above the
+    /// longest legitimate upstream silence (a reasoning model can pause tens of
+    /// seconds), which is why it is off unless an operator opts in.
+    pub upstream_stall_timeout: Duration,
+    /// Give up when the upstream has not returned **response headers** within
+    /// this long after the request was sent. `Duration::ZERO` (the default)
+    /// disables it.
+    ///
+    /// This is the header-phase counterpart of
+    /// [`Config::upstream_stall_timeout`], for an upstream that accepts a stream
+    /// and then never answers. It deliberately bounds only the request→headers
+    /// wait: the dial and the pool-queue wait are **not** covered, so legitimate
+    /// backpressure under load is not turned into errors. Because header timeouts
+    /// happen before any client byte is written, `try_channel` fails over to the
+    /// next candidate channel; if all `N` candidates hang on headers, the worst-case
+    /// wait before a final `502` scales to `N × upstream_header_timeout`.
+    pub upstream_header_timeout: Duration,
+}
+
+/// Parse a `*_SECS` duration env value: a positive integer number of seconds, or
+/// [`Duration::ZERO`] (disabled) for unset / invalid / `0`.
+fn timeout_secs_or_zero(raw: Option<&str>) -> Duration {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::ZERO)
 }
 
 /// Parse a positive-integer env value. `None`/invalid/`0` fall back to
@@ -97,6 +130,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
         let upstream_ttft_header = env_flag("XLITE_UPSTREAM_TTFT_HEADER");
+        let upstream_stall_timeout = timeout_secs_or_zero(
+            std::env::var("XLITE_UPSTREAM_STALL_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        );
+        let upstream_header_timeout = timeout_secs_or_zero(
+            std::env::var("XLITE_UPSTREAM_HEADER_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        );
         Ok(Self {
             database_url,
             redis_url,
@@ -109,6 +152,8 @@ impl Config {
             upstream_stream_cap,
             catalog_reload_secs,
             upstream_ttft_header,
+            upstream_stall_timeout,
+            upstream_header_timeout,
         })
     }
 }
@@ -300,6 +345,18 @@ mod tests {
         assert_eq!(positive_or(Some("-1".into()), usize::MAX), usize::MAX);
         // Same helper backs MAX_CONNS_PER_HOST's default of 32.
         assert_eq!(positive_or(None, 32), 32);
+    }
+
+    #[test]
+    fn timeout_secs_or_zero_is_off_unless_explicitly_set() {
+        // Unset / invalid / 0 all mean "wait as long as the upstream does".
+        assert_eq!(timeout_secs_or_zero(None), Duration::ZERO);
+        assert_eq!(timeout_secs_or_zero(Some("0")), Duration::ZERO);
+        assert_eq!(timeout_secs_or_zero(Some("abc")), Duration::ZERO);
+        assert_eq!(timeout_secs_or_zero(Some("-5")), Duration::ZERO);
+        // A positive value is honoured verbatim.
+        assert_eq!(timeout_secs_or_zero(Some("120")), Duration::from_secs(120));
+        assert_eq!(timeout_secs_or_zero(Some(" 90 ")), Duration::from_secs(90));
     }
 
     #[test]
