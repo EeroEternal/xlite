@@ -149,7 +149,7 @@ diff -u scripts/loadtest/k6/k6.js deploy/v88/k6.js
    那份没有 `ts`、没有 finish/usage chunk（`out=500` 只有 **501 行 / 91 014 B**，而口径是
    **502 行 / ≈100 736 B**），`ttft` 带 `×U(0.5,1.5)` 抖动、默认 `ttft=0 / batch=0`
    （裸二进制是精确 `ttft=500 / batch=1`）
-2. 起 mock：**路数与 `MOCKS` 环境变量一致**（24 口 = `8081-8104`）、`--network host`、
+2. 起 mock：**路数与 `MOCKS` 环境变量一致**（改口数只改 `MOCKS`，然后 `./start_farm.sh`）、`--network host`、
    `--ulimit nofile=1048576:1048576`、`--entrypoint /mock-llm`、
    `-v …/mock-llm-linux-usage:/mock-llm:ro`（裸二进制 sha256 `dc0f4316…`）；
    客户现成的 `start-mocks.sh` 只有 **12** 口。完整命令与逐口回读见 [`../STARTUP.md`](../STARTUP.md) §1

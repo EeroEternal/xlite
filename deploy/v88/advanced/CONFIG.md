@@ -291,7 +291,7 @@ sysctl -n net.core.somaxconn                                          # 期望 6
 | 4 | 22 / 29 | `nf_conntrack_max`（表满即丢包 → RST / 超时） | ≥ 2~4× 峰值连接数 |
 | 5 | 22 | `somaxconn` / `tcp_max_syn_backlog`（SYN / accept 队列） | 65535 |
 | 6 | 29 | `ip_local_port_range` / `tcp_tw_reuse`（k6 的**出站**端口） | `1024 65535` / `1` |
-| 7 | 29 | **24 口 mock 容器 `nofile`** —— 每口要持有「在途请求数 ÷ 口数」条**入站**连接；最坏情况按「全部 VU 同时占连接」估：现场 55000 ÷ 24 ≈ **2,292** | 1048576（**1024 / 4096 这类默认值会先把农场压垮**，且它的症状和 ④ 的表满很难区分） |
+| 7 | 29 | **mock 容器 `nofile`** —— 口数 = `MOCKS` 展开数；每口要持有「在途请求数 ÷ 口数」条**入站**连接；最坏 55000 ÷ 口数（24 口 ≈ 2292，36 口 ≈ 1528） | 1048576（**1024 / 4096 这类默认值会先把农场压垮**，且它的症状和 ④ 的表满很难区分） |
 | + | 全部 | `systemctl show docker -p LimitNOFILE` —— 它封顶**任何**容器能拿到的上限，所以上面 2 / 3 / 7 三行不可能超过它 | 1048576 |
 
 ```sh
@@ -303,7 +303,7 @@ grep -i 'open files' /proc/$k6p/limits                              # ③
 sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max   # ④
 sysctl net.core.somaxconn net.ipv4.tcp_max_syn_backlog              # ⑤
 sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse           # ⑥
-for c in $(docker ps --filter name=mock --format '{{.Names}}'); do   # 29：24 口农场
+for c in $(docker ps --filter name=mock --format '{{.Names}}'); do   # 29：MOCKS 展开后的农场
   echo -n "$c "; docker exec "$c" sh -c "grep -i 'open files' /proc/1/limits"
 done                                                                 # ⑦
 ```
@@ -360,34 +360,12 @@ systemctl daemon-reload && systemctl restart haproxy    # ★ reload 不重读 L
 **网关没有目录时每个请求都回 401**（启动不会自动灌入）；现场那台 Redis 里已经有目录的话，
 `redis-cli -h 10.56.88.22 get xlite:catalog` 有内容就跳过本节。
 
-生成 24 条 upstream 指向 mock 机的目录 YAML（`host` 改成你的 mock 机；现场 mock 在 `:8081-8104`）：
+生成与 `MOCKS` 同口数的目录 YAML（`MOCK_HOST` 改成你的 mock 机）：
 
 ```sh
-python3 - <<'PY' > /tmp/mock-24.custom.yaml
-host = "10.56.88.29"          # ← mock 机
-ports = range(8081, 8105)
-print("providers:")
-for p in ports:
-    print(f"  - name: mock-{p}")
-    print(f"    base_url: http://{host}:{p}")
-    print('    api_key: ""')
-    print("    enabled: true")
-print("models:")
-print("  - name: mock")
-print("    enabled: true")
-print("    channels:")
-for p in ports:
-    print(f"      - provider: mock-{p}")
-    print("        upstream_model: mock")   # mock 的模型 id
-    print("        weight: 1")
-    print("        priority: 0")
-    print("        enabled: true")
-print("api_keys:")
-print("  - name: loadtest")
-print("    key: sk-loadtest")
-print("    models: []")
-print("    enabled: true")
-PY
+# 与起农场同一份 MOCKS：32 口改成 8081-8112，24 口 8081-8104
+MOCKS=8081-8116 MOCK_HOST=10.56.88.29 \
+  ./start_farm.sh catalog > /tmp/farm.yaml
 ```
 
 导入（在能连到那台 Redis 的机器上跑；镜像换成本机实际 tag）：
@@ -395,12 +373,12 @@ PY
 ```sh
 docker run --rm --network host \
   -e REDIS_URL='redis://10.56.88.22:6379' \
-  -v /tmp/mock-24.custom.yaml:/tmp/cat.yaml:ro \
+  -v /tmp/farm.yaml:/tmp/cat.yaml:ro \
   xlite:0.5.5 import /tmp/cat.yaml
 ```
 
-⚠️ `--replace` 是**先清空整表再导**（已有的 provider / model / key 全没）——只想合并就别加它。
-导入后核对：`docker exec redis redis-cli get xlite:catalog | grep -c mock-` → 期望 `24`。
+⚠️ `--replace` 是**先清空整表再导**（已有的 provider / model / key 全没）——只想合并就别加它。扩口时用新 YAML **不加** `--replace`，合并导入只补缺的 provider/channel。
+导入后核对：`docker exec redis redis-cli get xlite:catalog | grep -c mock-` → 期望等于 `MOCKS` 展开数。
 
 ---
 

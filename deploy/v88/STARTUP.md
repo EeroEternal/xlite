@@ -6,13 +6,13 @@
 | --- | --- | --- |
 | `10.56.88.22` | 现有 Redis + HAProxy | 6379 / 8005（双节点）/ 8006（单节点） |
 | `10.56.88.24`、`10.56.88.26` | xlite，两台配置一致 | 8080 |
-| `10.56.88.29` | 24 个 h2c mock + k6 | 8081–8104 |
+| `10.56.88.29` | h2c mock + k6 | 口数 = `MOCKS`（例 `8081-8116`） |
 
 链路：`k6 → HAProxy → xlite → h2c mock`。准备好两台网关上的 `xlite:0.5.5` 镜像，以及 `.29` 上的 mock 包和 k6 镜像。`deploy/v88/` 必须整目录拷贝。
 
 ## 1. 启动 mock（在 .29）
 
-以下用于首次启动；已有 `mock51h-*` 容器时先确认是否需要重建，不要重复创建。
+口数只由 **`MOCKS`**（或成对的 `MOCK_FIRST` / `MOCK_LAST`）决定。24 / 32 / 36 口都是改这一处，不要改脚本。`./start_farm.sh` 幂等：已在跑的口跳过，停着的唤醒，没有的才新建。
 
 ```bash
 MOCK_BUNDLE=/path/to/mock-bundle   # 改成客户 mock 包目录
@@ -21,27 +21,20 @@ mkdir -p /root/loadtest/mock
 cp "$MOCK_BUNDLE/mock-llm-linux-usage" /root/loadtest/mock/
 chmod +x /root/loadtest/mock/mock-llm-linux-usage
 
-for p in $(seq 8081 8104); do
-  docker run -d --name "mock51h-$p" --network host --restart unless-stopped \
-    --ulimit nofile=1048576:1048576 \
-    -v /root/loadtest/mock/mock-llm-linux-usage:/mock-llm:ro \
-    --entrypoint /mock-llm -e PORT="$p" mock-llm:h2c
-done
-
-sleep 2
-OK=0
-for p in $(seq 8081 8104); do
-  curl -fsS -m 3 "http://127.0.0.1:$p/health" | grep -q ok && OK=$((OK+1))
-done
-echo "mock 健康: $OK/24"           # 必须是 24/24
+export MOCKS=8081-8116            # 32 口 → 8081-8112；24 口 → 8081-8104
+# 等价：export MOCK_FIRST=8081 MOCK_LAST=8116
+./start_farm.sh                   # 缺的口才建；已有 24 口再扩到 36 也走这一条
+./start_farm.sh status            # health 与 _config 必须 N/N
 ```
+
+`MOCKS` 比实起的口多时，driver 会在 preflight 报 `有 N/M 口读不到口径` 并中止——这是有意 fail-loud，不要把 MOCKS 改小来绕过。多起的口还要进网关目录（见 §2），否则只被 driver 改 `_config`、接不到流量。口数与历史 24 口对标表不可混算。缩口数不会删多出来的容器。
 
 ## 2. Redis 与目录
 
 - 用现有 `redis://10.56.88.22:6379`，**不要新起 Redis、不要改它的启动参数**。
 - 当前不支持 `redis+sentinel://`。
-- 目录已有时直接复用；确认通道指向 `.29:8081–8104`，记下模型名和有效 API Key。
-- 空目录才按 [`advanced/CONFIG.md` §4.1](advanced/CONFIG.md#41-空-redis-时怎么灌目录) 导入。不要对已有目录使用 `--replace`，它会清空目录。
+- 目录通道数必须与 `MOCKS` 展开数一致。已有目录缺通道时按 [`advanced/CONFIG.md` §4.1](advanced/CONFIG.md#41-空-redis-时怎么灌目录) 用**同一份 `MOCKS`** 生成 YAML，**不要 `--replace`**（会清空目录），合并导入只补缺的 provider/channel。记下模型名和有效 API Key。
+- 空目录才按同节生成 YAML 后导入。
 
 ## 3. 启动网关（在 .24、.26 各执行一次）
 
@@ -136,7 +129,7 @@ read -r -s -p '压测 API Key: ' TOKEN
 printf '\n'
 export TOKEN
 export MODEL=mock-model           # 必须与目录里的模型名一致；§2 导入示例为 mock
-export MOCKS=8081-8104
+export MOCKS=8081-8116            # 必须与 §1 起农场同一行
 export K6_IMAGE=grafana/k6:latest  # 本机必须已有；离线先 docker load
 export K6_MEM=45g                 # .29 历史实测约 61 GiB，还要留内存给 mock 和系统
 export RESULT_DIR=/root/v88-run1  # 一张阶梯一个新目录，后续各组共用
