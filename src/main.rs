@@ -17,7 +17,7 @@ use xlite::admin::{self, AppState};
 use xlite::auth::Sessions;
 use xlite::catalog::Catalog;
 use xlite::catalog::yaml::{self, ImportMode};
-use xlite::config::{Config, fd_budget_warning, nofile_soft_limit};
+use xlite::config::{Config, fd_budget_warning, legacy_env_warnings_from_env, nofile_soft_limit};
 use xlite::proxy;
 use xlite::store::Store;
 use xlite::upstream::Upstream;
@@ -111,6 +111,11 @@ async fn cmd_export(path: Option<&str>) -> Result<()> {
 async fn run_server() -> Result<()> {
     init_logging();
     let config = Config::from_env()?;
+    let tokio_worker_threads = std::env::var("TOKIO_WORKER_THREADS")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "default(nproc)".to_string());
     info!(
         gateway = "xlite",
         version = env!("CARGO_PKG_VERSION"),
@@ -118,6 +123,8 @@ async fn run_server() -> Result<()> {
         h2c = config.h2c,
         redis = config.redis_url.is_some(),
         database = %config.database_url,
+        tokio_worker_threads = %tokio_worker_threads,
+        catalog_reload_secs = config.catalog_reload_secs,
         max_conns = config.max_conns_per_host,
         h1_max_conns = config.h1_max_conns_per_host,
         // `peer` = 未设 STREAM_CAP：按对端通告的 SETTINGS_MAX_CONCURRENT_STREAMS 执行
@@ -129,6 +136,9 @@ async fn run_server() -> Result<()> {
         upstream_ttft_header = config.upstream_ttft_header,
         "starting"
     );
+    for warning in legacy_env_warnings_from_env() {
+        tracing::warn!("{warning}");
+    }
     if config.admin_password == "admin" {
         tracing::warn!("ADMIN_PASSWORD is the default; set it before any shared deployment");
     }

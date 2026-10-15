@@ -47,13 +47,15 @@ export ADMIN_PASSWORD
 
 docker run -d --name xlite-gw --network host --restart unless-stopped \
   --ulimit nofile=1048576:1048576 \
-  -e TOKIO_WORKER_THREADS=8 \
+  -e TOKIO_WORKER_THREADS=24 \
   -e REDIS_URL=redis://10.56.88.22:6379 \
   -e XLITE_UPSTREAM_H2C=1 \
+  -e XLITE_CATALOG_RELOAD_SECS=0 \
   -e ADMIN_PASSWORD -e LISTEN_HOST=0.0.0.0 -e PORT=8080 \
   xlite:0.5.5
 
-curl -fsS http://127.0.0.1:8080/health    # version 应为 0.5.3
+docker logs xlite-gw | head -n 5          # 确认 starting 行回显且无 legacy XROUTER_* 告警
+curl -fsS http://127.0.0.1:8080/health    # version 应为 0.5.5
 curl -fsS http://127.0.0.1:8080/ready     # Redis 就绪
 docker exec xlite-gw sh -c "grep -i 'open files' /proc/1/limits"
 sysctl -n net.core.somaxconn
@@ -61,16 +63,18 @@ sysctl -n net.core.somaxconn
 
 `nofile` 应为 `1048576`，`somaxconn` 应为 `65535`；不够时按 [`advanced/CONFIG.md` §3](advanced/CONFIG.md) 处理。
 
+> **⚠️ 严禁套用旧 `xrouter`/`xgateway` 启动脚本**：`xlite` 完全忽略所有 `XROUTER_*` 变量（如 `XROUTER_UPSTREAM_H2C`、`XROUTER_UPSTREAM_CONNS_PER_HOST`、`XROUTER_DEPLOYMENT_MODE`、`XROUTER_QUEUE_MODE`）及 `DATABASE_URL=postgresql://...`。注意每 host 连接数上限变量名为 **`XLITE_UPSTREAM_MAX_CONNS_PER_HOST`**（含 `_MAX_`），且必须显式传 `TOKIO_WORKER_THREADS`（不传会按宿主机 `nproc` 起满全部逻辑核导致锁竞争恶化）。
+
 **当前设置：**
 
 | 项 | 怎么设 |
 | --- | --- |
-| `TOKIO_WORKER_THREADS` | `8`，作为本环境起点，不代表所有负载的最优值 |
+| `TOKIO_WORKER_THREADS` | 高吞吐长流（D/F 20k+）建议 `24`（或 `32`）；低载/慢吐字可用 `8`（见 [`docs/dev/loadtest-df-optimization-plan-2026-10.md`](../../docs/dev/loadtest-df-optimization-plan-2026-10.md) §8.10）。**必须显式设置，勿留空退回 `nproc`** |
 | `XLITE_UPSTREAM_H2C` | 本农场用 `1`；仅适用于支持 h2c 的明文上游 |
-| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | 上面的命令不设：h2c 默认 `32`；明文 HTTP/1.1 默认 `128` |
-| `XLITE_UPSTREAM_STREAM_CAP` | 不设，跟随对端；不要照搬旧配置里的 `30` |
-| `XLITE_CATALOG_RELOAD_SECS` | 不设，默认 `5` 秒同步目录；仅固定目录压测时可设 `0` 冻结 |
-| `XLITE_UPSTREAM_H1_POOL` / `XLITE_MAX_IN_FLIGHT` | 不要设，当前代码不再读取 |
+| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | 上面的命令不设：h2c 默认 `32`；明文 HTTP/1.1 默认 `128`（若配合 `STREAM_CAP=64` 打散连接可设 `128`） |
+| `XLITE_UPSTREAM_STREAM_CAP` | 不设时跟随对端（250）；20k+ 高频流若需打散单连接热点可设 `64` 或 `125`（配 `MAX_CONNS_PER_HOST=128` 或 `64`） |
+| `XLITE_CATALOG_RELOAD_SECS` | 固定目录压测设 `0` 冻结；生产默认 `5` 秒同步目录 |
+| `XLITE_UPSTREAM_H1_POOL` / `XLITE_MAX_IN_FLIGHT` / `XROUTER_*` | 不要设，当前代码不读取 |
 | `XLITE_UPSTREAM_TTFT_HEADER` | 对标时不要开启 |
 
 **若上游是普通 HTTP/1.1 而非 h2c**：把启动参数改为 `-e XLITE_UPSTREAM_H2C=0`，明文 `http://` 才会走 h1 池。镜像默认启用 h2c，仅删除参数不能关闭。显式设 `MAX_CONNS_PER_HOST=32` 会把 h1 也限制到 32，不能继承这项旧 h2c 配置。`https://` 仍走 reqwest，不适用上述池上限。

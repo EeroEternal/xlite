@@ -200,6 +200,81 @@ pub fn fd_budget_warning(nofile: u64, pooled_conns_per_host: usize) -> Option<St
     ))
 }
 
+/// Startup self-check for legacy `XROUTER_*` variables, common `XLITE_*` typos,
+/// and unsupported Postgres `DATABASE_URL` values carried over from older
+/// `xrouter`/`xgateway` launch scripts.
+pub fn legacy_env_warnings_from_env() -> Vec<String> {
+    let vars: Vec<(String, String)> = std::env::vars().collect();
+    legacy_env_warnings(vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
+
+pub fn legacy_env_warnings<'a>(vars: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+    let mut xrouter_keys = Vec::new();
+    let mut has_conns_typo = false;
+    let mut has_max_conns = false;
+    let mut database_url: Option<&'a str> = None;
+    let mut has_redis_url = false;
+
+    for (k, v) in vars {
+        if k.starts_with("XROUTER_") {
+            xrouter_keys.push(k);
+        }
+        if k == "XLITE_UPSTREAM_CONNS_PER_HOST" {
+            has_conns_typo = true;
+        }
+        if k == "XLITE_UPSTREAM_MAX_CONNS_PER_HOST" {
+            has_max_conns = true;
+        }
+        if k == "DATABASE_URL" && !v.trim().is_empty() {
+            database_url = Some(v.trim());
+        }
+        if k == "REDIS_URL" && !v.trim().is_empty() {
+            has_redis_url = true;
+        }
+    }
+
+    xrouter_keys.sort_unstable();
+    xrouter_keys.dedup();
+
+    let mut warnings = Vec::new();
+    if !xrouter_keys.is_empty() {
+        warnings.push(format!(
+            "detected legacy XROUTER_* environment variable(s): {}. \
+             xlite ignores all XROUTER_* variables; use XLITE_* instead \
+             (e.g. XLITE_UPSTREAM_H2C, XLITE_UPSTREAM_MAX_CONNS_PER_HOST, \
+             XLITE_UPSTREAM_STREAM_CAP, XLITE_CATALOG_RELOAD_SECS) and TOKIO_WORKER_THREADS.",
+            xrouter_keys.join(", ")
+        ));
+    }
+    if has_conns_typo && !has_max_conns {
+        warnings.push(
+            "XLITE_UPSTREAM_CONNS_PER_HOST is set, but the supported variable name is \
+             XLITE_UPSTREAM_MAX_CONNS_PER_HOST (with `_MAX_`); the unset default was used."
+                .to_string(),
+        );
+    }
+    if let Some(db) = database_url {
+        let lower = db.to_ascii_lowercase();
+        if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+            if has_redis_url {
+                warnings.push(
+                    "DATABASE_URL points to PostgreSQL, which xlite does not support; \
+                     it is ignored because REDIS_URL is set (xlite supports only REDIS_URL \
+                     or SQLite/memory DATABASE_URL)."
+                        .to_string(),
+                );
+            } else {
+                warnings.push(
+                    "DATABASE_URL points to PostgreSQL, which xlite does not support; \
+                     set REDIS_URL or use a SQLite/memory DATABASE_URL (e.g. sqlite:xlite.db or memory)."
+                        .to_string(),
+                );
+            }
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +351,40 @@ mod tests {
     fn fd_budget_warning_is_quiet_when_the_limit_is_raised() {
         assert!(fd_budget_warning(FD_COMFORTABLE, 128).is_none());
         assert!(fd_budget_warning(1_048_576, 128).is_none());
+    }
+
+    #[test]
+    fn legacy_env_warnings_catches_xrouter_and_postgres_footguns() {
+        assert!(
+            legacy_env_warnings([
+                ("XLITE_UPSTREAM_H2C", "1"),
+                ("XLITE_UPSTREAM_MAX_CONNS_PER_HOST", "64"),
+                ("REDIS_URL", "redis://127.0.0.1:6379"),
+            ])
+            .is_empty()
+        );
+
+        let warns = legacy_env_warnings([
+            ("XROUTER_UPSTREAM_CONNS_PER_HOST", "32"),
+            ("XROUTER_UPSTREAM_H2C", "1"),
+            ("XLITE_UPSTREAM_CONNS_PER_HOST", "64"),
+            (
+                "DATABASE_URL",
+                "postgresql://xgateway:postgres@10.56.88.22:5432/xrouter",
+            ),
+            ("REDIS_URL", "redis://10.56.88.22:6379"),
+        ]);
+        assert_eq!(warns.len(), 3, "{warns:?}");
+        assert!(
+            warns[0].contains("XROUTER_UPSTREAM_CONNS_PER_HOST, XROUTER_UPSTREAM_H2C"),
+            "{}",
+            warns[0]
+        );
+        assert!(
+            warns[1].contains("XLITE_UPSTREAM_MAX_CONNS_PER_HOST"),
+            "{}",
+            warns[1]
+        );
+        assert!(warns[2].contains("PostgreSQL"), "{}", warns[2]);
     }
 }
