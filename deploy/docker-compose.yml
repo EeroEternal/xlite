@@ -1,0 +1,101 @@
+# 在本目录执行：
+#   cp env.example .env
+#   docker compose up -d --build
+#   docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+#
+# 构建上下文是仓库根。
+
+name: xlite-mock-24
+
+services:
+  redis:
+    image: redis:8.8
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  mocks:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mock
+    image: xlite-mock:0.1.0
+    environment:
+      MOCK_MODEL: ${MOCK_MODEL:-mock}
+      MOCK_CHUNKS: ${MOCK_CHUNKS:-20}
+      MOCK_INTERVAL_MS: ${MOCK_INTERVAL_MS:-10}
+      MOCK_TTFT_MS: ${MOCK_TTFT_MS:-0}
+      MOCK_BATCH: ${MOCK_BATCH:-1}
+      MOCK_LISTEN: ${MOCK_LISTEN:-0.0.0.0}
+    ports:
+      - "4101-4124:4101-4124"
+    # 24 个 Node 进程同时持有大量上游连接。**不要依赖 daemon 默认值**：nofile 被封顶时
+    # 吞吐会静默掉到 1/4，而 fail / vus_max / iteration_duration 全部正常（见 README §2.1）。
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4101/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  xlite:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: xlite:0.5.6
+    environment:
+      REDIS_URL: redis://redis:6379
+      XLITE_UPSTREAM_H2C: ${XLITE_UPSTREAM_H2C:-1}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      PORT: ${PORT:-8080}
+      LISTEN_HOST: "0.0.0.0"
+      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: ${XLITE_UPSTREAM_MAX_CONNS_PER_HOST:-32}
+      TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-8}
+    ports:
+      - "8080:8080"
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    depends_on:
+      redis:
+        condition: service_healthy
+      mocks:
+        condition: service_healthy
+
+  xlite-2:
+    profiles: ["ha"]
+    image: xlite:0.5.6
+    environment:
+      REDIS_URL: redis://redis:6379
+      XLITE_UPSTREAM_H2C: ${XLITE_UPSTREAM_H2C:-1}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
+      PORT: ${PORT:-8080}
+      LISTEN_HOST: "0.0.0.0"
+      XLITE_UPSTREAM_MAX_CONNS_PER_HOST: ${XLITE_UPSTREAM_MAX_CONNS_PER_HOST:-32}
+      TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-8}
+    ports:
+      - "8081:8080"
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    depends_on:
+      redis:
+        condition: service_healthy
+      mocks:
+        condition: service_healthy

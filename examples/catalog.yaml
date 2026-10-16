@@ -1,0 +1,37 @@
+# xlite catalog. One public model, many providers, one API key.
+# Scheduling is always: same priority → weighted random; then failover by priority.
+#
+#   xlite import examples/catalog.yaml
+#   xlite import examples/catalog.yaml --replace
+#   xlite export catalog.yaml
+
+providers:
+  - name: mock-4101
+    base_url: http://127.0.0.1:4101
+    api_key: ""
+    enabled: true
+  - name: mock-4102
+    base_url: http://127.0.0.1:4102
+    api_key: ""
+    enabled: true
+
+models:
+  - name: mock
+    enabled: true
+    channels:
+      - provider: mock-4101
+        upstream_model: mock
+        weight: 1
+        priority: 0
+        enabled: true
+      - provider: mock-4102
+        upstream_model: mock
+        weight: 1
+        priority: 0
+        enabled: true
+
+api_keys:
+  - name: loadtest
+    key: sk-loadtest
+    models: []
+    enabled: true

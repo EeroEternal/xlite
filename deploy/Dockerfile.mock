@@ -1,0 +1,16 @@
+# 24-port SSE mock farm for the mock-24 catalog. Build from the repo root:
+#   docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
+# deploy/docker-compose.yml 的 mocks 服务也从本文件构建（context 是仓库根）。
+
+FROM node:20-bookworm-slim
+WORKDIR /app
+COPY scripts/stream_mock_server.mjs ./stream_mock_server.mjs
+COPY scripts/start_mocks.sh ./start_mocks.sh
+RUN chmod +x ./start_mocks.sh
+ENV MOCK_MODEL=mock \
+    MOCK_CHUNKS=20 \
+    MOCK_INTERVAL_MS=10 \
+    MOCK_TTFT_MS=0 \
+    MOCK_BATCH=1
+EXPOSE 4101-4124
+CMD ["./start_mocks.sh"]

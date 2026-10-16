@@ -1,0 +1,43 @@
+.mimocode/
+/target/
+
+# Local offline/vendored build scaffolding (never committed)
+/.cargo/
+/vendor/
+/deploy/Dockerfile.lab
+.redis-sentinel-lab/
+# matches directories *and* symlinks/files (a trailing slash would miss a symlinked
+# node_modules, which is how one got committed by accident once)
+**/node_modules
+.venv/
+.DS_Store
+.env
+.env.*
+!.env.example
+admin/dist/
+*.log
+xlite.db
+xlite.db-shm
+xlite.db-wal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+__pycache__/
+data.db
+scripts/loadtest/results/
+/bench/
+.gstack/
+# (removed product tarball)
+# IDE / agent local state
+.agents/
+.vscode/
+.zcode/
+.claude/
+.antigravitycli/
+skills-lock.json
+
+# Test & local artifact directories
+test-results/
+docs/sessions/
+artifacts/
+*.probe

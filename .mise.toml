@@ -1,0 +1,5 @@
+# 本地门禁 / Admin 前端的 Node 版本锁（Node 22）。Admin 的 vitest/jsdom 测试在 Node 26 下会因
+# sessionStorage/localStorage 全局缺失而失败（nav-sections、help-questions 等 4 个用例），
+# Node 22 全绿。仓库没有 GitHub CI，这是唯一的 Node 版本口径。mise 进入本仓库会自动切换到该版本。
+[tools]
+node = "22"
