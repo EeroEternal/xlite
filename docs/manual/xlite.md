@@ -19,6 +19,8 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `XLITE_CATALOG_RELOAD_SECS` | `5` | Snapshot reload period; `0` freezes the snapshot (load test) |
 | `XLITE_UPSTREAM_STALL_TIMEOUT_SECS` | `0` (disabled) | End a response body with `TimedOut` after this many seconds of silence between chunks |
 | `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` | `0` (disabled) | Timeout waiting for upstream response headers after sending the request |
+| `XLITE_SSE_KEEPALIVE_SECS` | `15` | Emit `: keep-alive\n\n` SSE comment heartbeats during silent upstream pauses on `text/event-stream` responses (`0` disables) |
+| `XLITE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Maximum request body size for `/v1/chat/completions` (for long-context and multimodal prompts) |
 
 Listen backlog is 65535 (kernel-clamped by `net.core.somaxconn`). For 30k concurrent clients set `net.core.somaxconn = 65535` on the gateway host.
 

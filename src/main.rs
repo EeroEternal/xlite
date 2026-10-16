@@ -134,6 +134,8 @@ async fn run_server() -> Result<()> {
         },
         upstream_stall_timeout_secs = config.upstream_stall_timeout.as_secs(),
         upstream_header_timeout_secs = config.upstream_header_timeout.as_secs(),
+        sse_keepalive_secs = config.sse_keepalive_interval.as_secs(),
+        max_body_bytes = config.max_body_bytes,
         "starting"
     );
     for warning in legacy_env_warnings_from_env() {
@@ -155,6 +157,7 @@ async fn run_server() -> Result<()> {
     let store = Store::new(catalog);
     store.reload().await.context("load routing snapshot")?;
     let upstream = Upstream::new(&config);
+    let max_body_bytes = config.max_body_bytes;
     let state = AppState {
         store: store.clone(),
         sessions: Sessions::new(&config.admin_password, config.session_secret.as_deref()),
@@ -182,7 +185,11 @@ async fn run_server() -> Result<()> {
         .route("/health", get(proxy::health))
         .route("/ready", get(proxy::ready))
         .route("/v1/models", get(proxy::list_models))
-        .route("/v1/chat/completions", post(proxy::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(proxy::chat_completions)
+                .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes)),
+        )
         .merge(admin::router())
         .layer(
             CorsLayer::new()

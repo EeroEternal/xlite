@@ -2,6 +2,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+/// Default maximum request body size for `/v1/chat/completions` (64 MiB).
+///
+/// Axum's built-in `DefaultBodyLimit` is 2 MiB, which rejects 128k–1M token
+/// long-context prompts and multimodal payloads with `413 Payload Too Large`.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Default SSE comment heartbeat interval (`: keep-alive\n\n`) during silent
+/// upstream prefill or reasoning pauses (`15s`). Set `XLITE_SSE_KEEPALIVE_SECS=0`
+/// to disable.
+pub const DEFAULT_SSE_KEEPALIVE_SECS: u64 = 15;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
@@ -44,6 +55,15 @@ pub struct Config {
     /// next candidate channel; if all `N` candidates hang on headers, the worst-case
     /// wait before a final `502` scales to `N × upstream_header_timeout`.
     pub upstream_header_timeout: Duration,
+    /// Interval at which `: keep-alive\n\n` SSE comment heartbeats are emitted
+    /// while an upstream `text/event-stream` response is silent (e.g. during
+    /// long-context prefill after headers or extended reasoning pauses).
+    /// `Duration::ZERO` disables heartbeats. Does not reset
+    /// [`Config::upstream_stall_timeout`].
+    pub sse_keepalive_interval: Duration,
+    /// Maximum allowed request body size in bytes (`XLITE_MAX_BODY_BYTES`,
+    /// default [`DEFAULT_MAX_BODY_BYTES`] = 64 MiB).
+    pub max_body_bytes: usize,
 }
 
 /// Parse a `*_SECS` duration env value: a positive integer number of seconds, or
@@ -54,10 +74,21 @@ fn timeout_secs_or_zero(raw: Option<&str>) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
+/// Parse `XLITE_SSE_KEEPALIVE_SECS`: `0` disables SSE keep-alive comments; a
+/// positive integer sets the heartbeat period in seconds; unset or invalid falls
+/// back to [`DEFAULT_SSE_KEEPALIVE_SECS`].
+fn sse_keepalive_secs(raw: Option<&str>) -> Duration {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(0) => Duration::ZERO,
+        Some(secs) => Duration::from_secs(secs),
+        None => Duration::from_secs(DEFAULT_SSE_KEEPALIVE_SECS),
+    }
+}
+
 /// Parse a positive-integer env value. `None`/invalid/`0` fall back to
 /// `default`.
 fn positive_or(raw: Option<String>, default: usize) -> usize {
-    raw.and_then(|v| v.parse().ok())
+    raw.and_then(|v| v.trim().parse().ok())
         .filter(|&n: &usize| n > 0)
         .unwrap_or(default)
 }
@@ -97,6 +128,12 @@ impl Config {
                 .ok()
                 .as_deref(),
         );
+        let sse_keepalive_interval =
+            sse_keepalive_secs(std::env::var("XLITE_SSE_KEEPALIVE_SECS").ok().as_deref());
+        let max_body_bytes = positive_or(
+            std::env::var("XLITE_MAX_BODY_BYTES").ok(),
+            DEFAULT_MAX_BODY_BYTES,
+        );
         Ok(Self {
             database_url,
             redis_url,
@@ -109,6 +146,8 @@ impl Config {
             catalog_reload_secs,
             upstream_stall_timeout,
             upstream_header_timeout,
+            sse_keepalive_interval,
+            max_body_bytes,
         })
     }
 }
@@ -298,6 +337,22 @@ mod tests {
         assert_eq!(timeout_secs_or_zero(Some("-5")), Duration::ZERO);
         assert_eq!(timeout_secs_or_zero(Some("120")), Duration::from_secs(120));
         assert_eq!(timeout_secs_or_zero(Some(" 90 ")), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn sse_keepalive_secs_defaults_to_15s_and_honours_zero_disable() {
+        assert_eq!(
+            sse_keepalive_secs(None),
+            Duration::from_secs(DEFAULT_SSE_KEEPALIVE_SECS)
+        );
+        assert_eq!(
+            sse_keepalive_secs(Some("abc")),
+            Duration::from_secs(DEFAULT_SSE_KEEPALIVE_SECS)
+        );
+        assert_eq!(sse_keepalive_secs(Some("0")), Duration::ZERO);
+        assert_eq!(sse_keepalive_secs(Some(" 0 ")), Duration::ZERO);
+        assert_eq!(sse_keepalive_secs(Some("20")), Duration::from_secs(20));
+        assert_eq!(positive_or(None, DEFAULT_MAX_BODY_BYTES), 64 * 1024 * 1024);
     }
 
     #[test]

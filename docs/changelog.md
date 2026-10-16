@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Zero-DOM surgical `"model"` byte-splice rewrite for long-context prompts (`src/proxy.rs`)**: Replaced full `serde_json::Value` DOM parsing and re-serialization on channel model renames (`upstream_model != model`) with a depth-1 JSON span scanner (`RewritePlan::Splice`) that splices only the top-level `"model"` string value into a flat buffer, eliminating multi-megabyte AST allocations on 128k–1M token prompts while caching the span across failover attempts.
+- **Configurable long-context request body ceiling (`XLITE_MAX_BODY_BYTES`)**: Raised the `/v1/chat/completions` body limit from Axum's 2 MiB default to `64 MiB` (`DEFAULT_MAX_BODY_BYTES`), configurable via `XLITE_MAX_BODY_BYTES`.
+- **SSE anti-buffering headers, `: keep-alive` heartbeats (`XLITE_SSE_KEEPALIVE_SECS`), and upstream TCP/H2 keepalive (`src/proxy.rs`, `src/upstream.rs`)**: Automatically emit `Cache-Control: no-cache` and `X-Accel-Buffering: no` on `text/event-stream` responses, send `: keep-alive\n\n` SSE comment heartbeats every `XLITE_SSE_KEEPALIVE_SECS` (default `15s`, `0` to disable) during silent reasoning pauses without resetting `StallGuard`'s upstream stall deadline, and enable `tcp_keepalive(30s)` plus HTTP/2 adaptive flow-control windows and keep-alive pings on the upstream `reqwest` client.
+
 ## [0.6.0] - 2026-10-16
 
 - **Workspace streamlining & companion `xLB` separation**: Extracted `crates/mock-llm` into a standalone repository, removed `crates/xlite-h1-pool` and load-test-specific diagnostic hooks (`XLITE_UPSTREAM_TTFT_HEADER` and the `/api/pool` ring buffer) in favor of pairing with [**xLB**](https://github.com/EeroEternal/xlb) for L4/Thin-L7 HTTP/1.1 pooling and load balancing, keeping `xlite` strictly focused as a single binary + `crates/xlite-h2-pool`.

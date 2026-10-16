@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::future::Future;
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -18,6 +19,12 @@ use std::time::Duration;
 use crate::admin::AppState;
 use crate::store::Channel;
 use crate::upstream::{UpstreamResponse, should_failover};
+
+/// SSE comment frame emitted during silent upstream prefill or reasoning pauses.
+/// Per the WHATWG `EventSource` specification, lines starting with `:` are
+/// comments and are ignored by OpenAI SDKs and SSE parsers while keeping
+/// intermediate NATs, reverse proxies, and client read timers alive.
+const SSE_KEEPALIVE_FRAME: &[u8] = b": keep-alive\n\n";
 
 /// Borrowed view of the only field the gateway needs from the request body.
 /// Deserializing this scans (and validates) the whole JSON without building a
@@ -27,32 +34,171 @@ struct ModelRef<'a> {
     model: Option<&'a str>,
 }
 
-/// Bytes to send upstream: when the channel's upstream model name equals the
-/// requested one (the common case) the original request body is passed through
-/// untouched — no DOM, no re-serialization, no copy. A rename lazily builds the
-/// DOM once per request and re-serializes it per attempt.
+/// Cached per-request strategy for rewriting `"model"` when a channel maps the
+/// public model name to a different `upstream_model`.
+#[derive(Debug)]
+enum RewritePlan {
+    /// Byte range `start..end` (including quotes) of the single top-level
+    /// `"model"` string value inside the original request body.
+    Splice(Range<usize>),
+    /// Fallback DOM used only when the top-level `"model"` key is escaped or
+    /// duplicated.
+    Dom(Value),
+}
+
+/// Scan a validated JSON object at nesting depth 1 to locate the byte range
+/// (including quotes) of the single top-level `"model"` string value.
+///
+/// Returns `None` if the root is not an object, if any top-level key uses
+/// JSON escape sequences, if `"model"` appears more than once at the top level,
+/// or if its value is not a string literal.
+fn find_top_level_model_value_span(json: &[u8]) -> Option<Range<usize>> {
+    let mut i = skip_ws(json, 0);
+    if json.get(i) != Some(&b'{') {
+        return None;
+    }
+    i += 1;
+    let mut depth = 1usize;
+    let mut expect_top_key = true;
+    let mut found: Option<Range<usize>> = None;
+
+    while i < json.len() {
+        i = skip_ws(json, i);
+        let Some(&b) = json.get(i) else {
+            break;
+        };
+        match b {
+            b'"' => {
+                let (str_end, has_escape) = scan_json_string(json, i)?;
+                if depth == 1 && expect_top_key {
+                    expect_top_key = false;
+                    if has_escape {
+                        // Fall back to full DOM if a top-level key contains escapes
+                        // (e.g. "\u006dodel").
+                        return None;
+                    }
+                    let is_model_key = &json[i..str_end] == b"\"model\"";
+                    i = skip_ws(json, str_end);
+                    if json.get(i) != Some(&b':') {
+                        return None;
+                    }
+                    i = skip_ws(json, i + 1);
+                    if is_model_key {
+                        if found.is_some() {
+                            // Duplicate top-level "model" key; let DOM fallback deduplicate.
+                            return None;
+                        }
+                        if json.get(i) != Some(&b'"') {
+                            return None;
+                        }
+                        let (val_end, _) = scan_json_string(json, i)?;
+                        found = Some(i..val_end);
+                        i = val_end;
+                    }
+                } else {
+                    i = str_end;
+                }
+            }
+            b'{' | b'[' => {
+                expect_top_key = false;
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b',' => {
+                if depth == 1 {
+                    expect_top_key = true;
+                }
+                i += 1;
+            }
+            _ => {
+                expect_top_key = false;
+                i += 1;
+            }
+        }
+    }
+    found
+}
+
+#[inline]
+fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+    while let Some(&b) = bytes.get(i) {
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// Given `bytes[start] == b'"'`, returns `(end_exclusive, has_escape)`.
+#[inline]
+fn scan_json_string(bytes: &[u8], start: usize) -> Option<(usize, bool)> {
+    let mut i = start + 1;
+    let mut has_escape = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                has_escape = true;
+                i += 2;
+            }
+            b'"' => return Some((i + 1, has_escape)),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Bytes to send upstream:
+/// - When `upstream_model == model` (the common case), the original `Bytes`
+///   handle is cloned in `O(1)` without copying or parsing.
+/// - When `upstream_model != model`, we locate the top-level `"model"` value
+///   span once and splice the replacement string directly into a flat buffer,
+///   avoiding multi-megabyte `serde_json::Value` DOM allocation and
+///   re-serialization on long-context payloads.
 fn outbound_body(
     model: &str,
     upstream_model: &str,
     original: &Bytes,
-    dom: &mut Option<Value>,
+    plan: &mut Option<RewritePlan>,
 ) -> Result<Bytes, String> {
     if upstream_model == model {
         return Ok(original.clone());
     }
-    let value = match dom {
-        Some(v) => v,
-        None => match serde_json::from_slice(original) {
-            Ok(v) => dom.insert(v),
-            Err(e) => return Err(e.to_string()),
-        },
-    };
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("model".into(), Value::String(upstream_model.to_string()));
+    if plan.is_none() {
+        if let Some(span) = find_top_level_model_value_span(original) {
+            *plan = Some(RewritePlan::Splice(span));
+        } else {
+            let v: Value = serde_json::from_slice(original).map_err(|e| e.to_string())?;
+            *plan = Some(RewritePlan::Dom(v));
+        }
     }
-    serde_json::to_vec(value)
-        .map(Bytes::from)
-        .map_err(|e| e.to_string())
+    match plan.as_mut().expect("plan initialized above") {
+        RewritePlan::Splice(span) => {
+            let encoded = serde_json::to_vec(upstream_model).map_err(|e| e.to_string())?;
+            let new_len = original.len() - span.len() + encoded.len();
+            let mut out = Vec::with_capacity(new_len);
+            out.extend_from_slice(&original[..span.start]);
+            out.extend_from_slice(&encoded);
+            out.extend_from_slice(&original[span.end..]);
+            Ok(Bytes::from(out))
+        }
+        RewritePlan::Dom(value) => {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("model".into(), Value::String(upstream_model.to_string()));
+            }
+            serde_json::to_vec(value)
+                .map(Bytes::from)
+                .map_err(|e| e.to_string())
+        }
+    }
 }
 
 /// `/health` is the unauthenticated probe HAProxy and the load-test rigs hit, so it
@@ -150,9 +296,9 @@ pub async fn chat_completions(
     };
 
     let mut last_error = "no channel available".to_string();
-    let mut dom: Option<Value> = None;
+    let mut plan: Option<RewritePlan> = None;
     for channel in channels {
-        match try_channel(&state, &channel, model, &body, &mut dom).await {
+        match try_channel(&state, &channel, model, &body, &mut plan).await {
             Ok(response) => return response,
             Err(err) => last_error = err,
         }
@@ -185,9 +331,9 @@ async fn try_channel(
     channel: &Channel,
     model: &str,
     original: &Bytes,
-    dom: &mut Option<Value>,
+    plan: &mut Option<RewritePlan>,
 ) -> Result<Response, String> {
-    let body = outbound_body(model, &channel.upstream_model, original, dom)?;
+    let body = outbound_body(model, &channel.upstream_model, original, plan)?;
     let upstream = state
         .upstream
         .post_stream(
@@ -209,18 +355,43 @@ async fn try_channel(
     Ok(forward_response(
         upstream,
         state.config.upstream_stall_timeout,
+        state.config.sse_keepalive_interval,
     ))
 }
 
-fn forward_response(upstream: UpstreamResponse, stall_timeout: Duration) -> Response {
+fn is_event_stream(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+fn forward_response(
+    upstream: UpstreamResponse,
+    stall_timeout: Duration,
+    sse_keepalive_interval: Duration,
+) -> Response {
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY));
     let content_type = upstream
         .content_type
         .unwrap_or_else(|| "application/json".into());
+    let sse = is_event_stream(&content_type);
     builder = builder.header(axum::http::header::CONTENT_TYPE, content_type);
+    if sse {
+        // Prevent downstream reverse proxies (Nginx, Envoy, Cloudflare, CDN) from
+        // buffering SSE chunks or caching long-running event streams.
+        builder = builder
+            .header(axum::http::header::CACHE_CONTROL, "no-cache")
+            .header("x-accel-buffering", "no");
+    }
 
-    let body = StallGuard::new(upstream.body, stall_timeout);
+    let keepalive = if sse {
+        sse_keepalive_interval
+    } else {
+        Duration::ZERO
+    };
+    let body = StallGuard::with_keepalive(upstream.body, stall_timeout, keepalive);
     builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -234,24 +405,32 @@ fn forward_response(upstream: UpstreamResponse, stall_timeout: Duration) -> Resp
 /// no bytes for `timeout`, so a hung upstream cannot park a gateway stream (and
 /// its pool lease) until the client gives up.
 ///
-/// The deadline is re-armed on **every** item, so it only fires on true
-/// silence — a slow but progressing stream keeps resetting it. `Duration::ZERO`
-/// disables the guard entirely (the pre-existing "wait as long as the upstream
-/// does" behaviour). See [`crate::config::Config::upstream_stall_timeout`].
+/// When `keepalive_interval` is non-zero (used on `text/event-stream` responses),
+/// `StallGuard` also emits `: keep-alive\n\n` SSE comment heartbeats during
+/// silent upstream windows without resetting the upstream `timeout` deadline.
 struct StallGuard<S> {
     inner: S,
     timeout: Duration,
     sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    keepalive_interval: Duration,
+    keepalive_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     fired: bool,
 }
 
 impl<S> StallGuard<S> {
     fn new(inner: S, timeout: Duration) -> Self {
+        Self::with_keepalive(inner, timeout, Duration::ZERO)
+    }
+
+    fn with_keepalive(inner: S, timeout: Duration, keepalive_interval: Duration) -> Self {
         let sleep = (!timeout.is_zero()).then(|| Box::pin(tokio::time::sleep(timeout)));
         Self {
             inner,
             timeout,
             sleep,
+            keepalive_interval,
+            // Allocated lazily only if the upstream stream actually yields `Poll::Pending`.
+            keepalive_sleep: None,
             fired: false,
         }
     }
@@ -270,10 +449,16 @@ where
         }
         match Stream::poll_next(Pin::new(&mut this.inner), cx) {
             Poll::Ready(Some(item)) => {
-                if let Some(sleep) = this.sleep.as_mut() {
-                    sleep
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + this.timeout);
+                let now = if this.sleep.is_some() || this.keepalive_sleep.is_some() {
+                    Some(tokio::time::Instant::now())
+                } else {
+                    None
+                };
+                if let (Some(sleep), Some(now)) = (this.sleep.as_mut(), now) {
+                    sleep.as_mut().reset(now + this.timeout);
+                }
+                if let (Some(ka), Some(now)) = (this.keepalive_sleep.as_mut(), now) {
+                    ka.as_mut().reset(now + this.keepalive_interval);
                 }
                 Poll::Ready(Some(item))
             }
@@ -288,10 +473,21 @@ where
                 {
                     this.fired = true;
                     this.sleep = None;
+                    this.keepalive_sleep = None;
                     return Poll::Ready(Some(Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         format!("upstream produced no data for {}s", this.timeout.as_secs()),
                     ))));
+                }
+                if !this.keepalive_interval.is_zero() {
+                    let interval = this.keepalive_interval;
+                    let ka = this
+                        .keepalive_sleep
+                        .get_or_insert_with(|| Box::pin(tokio::time::sleep(interval)));
+                    if ka.as_mut().poll(cx).is_ready() {
+                        ka.as_mut().reset(tokio::time::Instant::now() + interval);
+                        return Poll::Ready(Some(Ok(Bytes::from_static(SSE_KEEPALIVE_FRAME))));
+                    }
                 }
                 Poll::Pending
             }
@@ -491,28 +687,104 @@ mod tests {
         let original = Bytes::from_static(
             br#"{"model":"gpt","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
         );
-        let mut dom = None;
-        let out = outbound_body("gpt", "gpt", &original, &mut dom).expect("passthrough");
+        let mut plan = None;
+        let out = outbound_body("gpt", "gpt", &original, &mut plan).expect("passthrough");
         assert!(
             std::ptr::eq(out.as_ptr(), original.as_ptr()),
             "must be the same underlying buffer"
         );
-        assert!(dom.is_none(), "no DOM may be built for the fast path");
+        assert!(
+            plan.is_none(),
+            "no rewrite plan may be built for the fast path"
+        );
     }
 
     #[test]
-    fn rename_builds_the_dom_once_and_rewrites_the_model() {
-        let original = Bytes::from_static(br#"{"model":"gpt","x":1}"#);
-        let mut dom = None;
-        let out = outbound_body("gpt", "upstream-gpt", &original, &mut dom).expect("rename");
+    fn rename_splices_model_without_building_dom_and_reuses_span() {
+        let original = Bytes::from_static(
+            br#"{"messages":[{"role":"user","content":"mention \"model\":\"nested\" here","meta":{"model":"ignore-nested"}}],"model":"gpt","x":1}"#,
+        );
+        let mut plan = None;
+        let out = outbound_body("gpt", "upstream-gpt", &original, &mut plan).expect("rename");
+        assert!(
+            matches!(plan, Some(RewritePlan::Splice(_))),
+            "standard top-level model field must use zero-DOM byte splice, got {plan:?}"
+        );
         let parsed: Value = serde_json::from_slice(&out).expect("json");
         assert_eq!(parsed["model"], "upstream-gpt");
+        assert_eq!(parsed["messages"][0]["meta"]["model"], "ignore-nested");
         assert_eq!(parsed["x"], 1);
-        assert!(dom.is_some(), "DOM is kept for the next attempt");
-        // A second attempt (another channel) reuses the same DOM.
-        let out2 = outbound_body("gpt", "other", &original, &mut dom).expect("rename 2");
+
+        // A second attempt (another channel on failover) reuses the cached splice span.
+        let out2 =
+            outbound_body("gpt", "provider/model-v2", &original, &mut plan).expect("rename 2");
         let parsed2: Value = serde_json::from_slice(&out2).expect("json");
-        assert_eq!(parsed2["model"], "other");
+        assert_eq!(parsed2["model"], "provider/model-v2");
+        assert_eq!(parsed2["messages"][0]["meta"]["model"], "ignore-nested");
+    }
+
+    #[test]
+    fn rename_falls_back_to_dom_on_escaped_or_duplicate_model_key() {
+        let escaped_key = Bytes::from_static(br#"{"\u006dodel":"gpt","x":1}"#);
+        let mut plan = None;
+        let out =
+            outbound_body("gpt", "upstream-gpt", &escaped_key, &mut plan).expect("escaped rename");
+        assert!(
+            matches!(plan, Some(RewritePlan::Dom(_))),
+            "escaped key must fall back to DOM rewrite, got {plan:?}"
+        );
+        let parsed: Value = serde_json::from_slice(&out).expect("json");
+        assert_eq!(parsed["model"], "upstream-gpt");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_guard_emits_sse_keepalive_without_resetting_stall_deadline() {
+        let t0 = tokio::time::Instant::now();
+        let inner = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"data: {\"id\":\"1\"}\n\n",
+        ))])
+        .chain(stream::pending::<Result<Bytes, std::io::Error>>());
+
+        // Stall timeout = 35s, SSE keep-alive heartbeat = 15s.
+        let mut guarded =
+            StallGuard::with_keepalive(inner, Duration::from_secs(35), Duration::from_secs(15));
+
+        assert_eq!(
+            &guarded.next().await.unwrap().unwrap()[..],
+            b"data: {\"id\":\"1\"}\n\n"
+        );
+        assert_eq!(t0.elapsed(), Duration::ZERO);
+
+        // First keep-alive comment at t = 15s.
+        assert_eq!(
+            &guarded.next().await.unwrap().unwrap()[..],
+            SSE_KEEPALIVE_FRAME
+        );
+        assert_eq!(t0.elapsed(), Duration::from_secs(15));
+
+        // Second keep-alive comment at t = 30s.
+        assert_eq!(
+            &guarded.next().await.unwrap().unwrap()[..],
+            SSE_KEEPALIVE_FRAME
+        );
+        assert_eq!(t0.elapsed(), Duration::from_secs(30));
+
+        // Upstream stall timeout still fires at t = 35s (not reset by keep-alive comments).
+        let err = guarded
+            .next()
+            .await
+            .expect("stall timeout must fire at 35s")
+            .expect_err("must be TimedOut");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(t0.elapsed(), Duration::from_secs(35));
+    }
+
+    #[test]
+    fn is_event_stream_recognizes_sse_content_type_parameters() {
+        assert!(is_event_stream("text/event-stream"));
+        assert!(is_event_stream("text/event-stream; charset=utf-8"));
+        assert!(is_event_stream("TEXT/EVENT-STREAM;charset=UTF-8"));
+        assert!(!is_event_stream("application/json"));
     }
 
     #[test]

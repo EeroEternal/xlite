@@ -155,6 +155,11 @@ impl Upstream {
         let http = Client::builder()
             .pool_max_idle_per_host(cfg.max_conns_per_host.max(64))
             .tcp_nodelay(true)
+            .tcp_keepalive(Duration::from_secs(30))
+            .http2_adaptive_window(true)
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
             .timeout(Duration::from_secs(600))
             .build()
             .expect("reqwest client");
@@ -426,6 +431,8 @@ mod tests {
             catalog_reload_secs: 0,
             upstream_stall_timeout: Duration::ZERO,
             upstream_header_timeout: Duration::ZERO,
+            sse_keepalive_interval: Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
         };
         let up = Upstream::new(&cfg);
         assert!(up.pool_stats().is_empty());
@@ -553,6 +560,8 @@ mod tests {
             catalog_reload_secs: 0,
             upstream_stall_timeout: Duration::ZERO,
             upstream_header_timeout: Duration::from_secs(5),
+            sse_keepalive_interval: Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
         };
         let up = Upstream::new(&cfg);
 

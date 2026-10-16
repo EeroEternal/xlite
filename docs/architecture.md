@@ -44,11 +44,12 @@ Most AI gateways parse the entire inbound JSON request into a heap-allocated AST
    }
    ```
    Deserializing `ModelRef<'a>` validates JSON syntax and borrows the top-level `"model"` slice directly from the request `Bytes` buffer while `serde` skips `messages`, `tools`, and all other fields without allocating a `serde_json::Value` tree.
-2. **Zero-Copy Request Forwarding**:
+2. **Zero-Copy & Surgical Byte-Splice Request Forwarding**:
    - When `channel.upstream_model == requested_model`, `outbound_body()` clones the `Bytes` reference count (`O(1)`) and forwards the exact wire bytes untouched.
-   - Only when a channel rewrites the model name (`upstream_model != model`) does `xlite` lazily parse a `serde_json::Value` DOM once per request and mutate the `"model"` key.
-3. **Raw `Bytes` SSE Passthrough**:
+   - When a channel rewrites the model name (`upstream_model != model`), `xlite` scans only the top-level JSON object for the `"model"` value span (`RewritePlan::Splice`) and splices the new model string directly into a flat byte buffer—avoiding multi-megabyte `serde_json::Value` DOM allocation and `messages` re-serialization on long-context prompts (up to `XLITE_MAX_BODY_BYTES`, default `64 MiB`).
+3. **Raw `Bytes` SSE Passthrough with Keep-Alive Heartbeats**:
    - Upstream response bodies are piped directly as `Bytes` frames from the socket/H2 recv stream to the client response body. `xlite` never splits lines on `\n\n`, never parses chunk JSON, and never re-allocates SSE frames.
+   - On `text/event-stream` responses, `xlite` sets `Cache-Control: no-cache` and `X-Accel-Buffering: no` and emits `: keep-alive\n\n` SSE comment frames every `XLITE_SSE_KEEPALIVE_SECS` (default `15s`) during silent reasoning or prefill pauses without resetting `StallGuard`'s upstream stall deadline.
 
 ---
 
