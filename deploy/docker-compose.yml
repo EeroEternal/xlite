@@ -1,9 +1,9 @@
-# 在本目录执行：
+# Run from this directory:
 #   cp env.example .env
 #   docker compose up -d --build
 #   docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
 #
-# 构建上下文是仓库根。
+# Build context is the repository root.
 
 name: xlite-mock-24
 
@@ -33,8 +33,9 @@ services:
       MOCK_LISTEN: ${MOCK_LISTEN:-0.0.0.0}
     ports:
       - "4101-4124:4101-4124"
-    # 24 个 Node 进程同时持有大量上游连接。**不要依赖 daemon 默认值**：nofile 被封顶时
-    # 吞吐会静默掉到 1/4，而 fail / vus_max / iteration_duration 全部正常（见 README §2.1）。
+    # 24 Node processes hold high upstream connection concurrency. Do NOT rely on daemon
+    # defaults: when nofile is capped, throughput silently drops by 75% while failure rate
+    # and iteration duration look normal (see docs/benchmarks.md).
     ulimits:
       nofile:
         soft: 1048576

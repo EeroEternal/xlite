@@ -265,61 +265,15 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
             })
         })
         .collect();
-    // `stream_budget_per_conn` is `usize::MAX` when the operator never set a cap:
-    // report that as null rather than as a number nobody can act on.
     let stream_budget = if state.config.upstream_stream_cap == usize::MAX {
         Value::Null
     } else {
         json!(state.config.upstream_stream_cap)
     };
-    // Cleartext `http://` upstreams go through the native HTTP/1.1 pool now, so
-    // its connection-level stats are the HTTP/1.1 side of this snapshot (there is
-    // no request-level gate any more).
-    let h1_pool: Vec<Value> = state
-        .upstream
-        .h1_pool_stats()
-        .into_iter()
-        .map(|(host, s)| {
-            json!({
-                "host": host,
-                "connections": s.connections,
-                "in_flight": s.in_flight,
-                "dials": s.dials,
-                "reclaimed": s.reclaimed,
-                // Queue visibility for the HTTP/1.1 path — same fields (and the
-                // same "a queue must be visible" reasoning) as the h2c hosts[].
-                "waiting": s.waiting,
-                "waiting_max": s.waiting_max,
-                "queued_total": s.queued_total,
-                "wait_ms_max": s.wait_millis_max,
-            })
-        })
-        .collect();
-    // Data-path diagnostics (sampled): a stream whose `last_data_ms` is old
-    // while `in_flight` says it is live is where a 600s stall shows up.
-    // `cancel_prop_*` is the internal cancel→stream-end span; wire latency was
-    // measured separately in the field certification (§5.4/5.5).
-    let d = state.upstream.diag_stats();
-    let diag = json!({
-        "registers_pending": d.registers_pending,
-        "pumps_active": d.pumps_active,
-        "streams_pumped": d.streams_pumped,
-        "cancels_seen": d.cancels_seen,
-        "cancel_prop_last_ms": d.cancel_prop_last_ms,
-        "cancel_prop_max_ms": d.cancel_prop_max_ms,
-        "streams": d.slots.iter().map(|s| json!({
-            "start_ms": s.start_ms,
-            "last_data_ms": s.last_data_ms,
-            "bytes": s.bytes,
-            "cancel_seen": s.cancel_ms > 0,
-        })).collect::<Vec<_>>(),
-    });
     ok(json!({
         "stream_budget_per_conn": stream_budget,
         "max_conns_per_host": state.config.max_conns_per_host,
         "hosts": hosts,
-        "h1_pool": h1_pool,
-        "diag": diag,
     }))
     .into_response()
 }

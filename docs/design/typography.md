@@ -34,7 +34,7 @@ Every numeric metric carries `tabular-nums` so digits keep a fixed advance width
 
 - Do not pair titles with a default subtitle.
 - Explanatory copy is body/secondary — in empty states, dialogs, or errors, **not** under a page or card title.
-- Do not add a subtitle that repeats the title in different words (for example title「模型」plus「管理模型」).
+- Do not add a subtitle that repeats the title in different words (for example title "Models" plus "Manage Models").
 - Keys, tokens, and code samples: `mono-sm`.
 - Live metrics use tabular numbers to avoid layout jitter.
 

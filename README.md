@@ -1,135 +1,70 @@
-<div align="center">
-
 # xlite
 
-**Ultra-fast, zero-parse LLM API gateway written in Rust.**  
-Transparent SSE byte-stream passthrough · Lock-free `ArcSwap` routing · Pre-first-byte failover
+**xlite** is an ultra-thin, high-concurrency OpenAI streaming load balancer written in Rust. It isolates **model channel scheduling and failover (`priority + weight + pre-first-byte failover`)** into a **zero-JSON-per-chunk, zero-hot-path-DB-I/O Rust data plane** backed by a purpose-built 10k+ streaming HTTP/2 connection pool (`xlite-h2-pool`), while shipping an **out-of-the-box single-binary Web Console**.
 
-[![Release](https://img.shields.io/badge/release-v0.5.6-blue)](https://github.com/EeroEternal/xlite/releases)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org/)
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="xlite Architecture Topology" width="100%">
+</p>
 
-[Getting Started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Deployment](deploy/README.md) · [Changelog](docs/changelog.md)
+## Why xlite
 
-</div>
+Full-stack AI gateways ([LiteLLM](https://github.com/BerriAI/litellm), [New API](https://github.com/QuantumNous/new-api)) parse full JSON request trees, query PostgreSQL/MySQL/Redis on every request for quotas, and deserialize every outbound `data: {...}` SSE chunk. Under 10,000+ concurrent streams, the gateway itself becomes the CPU and TTFT bottleneck.
 
----
+- **Raw `Bytes` Zero-Parse SSE Passthrough** — On ingress, `xlite` peeks only the top-level `"model"` field without building a JSON DOM (forwarding the original `Bytes` buffer untouched when `upstream_model == model`). On egress, SSE chunks stream directly as raw `Bytes` frames with zero JSON parsing, line splitting, or re-serialization ([deep dive](docs/architecture.md#2-zero-parse-data-plane-srcproxyrs)).
+- **`priority + weight` Channel Scheduling & Pre-First-Byte Failover** — Groups channels for a public model by `priority` ascending (`0` = primary tier; `1, 2, …` = backup tiers), load-balances within each tier by `weight`, and fails over transparently **before the first response byte** on TCP/H2 dial errors, header timeouts, `429`, or `5xx` ([deep dive](docs/architecture.md#4-priority--weight-routing--pre-first-byte-failover)).
+- **Purpose-Built 10k+ Streaming HTTP/2 Pool (`xlite-h2-pool`)** — Standard `reqwest` reuses a single HTTP/2 connection per host and queues streams internally once `SETTINGS_MAX_CONCURRENT_STREAMS` fills up. `xlite-h2-pool` reads live peer `SETTINGS` during the handshake and scales TCP connections horizontally up to `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`, paired with `StallGuard` and instant `RST_STREAM(CANCEL)` propagation ([deep dive](docs/architecture.md#5-native-upstream-http2-pool-xlite-h2-pool)).
+- **0 Hot-Path DB I/O + Single-Binary Web Console** — Precomputes SHA-256 API key hashes, channel tiers, and HTTP headers into a lock-free in-memory snapshot ([deep dive](docs/architecture.md#3-lock-free-arcswap-snapshot-srcstorers)), while embedding a complete React Admin Console, GitOps YAML import/export, and pluggable **SQLite / In-Memory / Redis** catalog storage in one static binary.
 
-## Why xlite?
+| Dimension | **xlite** | **[LiteLLM](https://github.com/BerriAI/litellm)** | **[New API](https://github.com/QuantumNous/new-api)** | **[AISIX OSS](https://github.com/api7/aisix)** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Runtime & Role** | **Rust · Ultra-thin OpenAI streaming load balancer** | Python · Multi-SDK adapter & spend governance | Go · Multi-tenant SaaS billing & quota portal | Rust · Full protocol-translation & Agent gateway |
+| **SSE Streaming Path** | **Raw `Bytes` zero-parse passthrough** | Per-chunk JSON parse & Python object build | Per-chunk JSON parse & token accounting | SSE parser + cross-protocol translation |
+| **Hot-Path DB / Redis I/O** | **0 queries** (lock-free routing snapshot) | Per-request auth, rate-limit & spend I/O | Per-request auth, quota & billing I/O | 0 queries (`ArcSwap`) |
+| **Upstream Connection Pool** | **Peer `SETTINGS`-aware `xlite-h2-pool` + `RST_STREAM(CANCEL)`** | `httpx` / `aiohttp` | Go `net/http` transport | Standard `reqwest` / `hyper` |
+| **Built-in Web Console** | **Yes (single binary, stateless HMAC cookie)** | Yes | Yes (full user + admin portal) | **No in OSS** (Enterprise/Cloud only) |
 
-Most AI gateways sit on the critical path of every token: they deserialize JSON requests, query a database or Redis for user quotas, and parse every Server-Sent Events (SSE) chunk on the way back. Under high concurrency, the gateway itself becomes the latency and CPU bottleneck.
+## Performance Highlights
 
-**xlite** is designed strictly as a **high-throughput, low-latency L7 data plane** for OpenAI-compatible LLM traffic:
+Single-node benchmark (**28 vCPU** pinned to `xlite`, 24 upstream `h2c` SSE mock instances with 500 ms base TTFT, **10.55M total requests** across 36 stages from 1,000 to 18,000 concurrent streams — full 36-stage tables and root-cause ablations in [`docs/benchmarks.md`](docs/benchmarks.md)):
 
-- **Zero-Parse SSE Passthrough**: Inspects only the top-level `"model"` field on ingress (`serde::de::IgnoredAny` skips the rest of the payload) and pipes upstream SSE response chunks as raw `Bytes` with zero JSON re-serialization.
-- **Zero Storage I/O on the Hot Path**: All API keys, model bindings, pre-sorted priority groups, and upstream `HeaderName`/`HeaderValue` pairs are precomputed into an in-memory snapshot managed by lock-free `ArcSwap`. The request path never touches SQLite or Redis.
-- **Priority + Weighted Failover**: Follows the battle-tested channel scheduling model (weighted random within the lowest priority number) and automatically fails over to backup channels on connection errors, header timeouts, `429 Too Many Requests`, or `5xx` before the first response byte is sent.
-- **Purpose-Built Upstream Pools**:
-  - **`xlite-h2-pool`**: Custom HTTP/2 multiplexing pool that tracks peer `SETTINGS_MAX_CONCURRENT_STREAMS` in real time and scales connections only when streams saturate.
-  - **`xlite-h1-pool`**: Bounded HTTP/1.1 keep-alive pool with LIFO idle socket reuse and strict per-host concurrency admission (`XLITE_UPSTREAM_MAX_CONNS_PER_HOST`).
-- **Two-Stage Stream Guard**: Independently guards time-to-first-response-header (`XLITE_UPSTREAM_HEADER_TIMEOUT_MS`) and mid-stream token stalls (`XLITE_UPSTREAM_STREAM_IDLE_TIMEOUT_MS`).
-- **Single Binary + Built-in Console**: Ships as a single static binary with an embedded React operational console, declarative YAML catalog import/export (`xlite import` / `xlite export`), and flexible persistence (SQLite, In-Memory, or Redis cluster).
-
----
-
-## How xlite Compares
-
-| Feature / Architecture | **xlite** | **new-api** | **Apache APISIX (AI Gateway)** |
-| :--- | :--- | :--- | :--- |
-| **Runtime** | **Rust** (`tokio` + `axum` + `hyper`) | Go (`gin`) | Nginx + LuaJIT + `etcd` |
-| **SSE Streaming Path** | **Raw `Bytes` passthrough (zero chunk parsing)** | Per-chunk JSON parse & re-encode | Lua phase hooks & buffering |
-| **Request-Path DB / Redis I/O** | **0 queries** (lock-free `ArcSwap` snapshot) | Per-request auth, quota & billing I/O | In-memory via `etcd` sync |
-| **Upstream HTTP/2 & HTTP/1.1** | **SETTINGS-aware H2 pool + bounded LIFO H1 pool** | Standard `net/http` transport | Nginx upstream keepalive |
-| **Pre-computed Wire Headers** | **Yes** (validated & cached on catalog reload) | Constructed per request | Constructed per request |
-| **Deployment Footprint** | **1 binary** (SQLite / Memory / Redis) | Binary + MySQL/PostgreSQL + Redis | OpenResty + `etcd` control plane |
-| **Target Use Case** | **High-concurrency LLM routing & failover data plane** | Multi-tenant SaaS portal, billing & format hub | Enterprise general API gateway |
-
----
+<p align="center">
+  <img src="docs/assets/benchmarks.svg" alt="xlite Single-Node Streaming Benchmark" width="100%">
+</p>
 
 ## Quick Start
 
-### 1. Run from Source
+**Option 1 — Docker (all-in-one gateway + Web Console):**
 
 ```bash
-export ADMIN_PASSWORD=admin
-cargo run --release
+docker run -d --name xlite -p 8080:8080 \
+  -e ADMIN_PASSWORD=admin \
+  -v xlite-data:/opt/xlite/data \
+  -e DATABASE_URL=sqlite:/opt/xlite/data/xlite.db \
+  ghcr.io/eeroeternal/xlite:latest
 ```
 
-By default, `xlite` listens on `0.0.0.0:8080` and persists configuration to `sqlite:xlite.db`.
+**Option 2 — Pre-built Single Binary:**
 
 ```bash
-# In-memory mode (for zero-disk load testing / benchmarking)
-DATABASE_URL=memory ADMIN_PASSWORD=admin cargo run --release
-
-# Cluster mode (shared catalog across nodes via Redis)
-REDIS_URL=redis://127.0.0.1:6379 ADMIN_PASSWORD=admin cargo run --release
+# Download the release binary for your OS/Arch, then start:
+ADMIN_PASSWORD=admin ./xlite
 ```
 
-### 2. Declarative Catalog (GitOps YAML)
-
-Import and export providers, models (channels), and API keys via CLI or HTTP API:
+Open the Web Console at **`http://127.0.0.1:8080`** to configure providers, `priority + weight` channels, and API keys visually—or import [`examples/catalog.yaml`](examples/catalog.yaml) in one click (`Settings → Import YAML` or `xlite import examples/catalog.yaml --replace`; see [`deploy/env.example`](deploy/env.example) for runtime environment variables). Then send an OpenAI streaming request:
 
 ```bash
-# Replace or merge catalog from YAML
-xlite import examples/catalog.yaml --replace
-xlite export catalog.yaml
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer sk-loadtest" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-### 3. Docker Compose (with 24 Upstream Mocks + Redis)
+## Documentation
 
-See [`deploy/README.md`](deploy/README.md) for containerized deployment and load-test topology:
-
-```bash
-cd deploy
-cp env.example .env
-docker compose up -d --build
-docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
-```
-
----
-
-## Architecture & Request Lifecycle
-
-```mermaid
-flowchart LR
-    Client["Client\nPOST /v1/chat/completions"] --> Auth["API Key Auth\n(SHA-256 Lookup)"]
-    Auth --> Peek["Zero-Parse Model Peek\n(Raw Bytes Preserved)"]
-    Peek --> Pick["Priority + Weight Scheduler\n(Lock-Free ArcSwap Snapshot)"]
-    Pick --> Pool["Upstream Pool\n(xlite-h2-pool / xlite-h1-pool)"]
-    Pool -->|429 / 5xx / Header Timeout| Pick
-    Pool -->|200 OK + StallGuard| Stream["Raw SSE Byte Stream\nto Client"]
-```
-
-### Core Endpoints
-
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `POST` | `/v1/chat/completions` | OpenAI-compatible chat completion proxy (streaming & non-streaming) |
-| `GET` | `/v1/models` | Lists public models available to the caller's API key |
-| `GET` | `/health` | Liveness probe (process up) |
-| `GET` | `/ready` | Readiness probe (catalog snapshot healthy) |
-| `*` | `/api/*` | Control-plane REST API & built-in Admin UI |
-
----
-
-## Configuration
-
-| Environment Variable | Default | Description |
-| :--- | :--- | :--- |
-| `LISTEN_ADDR` | `0.0.0.0:8080` | Listen address (`HOST:PORT`) |
-| `DATABASE_URL` | `sqlite:xlite.db` | SQLite path (`sqlite:...`) or `memory` |
-| `REDIS_URL` | *(unset)* | Redis URL (`redis://...`) for shared cluster catalog |
-| `ADMIN_PASSWORD` | *(required)* | Admin UI & `/api/*` password |
-| `XLITE_CATALOG_RELOAD_SECS` | `5` | Background catalog snapshot refresh interval (`0` to freeze) |
-| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `128` | Max upstream connections / in-flight HTTP/1.1 requests per host |
-| `XLITE_UPSTREAM_HEADER_TIMEOUT_MS` | `30000` | Timeout waiting for upstream response headers (`0` to disable) |
-| `XLITE_UPSTREAM_STREAM_IDLE_TIMEOUT_MS` | `60000` | Per-chunk idle timeout for active response streams (`0` to disable) |
-| `XLITE_UPSTREAM_H2C` | `false` | Enable cleartext HTTP/2 (`h2c`) via `xlite-h2-pool` |
-
----
-
-## Development & Verification Gates
-
-```bash
-# Run full local CI suite (docs, Rust fmt/clippy/tests, H2 pool, Admin UI)
-bash scripts/ci_local.sh --all --tier t2
-```
+- [Architecture & Technical Deep Dive](docs/architecture.md) — zero-parse data plane, `ArcSwap` snapshot, routing/failover walkthrough, `xlite-h2-pool`, and `StallGuard`
+- [Single-Node Benchmarks & Root-Cause Ablations](docs/benchmarks.md) — 36-stage load test (1k–18k VUs, 10.55M requests) and HTTP/2 & `RLIMIT_NOFILE` ablations
+- [Operator Manual & Configuration Reference](docs/manual/xlite.md) — all `XLITE_*` environment variables, storage modes (`SQLite` / `memory` / `Redis`), and pool tuning
+- [Getting Started Guide](docs/getting-started.md) — 5-minute closed-loop setup, YAML catalog workflow, and `/health` & `/ready` probes
+- [24-Mock Docker Compose Harness](deploy/README.md) — containerized 24-upstream mock + Redis cluster for local stress testing
+- [Admin UI Design Specification](docs/design.md) — embedded React console visual and interaction design
+- [Changelog](docs/changelog.md) — release history

@@ -30,7 +30,7 @@ Structure:
 1. `PageShell` → `PageContainer` → `PageHeader`: page title on the left, one primary create action on the right.
 2. `EntityListToolbar`: search input on the left (placeholder enumerates the fields actually searched); sort `Select` and the right-aligned result count on the right.
 3. One level-1 `Card` (`py-0 overflow-hidden`) containing a `Table`. The empty state is a centered muted paragraph inside that card, not a separate tile.
-4. Sort option labels include direction (`名称（A→Z）` / `Name (Z→A)`), never a bare field name.
+4. Sort option labels include direction (`Name (A→Z)` / `Name (Z→A)`), never a bare field name.
 5. Status column uses `Badge` (`success` for enabled, `inactive` for disabled).
 6. Trailing actions cell uses inline ghost `Button size="sm"` actions (domain action / Edit / Delete). Destructive actions set a `pending*` state and confirm through `ConfirmAlertDialog`.
 7. Long keys and URLs render with `font-mono text-xs`; they may wrap but must not widen the page.

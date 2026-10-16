@@ -1,3 +1,3 @@
-# 24 mock + Redis
+# 24 Mock + Redis (Docker)
 
-操作说明见仓库 [`deploy/README.md`](../../deploy/README.md)。在 `deploy/` 目录用 Docker Compose 启动。
+See [`deploy/README.md`](../../deploy/README.md) for full operational instructions. Run with Docker Compose from the `deploy/` directory.

@@ -40,6 +40,6 @@ if [[ -n "$pinned" ]]; then
 fi
 
 if [[ "$findings" -eq 0 ]]; then
-  echo "✓ 文档生命周期与链接检查通过：断链/残缺零发现；deploy/ 版本引用与 Cargo.toml (${version}) 一致"
+  echo "✓ docs lifecycle and link check passed: 0 broken/mangled links; deploy/ version matches Cargo.toml (${version})"
 fi
 exit "$findings"

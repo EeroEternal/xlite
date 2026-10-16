@@ -34,8 +34,8 @@ Pick one. Same tokens; different structure.
 
 | Type | Structure | Used by |
 | --- | --- | --- |
-| 单栏表格型 | Toolbar (search / sort / count) → full-width table | providers, models, API keys |
-| 数据看板型 | KPI card row → optional module | overview |
+| Single-column table | Toolbar (search / sort / count) → full-width table | providers, models, API keys |
+| Dashboard KPI | KPI card row → optional module | overview |
 | Settings | Read-only fact rows + operations | settings |
 
 A content page is: title + page actions → optional toolbar row → main. Do not put filters in the top bar or beside the title, and do not invent a fourth page type.

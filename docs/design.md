@@ -38,8 +38,8 @@ Do not collapse chapters into one mega-prompt. Load this entry, then **only** th
 
 | Job | Page type | Shape |
 | --- | --- | --- |
-| Scan and act | 单栏表格型 | Toolbar (search / sort / count) → full-width table; create and edit open a Dialog over the list |
-| Glance then drill | 数据看板型 | KPI row → main module |
+| Scan and act | Single-column table | Toolbar (search / sort / count) → full-width table; create and edit open a Dialog over the list |
+| Glance then drill | Dashboard KPI | KPI row → main module |
 | Change global config | Settings | Settings page only |
 
 ## Reading map

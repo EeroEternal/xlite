@@ -1,7 +1,11 @@
-# xlite catalog. One public model, many providers, one API key.
-# Scheduling is always: same priority → weighted random; then failover by priority.
+# xlite declarative catalog example.
 #
-#   xlite import examples/catalog.yaml
+# Scheduling rule for every public model:
+#   1. Group enabled channels by `priority` ascending (0 = primary active tier; 1, 2, ... = backup tiers).
+#   2. Within each priority tier, pick channels by weighted random (`weight / tier_total_weight`).
+#   3. Fail over to the next candidate before the first response byte on connect/header timeout, 429, or 5xx.
+#
+# Usage:
 #   xlite import examples/catalog.yaml --replace
 #   xlite export catalog.yaml
 
@@ -14,24 +18,35 @@ providers:
     base_url: http://127.0.0.1:4102
     api_key: ""
     enabled: true
+  - name: mock-backup
+    base_url: http://127.0.0.1:4103
+    api_key: ""
+    enabled: true
 
 models:
   - name: mock
     enabled: true
     channels:
+      # Tier 0 (Primary Active Pool): 75% / 25% weighted split
       - provider: mock-4101
         upstream_model: mock
-        weight: 1
         priority: 0
+        weight: 3
         enabled: true
       - provider: mock-4102
         upstream_model: mock
-        weight: 1
         priority: 0
+        weight: 1
+        enabled: true
+      # Tier 1 (Failover Backup): only used if all Tier 0 channels fail before the first byte
+      - provider: mock-backup
+        upstream_model: mock
+        priority: 1
+        weight: 1
         enabled: true
 
 api_keys:
   - name: loadtest
     key: sk-loadtest
-    models: []
+    models: [] # empty = allow all public models
     enabled: true

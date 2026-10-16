@@ -2,26 +2,36 @@
 
 ## Start
 
+**Docker (recommended):**
+
 ```bash
-export ADMIN_PASSWORD=admin
-export XLITE_UPSTREAM_H2C=1
-cargo run --release
+docker run -d --name xlite -p 8080:8080 \
+  -e ADMIN_PASSWORD=admin \
+  -v xlite-data:/opt/xlite/data \
+  -e DATABASE_URL=sqlite:/opt/xlite/data/xlite.db \
+  ghcr.io/eeroeternal/xlite:latest
 ```
 
-Default listen is `0.0.0.0:8080`. Catalog defaults to `sqlite:xlite.db`.
+**Pre-built binary (or from source via `cargo build --release`):**
+
+```bash
+ADMIN_PASSWORD=admin ./xlite
+```
+
+Default listen is `0.0.0.0:8080` (serving both `/v1/*` and the embedded Web Console). Catalog defaults to `sqlite:xlite.db`.
 
 | Need | Set |
 | --- | --- |
 | Load-test catalog | `DATABASE_URL=memory` |
 | Shared cluster catalog | `REDIS_URL=redis://127.0.0.1:6379` |
-| Admin UI in dev | `cd admin && npm install && npm run dev` |
+| Plaintext HTTP/2 (`h2c`) upstreams | `XLITE_UPSTREAM_H2C=1` |
 
 ## Load a routing catalog
 
-One public model can point at many providers. One API key with `models: []` can use that model.
+Open the Web Console at `http://127.0.0.1:8080` (`Settings → Import YAML`) or import [`examples/catalog.yaml`](../examples/catalog.yaml) via the CLI:
 
 ```bash
-xlite import examples/mock-24.yaml --replace
+xlite import examples/catalog.yaml --replace
 ```
 
 The command prints any newly generated API key once. Then:

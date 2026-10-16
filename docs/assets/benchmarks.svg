@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 320" width="100%" height="auto" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0F172A" flood-opacity="0.06"/>
+    </filter>
+    <linearGradient id="bar-blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="bar-emerald" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="bar-indigo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#4338CA"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="980" height="320" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <!-- Top KPI Banner (4 Cards) -->
+  <g filter="url(#shadow)">
+    <!-- KPI 1 -->
+    <rect x="20" y="16" width="220" height="58" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="130" y="39" text-anchor="middle" font-size="18" font-weight="800" fill="#1D4ED8">18,000 Streams</text>
+    <text x="130" y="58" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">Concurrent Active VUs (Single Node)</text>
+
+    <!-- KPI 2 -->
+    <rect x="260" y="16" width="220" height="58" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="370" y="39" text-anchor="middle" font-size="18" font-weight="800" fill="#047857">2.12 – 2.50 ms</text>
+    <text x="370" y="58" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">P50 Gateway TTFT Overhead @ 18k</text>
+
+    <!-- KPI 3 -->
+    <rect x="500" y="16" width="220" height="58" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="610" y="39" text-anchor="middle" font-size="18" font-weight="800" fill="#4338CA">1.70M tok/s</text>
+    <text x="610" y="58" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">Peak Output (~101.8M Tokens/min)</text>
+
+    <!-- KPI 4 -->
+    <rect x="740" y="16" width="220" height="58" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <text x="850" y="39" text-anchor="middle" font-size="18" font-weight="800" fill="#0F172A">100.0% Success</text>
+    <text x="850" y="58" text-anchor="middle" font-size="10.5" font-weight="500" fill="#64748B">10.55M Requests · 0 Errors (36 Stages)</text>
+  </g>
+
+  <!-- ==================== LEFT CHART: TTFT OVERHEAD (1k -> 18k VUs) ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="88" width="460" height="214" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+  </g>
+  <text x="38" y="112" font-size="12.5" font-weight="700" fill="#0F172A">Gateway TTFT Overhead vs. Concurrent Streams</text>
+  <text x="38" y="127" font-size="10" fill="#64748B">5s Stream · 20–50 tok/s (Lower &amp; flatter is better)</text>
+
+  <!-- Legend Left -->
+  <circle cx="356" cy="110" r="4" fill="#2563EB"/>
+  <text x="364" y="114" font-size="10" font-weight="600" fill="#334155">P50 (ms)</text>
+  <circle cx="418" cy="110" r="4" fill="#93C5FD"/>
+  <text x="426" y="114" font-size="10" font-weight="600" fill="#334155">P90 (ms)</text>
+
+  <!-- Y-Axis Gridlines (0ms to 10ms) -->
+  <g stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3 3">
+    <line x1="64" y1="150" x2="454" y2="150"/>
+    <line x1="64" y1="184" x2="454" y2="184"/>
+    <line x1="64" y1="218" x2="454" y2="218"/>
+    <line x1="64" y1="252" x2="454" y2="252"/>
+  </g>
+  <line x1="64" y1="268" x2="454" y2="268" stroke="#94A3B8" stroke-width="1.2"/>
+
+  <!-- Y-Axis Labels (0ms = y268, 2.5ms = y240, 5ms = y218, 7.5ms = y184, 10ms = y150) -->
+  <g font-size="9.5" fill="#64748B" text-anchor="end">
+    <text x="58" y="153">10 ms</text>
+    <text x="58" y="187">7.5 ms</text>
+    <text x="58" y="221">5.0 ms</text>
+    <text x="58" y="255">2.5 ms</text>
+    <text x="58" y="271">0 ms</text>
+  </g>
+
+  <!-- X-Axis Positions: 1k(96), 2k(162), 5k(228), 10k(294), 15k(360), 18k(426) -->
+  <!-- P90 Line (50 tok/s: 5.7ms, 3.87ms, 2.75ms, 2.95ms, 3.30ms, 4.06ms) -->
+  <polyline fill="none" stroke="#93C5FD" stroke-width="2.2" points="96,201 162,222 228,236 294,233 360,229 426,220"/>
+  <g fill="#93C5FD">
+    <circle cx="96" cy="201" r="3.5"/>
+    <circle cx="162" cy="222" r="3.5"/>
+    <circle cx="228" cy="236" r="3.5"/>
+    <circle cx="294" cy="233" r="3.5"/>
+    <circle cx="360" cy="229" r="3.5"/>
+    <circle cx="426" cy="220" r="3.5"/>
+  </g>
+
+  <!-- P50 Line (50 tok/s: 3.30ms, 2.65ms, 1.85ms, 2.02ms, 2.10ms, 2.14ms) -->
+  <polyline fill="none" stroke="#2563EB" stroke-width="2.6" points="96,229 162,237 228,246 294,244 360,243 426,242"/>
+  <g fill="#2563EB">
+    <circle cx="96" cy="229" r="4"/>
+    <circle cx="162" cy="237" r="4"/>
+    <circle cx="228" cy="246" r="4"/>
+    <circle cx="294" cy="244" r="4"/>
+    <circle cx="360" cy="243" r="4"/>
+    <circle cx="426" cy="242" r="4"/>
+  </g>
+
+  <!-- Data Labels on P50 -->
+  <g font-size="9.5" font-weight="700" fill="#1D4ED8" text-anchor="middle">
+    <text x="96" y="244">3.3ms</text>
+    <text x="228" y="261">1.9ms</text>
+    <text x="294" y="259">2.0ms</text>
+    <text x="360" y="258">2.1ms</text>
+    <text x="426" y="257">2.1ms</text>
+  </g>
+  <g font-size="9" font-weight="600" fill="#3B82F6" text-anchor="middle">
+    <text x="426" y="211">3.9ms</text>
+  </g>
+
+  <!-- X-Axis Labels Left -->
+  <g font-size="10" font-weight="600" fill="#475569" text-anchor="middle">
+    <text x="96" y="286">1k VUs</text>
+    <text x="162" y="286">2k VUs</text>
+    <text x="228" y="286">5k VUs</text>
+    <text x="294" y="286">10k VUs</text>
+    <text x="360" y="286">15k VUs</text>
+    <text x="426" y="286">18k VUs</text>
+  </g>
+
+  <!-- ==================== RIGHT CHART: OUTPUT THROUGHPUT (TOK/S) ==================== -->
+  <g filter="url(#shadow)">
+    <rect x="500" y="88" width="460" height="214" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+  </g>
+  <text x="518" y="112" font-size="12.5" font-weight="700" fill="#0F172A">Steady-State Output Throughput (Tokens/sec)</text>
+  <text x="518" y="127" font-size="10" fill="#64748B">Linear scaling up to 1.70M tok/s at 18,000 concurrent streams</text>
+
+  <!-- Legend Right -->
+  <rect x="752" y="105" width="8" height="8" rx="2" fill="#10B981"/>
+  <text x="764" y="113" font-size="9.5" font-weight="600" fill="#334155">20 tok/s</text>
+  <rect x="814" y="105" width="8" height="8" rx="2" fill="#3B82F6"/>
+  <text x="826" y="113" font-size="9.5" font-weight="600" fill="#334155">50 tok/s</text>
+  <rect x="876" y="105" width="8" height="8" rx="2" fill="#6366F1"/>
+  <text x="888" y="113" font-size="9.5" font-weight="600" fill="#334155">100 tok/s</text>
+
+  <!-- Y-Axis Gridlines Right (0 to 1.8M tok/s; y268 = 0, y148 = 1.8M => 66.7px per 1M) -->
+  <g stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3 3">
+    <line x1="552" y1="148" x2="940" y2="148"/>
+    <line x1="552" y1="188" x2="940" y2="188"/>
+    <line x1="552" y1="228" x2="940" y2="228"/>
+  </g>
+  <line x1="552" y1="268" x2="940" y2="268" stroke="#94A3B8" stroke-width="1.2"/>
+
+  <g font-size="9.5" fill="#64748B" text-anchor="end">
+    <text x="546" y="151">1.8M</text>
+    <text x="546" y="191">1.2M</text>
+    <text x="546" y="231">600k</text>
+    <text x="546" y="271">0</text>
+  </g>
+
+  <!-- Grouped Bars at 5k, 10k, 15k, 18k VUs -->
+  <!-- 5k VUs (center x=602): 95k(h=6), 238k(h=16), 475k(h=32) -->
+  <rect x="578" y="262" width="14" height="6" rx="2" fill="url(#bar-emerald)"/>
+  <rect x="595" y="252" width="14" height="16" rx="2" fill="url(#bar-blue)"/>
+  <rect x="612" y="236" width="14" height="32" rx="2" fill="url(#bar-indigo)"/>
+  <text x="619" y="231" text-anchor="middle" font-size="9" font-weight="700" fill="#4338CA">475k</text>
+
+  <!-- 10k VUs (center x=698): 191k(h=13), 475k(h=32), 949k(h=63) -->
+  <rect x="674" y="255" width="14" height="13" rx="2" fill="url(#bar-emerald)"/>
+  <rect x="691" y="236" width="14" height="32" rx="2" fill="url(#bar-blue)"/>
+  <rect x="708" y="205" width="14" height="63" rx="2" fill="url(#bar-indigo)"/>
+  <text x="715" y="200" text-anchor="middle" font-size="9" font-weight="700" fill="#4338CA">949k</text>
+
+  <!-- 15k VUs (center x=794): 286k(h=19), 713k(h=48), 1.42M(h=95) -->
+  <rect x="770" y="249" width="14" height="19" rx="2" fill="url(#bar-emerald)"/>
+  <rect x="787" y="220" width="14" height="48" rx="2" fill="url(#bar-blue)"/>
+  <rect x="804" y="173" width="14" height="95" rx="2" fill="url(#bar-indigo)"/>
+  <text x="811" y="168" text-anchor="middle" font-size="9" font-weight="700" fill="#4338CA">1.42M</text>
+
+  <!-- 18k VUs (center x=890): 343k(h=23), 855k(h=57), 1.70M(h=113) -->
+  <rect x="866" y="245" width="14" height="23" rx="2" fill="url(#bar-emerald)"/>
+  <rect x="883" y="211" width="14" height="57" rx="2" fill="url(#bar-blue)"/>
+  <rect x="900" y="155" width="14" height="113" rx="2" fill="url(#bar-indigo)"/>
+  <text x="890" y="206" text-anchor="middle" font-size="8.5" font-weight="700" fill="#1D4ED8">855k</text>
+  <text x="907" y="149" text-anchor="middle" font-size="9.5" font-weight="800" fill="#4338CA">1.70M</text>
+
+  <!-- X-Axis Labels Right -->
+  <g font-size="10" font-weight="600" fill="#475569" text-anchor="middle">
+    <text x="602" y="286">5k VUs</text>
+    <text x="698" y="286">10k VUs</text>
+    <text x="794" y="286">15k VUs</text>
+    <text x="890" y="286">18k VUs</text>
+  </g>
+</svg>

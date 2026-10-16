@@ -1,5 +1,5 @@
-//! Upstream HTTP client. h2c uses the native pool (Go-style stream accounting);
-//! everything else uses reqwest.
+//! Upstream HTTP client. h2c uses the native `xlite-h2-pool` (peer `SETTINGS`-aware
+//! stream accounting); HTTP/1.1 and HTTPS use `reqwest` (or can be fronted by `xLB`).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -11,11 +11,8 @@ use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
-use http_body_util::Full;
-use hyper::body::Body;
 use reqwest::Client;
 use tokio::net::TcpStream;
-use xlite_h1_pool::{Config as H1PoolConfig, Lease as H1Lease, Pool as H1Pool, ResponseBody};
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
@@ -57,8 +54,6 @@ pub fn build_auth(
             "unknown auth_scheme `{scheme}` (expected bearer, raw or none)"
         ));
     }
-    // The credential header is validated even when it will not be sent, so a
-    // typo is rejected at write time instead of silently doing nothing.
     let name = if header.trim().is_empty() {
         "authorization".to_string()
     } else {
@@ -69,7 +64,6 @@ pub fn build_auth(
         return Ok(None);
     }
     let value = match scheme.as_str() {
-        // Identical to `authorization_header()` — the default path is unchanged.
         "bearer" => authorization_header(api_key),
         _ => api_key.to_string(),
     };
@@ -119,8 +113,6 @@ fn valid_header_name(name: &str) -> std::result::Result<HeaderName, String> {
 pub struct Upstream {
     h2c: bool,
     pool: Arc<Pool>,
-    /// Native HTTP/1.1 pool — it owns every cleartext `http://` upstream.
-    h1: Arc<H1Pool>,
     http: Client,
     /// Bound on the request→response-headers wait (see
     /// [`Config::upstream_header_timeout`]). `Duration::ZERO` = unbounded.
@@ -130,13 +122,9 @@ pub struct Upstream {
 pub struct UpstreamBody {
     inner: BodyKind,
     _lease: Option<Lease>,
-    /// Holds the native HTTP/1.1 pool lease for the whole response body so the
-    /// connection stays reserved until it is fully consumed.
-    _h1: Option<H1Lease>,
 }
 
 enum BodyKind {
-    H1(ResponseBody),
     H2(h2::RecvStream, usize),
     Pump(tokio::sync::mpsc::Receiver<Result<Bytes, String>>),
     Reqwest(Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>),
@@ -164,26 +152,8 @@ impl Upstream {
             dial,
             idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
         });
-        // The h1 pool is a different crate with its own `Dial`/`BoxIo` types, so
-        // it gets its own dial closure (same shape, same TCP+nodelay setup); it
-        // owns every cleartext `http://` upstream.
-        let h1_dial: xlite_h1_pool::Dial = Arc::new(|host: String| {
-            Box::pin(async move {
-                let stream = TcpStream::connect(host.as_str()).await?;
-                let _ = stream.set_nodelay(true);
-                Ok(Box::new(stream) as Box<dyn xlite_h1_pool::BoxIo>)
-            })
-        });
-        let h1 = Arc::new(H1Pool::new(H1PoolConfig {
-            // HTTP/1.1 spends one connection per in-flight request, so this pool
-            // gets its own (higher) default — see `Config::h1_max_conns_per_host`.
-            max_conns_per_host: cfg.h1_max_conns_per_host.max(1),
-            idle_timeout: xlite_h1_pool::DEFAULT_IDLE_TIMEOUT,
-            min_idle_conns: xlite_h1_pool::DEFAULT_MIN_IDLE_CONNS,
-            dial: h1_dial,
-        }));
         let http = Client::builder()
-            .pool_max_idle_per_host(64)
+            .pool_max_idle_per_host(cfg.max_conns_per_host.max(64))
             .tcp_nodelay(true)
             .timeout(Duration::from_secs(600))
             .build()
@@ -191,7 +161,6 @@ impl Upstream {
         Self {
             h2c: cfg.h2c,
             pool: Arc::new(pool),
-            h1,
             http,
             header_timeout: cfg.upstream_header_timeout,
         }
@@ -225,25 +194,8 @@ impl Upstream {
     }
 
     /// Read-only pool snapshot for the control plane (`GET /api/pool`).
-    ///
-    /// Deliberately **not** on the data path: nothing in `proxy.rs` calls this.
-    /// It exists so a load-test probe can read the real per-host connection and
-    /// in-flight counts instead of inferring them from `ss` (issue #49), and so
-    /// "what was the pool doing when those 502s happened?" is answerable.
     pub fn pool_stats(&self) -> Vec<(String, xlite_h2_pool::PoolStats)> {
         self.pool.all_stats()
-    }
-
-    /// Pool-wide data-path diagnostics (`GET /api/pool`): sampled stream
-    /// progress (stall signatures), pump channel depth, cancel counts/spans.
-    /// Read side only; the write side is relaxed atomics (see `xlite_h2_pool::diag`).
-    pub fn diag_stats(&self) -> xlite_h2_pool::DiagSnap {
-        self.pool.diag_snap()
-    }
-
-    /// Connection-level stats for the native HTTP/1.1 pool (`GET /api/pool`).
-    pub fn h1_pool_stats(&self) -> Vec<(String, xlite_h1_pool::PoolStats)> {
-        self.h1.all_stats()
     }
 
     pub async fn post_stream(
@@ -255,70 +207,10 @@ impl Upstream {
         extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
     ) -> Result<UpstreamResponse> {
-        // Auth header, extra headers, authority and path are all computed once
-        // per channel at snapshot build — the request path parses nothing.
-        //
-        // Cleartext `http://` always goes through the native h1 pool; `H2C=1`
-        // hands it to the h2c pool instead. `https://` keeps reqwest.
-        if endpoint.starts_with("http://") {
-            if self.h2c {
-                return self.post_h2c(authority, path, auth, extra, body).await;
-            }
-            return self.post_h1(authority, path, auth, extra, body).await;
+        if self.h2c && endpoint.starts_with("http://") {
+            return self.post_h2c(authority, path, auth, extra, body).await;
         }
         self.post_reqwest(endpoint, auth, extra, body).await
-    }
-
-    /// Send one request through the native HTTP/1.1 pool. The returned lease is
-    /// held by the response body so the connection stays reserved until the body
-    /// is fully consumed. (`&self` is unused on purpose: connection selection and
-    /// dialing are entirely the pool's job.)
-    async fn post_h1(
-        &self,
-        authority: &str,
-        path: &str,
-        auth: Option<&(HeaderName, HeaderValue)>,
-        extra: &[(HeaderName, HeaderValue)],
-        body: Bytes,
-    ) -> Result<UpstreamResponse> {
-        if authority.is_empty() {
-            anyhow::bail!("upstream url missing host");
-        }
-        let lease = self
-            .h1
-            .acquire(authority)
-            .await
-            .map_err(|e| anyhow::anyhow!("h1 pool acquire: {e}"))?;
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri(path)
-            .header("host", authority)
-            .header("content-type", "application/json");
-        if let Some((name, value)) = auth {
-            builder = builder.header(name.clone(), value.clone());
-        }
-        for (name, value) in extra {
-            builder = builder.header(name.clone(), value.clone());
-        }
-        let request = builder.body(Full::new(body)).context("build h1 request")?;
-        let response = self
-            .await_headers(lease.send_request(request), "h1 send_request")
-            .await?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        Ok(UpstreamResponse {
-            status,
-            content_type,
-            body: UpstreamBody {
-                inner: BodyKind::H1(response.into_body()),
-                _lease: None,
-                _h1: Some(lease),
-            },
-        })
     }
 
     async fn post_h2c(
@@ -378,7 +270,6 @@ impl Upstream {
             body: UpstreamBody {
                 inner,
                 _lease: Some(lease),
-                _h1: None,
             },
         })
     }
@@ -415,7 +306,6 @@ impl Upstream {
             body: UpstreamBody {
                 inner: BodyKind::Reqwest(Box::pin(response.bytes_stream())),
                 _lease: None,
-                _h1: None,
             },
         })
     }
@@ -427,22 +317,6 @@ impl Stream for UpstreamBody {
     fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match &mut this.inner {
-            BodyKind::H1(body) => loop {
-                match Pin::new(&mut *body).poll_frame(cx) {
-                    Poll::Ready(Some(Ok(frame))) => {
-                        if let Ok(data) = frame.into_data() {
-                            return Poll::Ready(Some(Ok(data)));
-                        }
-                        // trailers: keep polling for the next data frame
-                    }
-                    Poll::Ready(Some(Err(err))) => {
-                        return Poll::Ready(Some(Err(std::io::Error::other(err))));
-                    }
-                    // Reaching end-of-stream is marked complete by `ResponseBody`.
-                    Poll::Ready(None) => return Poll::Ready(None),
-                    Poll::Pending => return Poll::Pending,
-                }
-            },
             BodyKind::H2(recv, released) => match recv.poll_data(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     *released += bytes.len();
@@ -538,9 +412,6 @@ mod tests {
         );
     }
 
-    /// `GET /api/pool`'s data source: a fresh gateway has dialed nothing, so it
-    /// must report nothing. If it invented hosts, the field probe would size
-    /// connections against capacity that does not exist.
     #[test]
     fn pool_stats_start_empty_for_a_fresh_upstream() {
         let cfg = Config {
@@ -551,10 +422,8 @@ mod tests {
             admin_password: "x".into(),
             session_secret: None,
             max_conns_per_host: 3,
-            h1_max_conns_per_host: 3,
             upstream_stream_cap: 250,
             catalog_reload_secs: 0,
-            upstream_ttft_header: false,
             upstream_stall_timeout: Duration::ZERO,
             upstream_header_timeout: Duration::ZERO,
         };
@@ -591,8 +460,6 @@ mod tests {
         }
     }
 
-    /// The whole point of the feature: an untouched provider must produce exactly
-    /// the header the gateway produced before upstream shapes existed.
     #[test]
     fn default_auth_is_byte_identical_to_the_old_bearer_header() {
         let (name, value) = build_auth("bearer", "", "sk-test")
@@ -602,7 +469,6 @@ mod tests {
         assert_eq!(value.to_str().unwrap(), authorization_header("sk-test"));
         assert_eq!(value.to_str().unwrap(), "Bearer sk-test");
 
-        // An empty `auth_scheme` is the bearer default, not an error.
         let (_, value) = build_auth("", "", "sk-test").unwrap().unwrap();
         assert_eq!(value.to_str().unwrap(), "Bearer sk-test");
     }
@@ -611,7 +477,6 @@ mod tests {
     fn auth_scheme_none_and_empty_key_send_no_credential() {
         assert!(build_auth("none", "", "sk-test").unwrap().is_none());
         assert!(build_auth("bearer", "", "").unwrap().is_none());
-        // A custom header name is still validated even when nothing is sent.
         assert!(build_auth("none", "bad header", "").is_err());
     }
 
@@ -684,16 +549,13 @@ mod tests {
             admin_password: "x".into(),
             session_secret: None,
             max_conns_per_host: 3,
-            h1_max_conns_per_host: 3,
             upstream_stream_cap: 250,
             catalog_reload_secs: 0,
-            upstream_ttft_header: false,
             upstream_stall_timeout: Duration::ZERO,
             upstream_header_timeout: Duration::from_secs(5),
         };
         let up = Upstream::new(&cfg);
 
-        // Ready Ok and Err pass through with the caller's context label.
         let ok = up
             .await_headers(std::future::ready(Ok::<u32, &str>(42)), "h2 response")
             .await
@@ -705,7 +567,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("h2 response: boom"), "{err}");
 
-        // A pending future fails once `header_timeout` elapses.
         let t0 = tokio::time::Instant::now();
         let timed_out = up
             .await_headers(std::future::pending::<Result<u32, &str>>(), "h2 response")
@@ -719,7 +580,6 @@ mod tests {
             "{timed_out}"
         );
 
-        // `Duration::ZERO` disables the header timeout completely.
         cfg.upstream_header_timeout = Duration::ZERO;
         let up_disabled = Upstream::new(&cfg);
         assert!(

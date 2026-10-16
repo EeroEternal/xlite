@@ -8,13 +8,12 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::Stream;
 use futures_util::StreamExt;
-use futures_util::stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::admin::AppState;
 use crate::store::Channel;
@@ -189,9 +188,6 @@ async fn try_channel(
     dom: &mut Option<Value>,
 ) -> Result<Response, String> {
     let body = outbound_body(model, &channel.upstream_model, original, dom)?;
-    // Read the clock only when the diagnostic header is asked for: with the gate
-    // off this path stays exactly what it was.
-    let started = state.config.upstream_ttft_header.then(Instant::now);
     let upstream = state
         .upstream
         .post_stream(
@@ -210,23 +206,13 @@ async fn try_channel(
         let _ = drain_error_body(upstream, state.config.upstream_stall_timeout).await;
         return Err(format!("upstream {} returned {}", channel.base_url, status));
     }
-    Ok(forward_response(upstream, started, state.config.upstream_stall_timeout).await)
+    Ok(forward_response(
+        upstream,
+        state.config.upstream_stall_timeout,
+    ))
 }
 
-/// Response header stamped when `XLITE_UPSTREAM_TTFT_HEADER` is on.
-const UPSTREAM_TTFT_HEADER: &str = "x-xlite-upstream-ttft-ms";
-
-/// Put back a chunk pulled early to time the upstream's first byte, in front of
-/// the rest of the stream. `None` yields the stream unchanged.
-fn with_head<S: Stream>(head: Option<S::Item>, rest: S) -> impl Stream<Item = S::Item> {
-    stream::iter(head).chain(rest)
-}
-
-async fn forward_response(
-    upstream: UpstreamResponse,
-    started: Option<Instant>,
-    stall_timeout: Duration,
-) -> Response {
+fn forward_response(upstream: UpstreamResponse, stall_timeout: Duration) -> Response {
     let mut builder = Response::builder()
         .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY));
     let content_type = upstream
@@ -234,29 +220,14 @@ async fn forward_response(
         .unwrap_or_else(|| "application/json".into());
     builder = builder.header(axum::http::header::CONTENT_TYPE, content_type);
 
-    // Diagnostic gate (`XLITE_UPSTREAM_TTFT_HEADER=1`). Response headers leave
-    // before the body, so the upstream's first-byte time can only be reported by
-    // waiting for that byte first. An upstream that writes headers early would
-    // see its client-visible first byte move later, which is why this is off by
-    // default.
-    let mut body = StallGuard::new(upstream.body, stall_timeout);
-    let mut head: Option<Result<Bytes, std::io::Error>> = None;
-    if let Some(t0) = started {
-        head = body.next().await;
-        if head.is_some() {
-            builder = builder.header(UPSTREAM_TTFT_HEADER, t0.elapsed().as_millis().to_string());
-        }
-    }
-
-    builder
-        .body(Body::from_stream(with_head(head, body)))
-        .unwrap_or_else(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": { "message": "failed to build response" } })),
-            )
-                .into_response()
-        })
+    let body = StallGuard::new(upstream.body, stall_timeout);
+    builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": { "message": "failed to build response" } })),
+        )
+            .into_response()
+    })
 }
 
 /// End a response body with a `TimedOut` error when the upstream has produced
@@ -377,6 +348,7 @@ fn unauthorized() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream;
 
     #[test]
     fn health_reports_gateway_and_version() {
@@ -408,17 +380,6 @@ mod tests {
             "the cause chain has to stay, or the 502 body turns four different \
              failures into one label: {rendered}"
         );
-    }
-
-    #[tokio::test]
-    async fn with_head_prepends_without_reordering_or_dropping() {
-        let out: Vec<u8> = with_head(Some(1u8), stream::iter(vec![2u8, 3, 4]))
-            .collect()
-            .await;
-        assert_eq!(out, vec![1, 2, 3, 4], "the early chunk must come first");
-
-        let out: Vec<u8> = with_head(None, stream::iter(vec![2u8, 3])).collect().await;
-        assert_eq!(out, vec![2, 3], "gate off must leave the stream untouched");
     }
 
     /// The whole point of the guard: a silent upstream must not park the stream
