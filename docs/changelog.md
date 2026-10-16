@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
 - **Workspace streamlining & companion `xLB` separation**: Extracted `crates/mock-llm` into a standalone repository, removed `crates/xlite-h1-pool` and load-test-specific diagnostic hooks (`XLITE_UPSTREAM_TTFT_HEADER` and the `/api/pool` ring buffer) in favor of pairing with [**xLB**](https://github.com/EeroEternal/xlb) for L4/Thin-L7 HTTP/1.1 pooling and load balancing, keeping `xlite` strictly focused as a single binary + `crates/xlite-h2-pool`.
 - **Documentation, SVG architecture diagram, and 36-stage benchmarks (`README.md`, `docs/assets/architecture.svg`, `docs/architecture.md`, `docs/benchmarks.md`, `AGENTS.md`)**: Condensed `README.md` with a top-level SVG topology diagram, four-way gateway comparison (`xlite` vs. `LiteLLM` vs. `New API` vs. `AISIX OSS`), `xLB` companion architecture, and 36-stage single-node streaming benchmarks (1k–18k VUs, 10.55M requests).
 
