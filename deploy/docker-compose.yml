@@ -1,11 +1,12 @@
 # Run from this directory:
 #   cp env.example .env
-#   docker compose up -d --build
-#   docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+#   docker compose up -d
+#   docker compose run --rm xlite import /opt/xlite/examples/catalog.yaml --replace
 #
-# Build context is the repository root.
+# For multi-replica high availability (starts a second xlite replica on :8081):
+#   docker compose --profile ha up -d
 
-name: xlite-mock-24
+name: xlite
 
 services:
   redis:
@@ -18,40 +19,6 @@ services:
       interval: 2s
       timeout: 2s
       retries: 20
-
-  mocks:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.mock
-    image: xlite-mock:0.1.0
-    environment:
-      MOCK_MODEL: ${MOCK_MODEL:-mock}
-      MOCK_CHUNKS: ${MOCK_CHUNKS:-20}
-      MOCK_INTERVAL_MS: ${MOCK_INTERVAL_MS:-10}
-      MOCK_TTFT_MS: ${MOCK_TTFT_MS:-0}
-      MOCK_BATCH: ${MOCK_BATCH:-1}
-      MOCK_LISTEN: ${MOCK_LISTEN:-0.0.0.0}
-    ports:
-      - "4101-4124:4101-4124"
-    # 24 Node processes hold high upstream connection concurrency. Do NOT rely on daemon
-    # defaults: when nofile is capped, throughput silently drops by 75% while failure rate
-    # and iteration duration look normal (see docs/benchmarks.md).
-    ulimits:
-      nofile:
-        soft: 1048576
-        hard: 1048576
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:4101/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-        ]
-      interval: 3s
-      timeout: 3s
-      retries: 30
-      start_period: 5s
 
   xlite:
     build:
@@ -75,8 +42,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      mocks:
-        condition: service_healthy
 
   xlite-2:
     profiles: ["ha"]
@@ -97,6 +62,4 @@ services:
         hard: 1048576
     depends_on:
       redis:
-        condition: service_healthy
-      mocks:
         condition: service_healthy

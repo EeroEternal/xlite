@@ -8,5 +8,4 @@
 | [changelog.md](changelog.md) | Released versions |
 | [design.md](design.md) | Admin UI design entry |
 | [manual/xlite.md](manual/xlite.md) | Operator env, YAML, HTTP/2 connection pool & companion `xLB` setup |
-| [manual/mock-24-docker.md](manual/mock-24-docker.md) | 24 mock + Redis local Docker setup |
-| [../deploy/README.md](../deploy/README.md) | 24 mock + Redis Docker Compose guide |
+| [../deploy/README.md](../deploy/README.md) | `xlite` + Redis Docker Compose deployment |

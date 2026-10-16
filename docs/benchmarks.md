@@ -106,11 +106,11 @@ During the development of `xlite`, three transport-level bottlenecks were isolat
 
 ## 4. Reproducing the Benchmark Locally
 
-See [`deploy/README.md`](../deploy/README.md) for the complete 24-mock + Redis Docker Compose harness:
+Start upstream [`mock-llm`](https://github.com/EeroEternal/mock-llm) instances (`PORT=4101 MOCK_TTFT=500 MOCK_OUT_TOKENS=250 MOCK_TOKEN_INTERVAL=20 mock-llm`) and deploy `xlite` via [`deploy/README.md`](../deploy/README.md):
 
 ```bash
 cd deploy
 cp env.example .env
 docker compose up -d --build
-docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+docker compose run --rm xlite import /opt/xlite/examples/catalog.yaml --replace
 ```

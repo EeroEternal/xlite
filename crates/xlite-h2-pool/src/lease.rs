@@ -40,7 +40,7 @@ impl Lease {
         recv: h2::RecvStream,
     ) -> tokio::sync::mpsc::Receiver<Result<Bytes, String>> {
         match self.entry.pump.as_ref() {
-            Some(tx) => crate::pump::register(tx, &self.entry.diag, recv).await,
+            Some(tx) => crate::pump::register(tx, recv).await,
             None => {
                 let (out, rx) = tokio::sync::mpsc::channel(1);
                 let _ = out
