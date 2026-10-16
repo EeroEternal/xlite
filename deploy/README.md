@@ -12,7 +12,7 @@ There is no PostgreSQL dependency. Providers, models, channels, and API keys are
 
 The gateway image is built from the repository root (`Dockerfile`); the mock image is built from `deploy/Dockerfile.mock` (referenced directly by Compose). Use `examples/mock-24.docker.yaml` for the catalog import (upstream hostname is `mocks`).
 
-Current image tags: `xlite:0.5.6`, `xlite-mock:0.1.0`.
+Current image tags: `xlite:0.6.0`, `xlite-mock:0.1.0`.
 
 ---
 
@@ -33,8 +33,8 @@ Compose services:
 | :--- | :--- | :--- | :--- |
 | `redis` | `redis:7-alpine` | `6379` | `redis:6379` |
 | `mocks` | `xlite-mock:0.1.0` | `4101–4124` | `http://mocks:4101` … `http://mocks:4124` |
-| `xlite` | `xlite:0.5.6` | `8080` | Gateway node 1 |
-| `xlite-2` (`--profile ha`) | `xlite:0.5.6` | `8081` | Gateway node 2 (shares the same Redis) |
+| `xlite` | `xlite:0.6.0` | `8080` | Gateway node 1 |
+| `xlite-2` (`--profile ha`) | `xlite:0.6.0` | `8081` | Gateway node 2 (shares the same Redis) |
 
 Routing behavior: public model `mock` maps to 24 channels (`weight = 1`, `priority = 0`) using weighted-random selection within the lowest priority tier and pre-first-byte failover on `5xx`, `429`, or connect/header errors. A single API key (`sk-loadtest`) with `models: []` grants access to all public models.
 
@@ -126,7 +126,7 @@ Wait until `redis`, `mocks`, and `xlite` report `healthy`.
 To build images manually from the repository root without starting services:
 
 ```bash
-docker build -t xlite:0.5.6 .
+docker build -t xlite:0.6.0 .
 docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 ```
 
@@ -134,7 +134,7 @@ docker build -f deploy/Dockerfile.mock -t xlite-mock:0.1.0 .
 > - If `.cargo/` and `vendor/` are present in the build context (generated via `scripts/prepare_offline_vendor.sh`), `Dockerfile` automatically runs `cargo build --offline`. Otherwise it fetches crates online.
 > - To use upstream official registries instead of the default mirrors during `docker build`, pass empty build args:
 >   ```bash
->   docker build -t xlite:0.5.6 --build-arg NPM_REGISTRY= --build-arg CRATES_MIRROR= .
+>   docker build -t xlite:0.6.0 --build-arg NPM_REGISTRY= --build-arg CRATES_MIRROR= .
 >   ```
 
 ---
@@ -173,7 +173,7 @@ Within 5 seconds (`XLITE_CATALOG_RELOAD_SECS`), the gateway snapshot syncs autom
 export KEY=sk-loadtest
 
 curl -sS http://127.0.0.1:8080/health
-# {"status":"ok","gateway":"xlite","version":"0.5.6"}
+# {"status":"ok","gateway":"xlite","version":"0.6.0"}
 
 curl -sS http://127.0.0.1:8080/ready
 # {"status":"ready"}
@@ -219,7 +219,7 @@ docker run -d --name xlite-mocks --network xlite-net --network-alias mocks \
 
 docker run --rm --network xlite-net \
   -e REDIS_URL=redis://xlite-redis:6379 \
-  xlite:0.5.6 import /opt/xlite/examples/mock-24.docker.yaml --replace
+  xlite:0.6.0 import /opt/xlite/examples/mock-24.docker.yaml --replace
 
 docker run -d --name xlite-gw --network xlite-net \
   --ulimit nofile=1048576:1048576 \
@@ -228,7 +228,7 @@ docker run -d --name xlite-gw --network xlite-net \
   -e XLITE_UPSTREAM_H2C=1 \
   -e ADMIN_PASSWORD=admin \
   -e LISTEN_HOST=0.0.0.0 \
-  xlite:0.5.6
+  xlite:0.6.0
 ```
 
 ---

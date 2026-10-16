@@ -57,11 +57,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/xlite
+RUN mkdir -p /opt/xlite/data
 COPY --from=builder /src/target/release/xlite /usr/local/bin/xlite
 COPY --from=admin /admin/dist ./admin/dist
 COPY examples ./examples
 ENV PORT=8080 \
-    LISTEN_HOST=0.0.0.0 \
-    XLITE_UPSTREAM_H2C=1
+    LISTEN_HOST=0.0.0.0
 EXPOSE 8080
 ENTRYPOINT ["xlite"]
