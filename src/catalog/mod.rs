@@ -331,6 +331,8 @@ mod tests {
             catalog_reload_secs: 5,
             upstream_stall_timeout: std::time::Duration::ZERO,
             upstream_header_timeout: std::time::Duration::ZERO,
+            sse_keepalive_interval: std::time::Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
         }
     }
 
