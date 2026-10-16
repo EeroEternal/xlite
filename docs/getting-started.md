@@ -45,7 +45,7 @@ curl -H "Authorization: Bearer sk-..." \
 
 Admin → Settings can import or export the same YAML.
 
-## 24 mock + Redis (Docker)
+## Docker Compose (`xlite` + Redis)
 
 Follow [`deploy/README.md`](../deploy/README.md):
 
@@ -53,7 +53,7 @@ Follow [`deploy/README.md`](../deploy/README.md):
 cd deploy
 cp env.example .env
 docker compose up -d --build
-docker compose run --rm xlite import /opt/xlite/examples/mock-24.docker.yaml --replace
+docker compose run --rm xlite import /opt/xlite/examples/catalog.yaml --replace
 ```
 
 ## Health

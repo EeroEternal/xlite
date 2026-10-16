@@ -65,6 +65,6 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 - [Single-Node Benchmarks & Root-Cause Ablations](docs/benchmarks.md) — 36-stage load test (1k–18k VUs, 10.55M requests) and HTTP/2 & `RLIMIT_NOFILE` ablations
 - [Operator Manual & Configuration Reference](docs/manual/xlite.md) — all `XLITE_*` environment variables, storage modes (`SQLite` / `memory` / `Redis`), and pool tuning
 - [Getting Started Guide](docs/getting-started.md) — 5-minute closed-loop setup, YAML catalog workflow, and `/health` & `/ready` probes
-- [24-Mock Docker Compose Harness](deploy/README.md) — containerized 24-upstream mock + Redis cluster for local stress testing
+- [Docker Compose Deployment (`xlite` + Redis)](deploy/README.md) — production-ready single-node or multi-replica (`--profile ha`) Docker Compose stack
 - [Admin UI Design Specification](docs/design.md) — embedded React console visual and interaction design
 - [Changelog](docs/changelog.md) — release history

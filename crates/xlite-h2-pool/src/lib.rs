@@ -45,8 +45,6 @@ mod pump;
 
 pub use error::PoolError;
 pub use lease::Lease;
-mod diag;
-pub use diag::{ConnSnap, DiagSnap, SlotSnap};
 pub use pool::{
     BoxIo, CONNECTION_WINDOW_SIZE, Config, DEFAULT_IDLE_TIMEOUT, DEFAULT_STREAM_BUDGET_PER_CONN,
     Dial, DialFuture, Pool, PoolStats, STREAM_WINDOW_SIZE, Transport, WAIT_BUCKETS, client_builder,

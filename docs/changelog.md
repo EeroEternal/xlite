@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Deploy & `xlite-h2-pool` cleanup**: Removed legacy Node.js 24-mock harness files (`scripts/stream_mock_server.mjs`, `scripts/start_mocks.sh`, `deploy/Dockerfile.mock`, `examples/mock-24*.yaml`, `docs/manual/mock-24-docker.md`) in favor of the standalone `mock-llm` repository, simplified `deploy/docker-compose.yml` to a clean `xlite + Redis` deployment stack, and removed the unused `diag.rs` / `examples/h2probe.rs` scaffolding from `crates/xlite-h2-pool`.
+
 ## [0.6.0] - 2026-10-16
 
 - **Workspace streamlining & companion `xLB` separation**: Extracted `crates/mock-llm` into a standalone repository, removed `crates/xlite-h1-pool` and load-test-specific diagnostic hooks (`XLITE_UPSTREAM_TTFT_HEADER` and the `/api/pool` ring buffer) in favor of pairing with [**xLB**](https://github.com/EeroEternal/xlb) for L4/Thin-L7 HTTP/1.1 pooling and load balancing, keeping `xlite` strictly focused as a single binary + `crates/xlite-h2-pool`.

@@ -233,12 +233,6 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
             json!({
                 "host": host,
                 "connections": s.connections,
-                // Per-connection stream distribution (read-side free): who is
-                // actually carrying the load, and each connection's live cap.
-                "conns": s.conns.iter().map(|c| json!({
-                    "in_flight": c.in_flight,
-                    "cap": c.cap,
-                })).collect::<Vec<_>>(),
                 "in_flight": s.in_flight,
                 "peer_cap": s.peer_cap,
                 "effective_streams_per_conn": per_conn,

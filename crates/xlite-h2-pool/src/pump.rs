@@ -41,9 +41,6 @@ const RELEASE_THRESHOLD: usize = 8 * 1024;
 pub(crate) struct Register {
     recv: RecvStream,
     out: mpsc::Sender<Result<Bytes, String>>,
-    /// Diagnostics handle + this stream's progress slot (sampled).
-    diag: std::sync::Arc<crate::diag::Diag>,
-    slot: Option<crate::diag::SlotHandle>,
 }
 
 /// The channel a connection's request tasks register their `RecvStream`s on.
@@ -55,24 +52,12 @@ pub(crate) fn register_channel() -> (mpsc::Sender<Register>, mpsc::Receiver<Regi
 /// and then ends. A pump-side error arrives as `Err(message)`.
 pub(crate) async fn register(
     tx: &mpsc::Sender<Register>,
-    diag: &std::sync::Arc<crate::diag::Diag>,
     recv: RecvStream,
 ) -> mpsc::Receiver<Result<Bytes, String>> {
     let (out, body) = mpsc::channel(BODY_CHANNEL);
-    let slot = diag.attach();
-    diag.on_register_sent();
-    if let Err(err) = tx
-        .send(Register {
-            recv,
-            out,
-            diag: std::sync::Arc::clone(diag),
-            slot,
-        })
-        .await
-    {
+    if let Err(err) = tx.send(Register { recv, out }).await {
         // The connection task is gone. Fail the stream loudly rather than
         // handing back an empty body.
-        diag.on_register_fail(slot);
         let reg = err.0;
         let _ = reg
             .out
@@ -134,7 +119,6 @@ async fn pump(mut registers: mpsc::Receiver<Register>) {
             biased;
             reg = registers.recv(), if open => match reg {
                 Some(r) => {
-                    r.diag.on_register_taken();
                     streams.push(pump_stream(r));
                 }
                 None => open = false,
@@ -147,8 +131,6 @@ async fn pump(mut registers: mpsc::Receiver<Register>) {
 async fn pump_stream(reg: Register) {
     let mut recv = reg.recv;
     let out = reg.out;
-    let diag = reg.diag;
-    let slot = reg.slot;
     let mut pending = 0usize;
     loop {
         // Race the upstream against the downstream's departure: a dropped
@@ -156,20 +138,12 @@ async fn pump_stream(reg: Register) {
         // speaks. Without it a silent upstream holds the stream open forever
         // and the cancel never reaches the peer (D/F plan, P1).
         let next = tokio::select! {
-            _ = out.closed() => {
-                // Diagnostics: every cancel is counted; sampled streams get the
-                // timestamp the end-of-stream span is measured against.
-                diag.note_cancel(slot);
-                break
-            },
+            _ = out.closed() => break,
             next = recv.next() => next,
         };
         match next {
             Some(Ok(bytes)) => {
                 pending += bytes.len();
-                if let Some(slot) = slot {
-                    diag.note_chunk(slot, bytes.len());
-                }
                 if pending >= RELEASE_THRESHOLD {
                     let _ = recv.flow_control().release_capacity(pending);
                     pending = 0;
@@ -188,7 +162,4 @@ async fn pump_stream(reg: Register) {
     if pending > 0 {
         let _ = recv.flow_control().release_capacity(pending);
     }
-    // Span (cancel→end) and slot release happen before the RST is queued by
-    // dropping `recv` below — the wire latency is measured in the field (§5.5).
-    diag.note_stream_end(slot);
 }

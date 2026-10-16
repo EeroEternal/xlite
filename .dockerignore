@@ -9,30 +9,16 @@ admin/node_modules
 artifacts
 docs/sessions
 
-# ---- 缩小缓存失效面 ---------------------------------------------------------
-# builder 段把**整个（过滤后的）上下文**只读挂载，好让可选的离线脚手架能条件化，
-# 代价是：**留在上下文里的每个文件都进 Rust 层的缓存键**。所以任何 Dockerfile 都不
-# COPY 的路径都是纯粹的失效面 —— 实测（Docker 29.2.1）：只改 `docs/changelog.md`
-# 一行，`RUN cargo build` 就重跑，**1m48s**；排掉之后同样的改动命中缓存。
-# 下面这些没有任何 Dockerfile COPY（`Dockerfile` / `deploy/Dockerfile.mock` /
-# 本地 `deploy/Dockerfile.lab` 的 COPY 清单都核过）—— 增删前请重新核对，尤其别把
-# `admin/`、`crates/`、`src/`、`migrations/`、`examples/`、`scripts/`、`Cargo.*`、
-# `rust-toolchain.toml` 排掉。
+# Exclude paths not copied by Dockerfile so doc/config edits do not bust the Rust builder layer cache.
 docs
 .agents
 .github
-# deploy/* 排掉文档与台架脚本；但两个 Dockerfile **本体**必须留在上下文里，否则
-# `docker build -f deploy/Dockerfile.mock .` 与 compose 的 build.dockerfile 读不到文件。
-# 它们极少改，进 Rust 层的缓存键可接受。
-deploy/*
-!deploy/Dockerfile.mock
-!deploy/Dockerfile.lab
+deploy
 bench
 *.md
 .mise.toml
 .env.example
 
-# 不要把 `.cargo/` 与 `vendor/` 加进来。它们是**可选**的离线构建脚手架（本机产物、
-# 不在 git 里，见 .gitignore 与 scripts/prepare_offline_vendor.sh）；`Dockerfile` 的
-# builder 段把整个上下文只读挂载后在容器里判断它们在不在。一旦在这里排除，就会**静默**
-# 把每次构建都退回在线（crates.io）—— 正是本仓最忌讳的那种"不报错但换了行为"。
+# Note: Do NOT add `.cargo/` or `vendor/` here. They are optional local offline build
+# directories (see scripts/prepare_offline_vendor.sh) inspected via `RUN --mount=type=bind`
+# inside Dockerfile.

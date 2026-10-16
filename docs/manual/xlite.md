@@ -34,4 +34,4 @@ There is no strategy field. For a public model, xlite picks a channel in the low
 
 See `examples/catalog.yaml`. Commands: `xlite import <file.yaml>` (optional `--replace`) and `xlite export [file.yaml]`. Export omits user API key plaintext.
 
-24 mock + Redis in Docker: [`deploy/README.md`](../../deploy/README.md). Use `examples/mock-24.docker.yaml` (`http://mocks:4101` …), not the loopback file.
+Docker Compose (`xlite` + Redis): [`deploy/README.md`](../../deploy/README.md).
