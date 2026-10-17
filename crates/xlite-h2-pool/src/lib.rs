@@ -34,9 +34,8 @@
 //! (h2c prior knowledge or ALPN-negotiated h2). The caller supplies a
 //! [`Dial`] closure, which is where TCP/TLS/proxy setup lives.
 //!
-//! It is the gateway's **default** upstream strategy for h2c streaming; the
-//! `reqwest-h2-pool` feature switches back to the `reqwest` baseline. HTTP/1.1
-//! and non-streaming requests always use `reqwest`.
+//! It is the gateway's upstream strategy for `h2c` streaming; HTTP/1.1 and
+//! `https://` requests use the gateway's native LIFO HTTP/1.1 pool (`H1Pool`).
 
 mod error;
 mod lease;

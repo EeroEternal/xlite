@@ -20,7 +20,7 @@
 | :--- | :--- | :--- |
 | **Data Plane** | `src/proxy.rs` | API key authentication, zero-DOM `"model"` extraction, channel failover loop, and raw `Bytes` SSE streaming passthrough |
 | **Routing Snapshot** | `src/store.rs` | Lock-free `ArcSwap<Snapshot>` holding pre-validated channels, SHA-256 key hashes, and pre-rendered HTTP headers |
-| **Upstream Client** | `src/upstream.rs` | Dispatches requests across `xlite-h2-pool` (h2c) or `reqwest` (HTTP/1.1 and HTTPS/TLS) |
+| **Upstream Client** | `src/upstream.rs` | Dispatches requests across `xlite-h2-pool` (h2c) or the built-in LIFO `H1Pool` (HTTP/1.1 and HTTPS/TLS with transparent stale-socket redial) |
 | **HTTP/2 Pool** | `crates/xlite-h2-pool` | Peer `SETTINGS_MAX_CONCURRENT_STREAMS`-aware HTTP/2 multiplexing pool with stream cancellation propagation |
 | **Control Plane & Auth** | `src/admin.rs`, `src/auth.rs` | REST API (`/api/*`) and stateless HMAC-SHA256 signed session cookies (zero sticky-session or Redis session state required) |
 | **Catalog Storage** | `src/catalog/` | Persistence backend (SQLite file, in-memory SQLite, or shared Redis key `xlite:catalog`) + YAML import/export (`yaml.rs`) |
