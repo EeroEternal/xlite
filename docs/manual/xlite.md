@@ -30,7 +30,7 @@ For high-concurrency HTTP/1.1 connection pooling, active/passive `/health` probi
 
 ## Routing
 
-There is no strategy field. For a public model, xlite picks a channel in the lowest `priority` group by `weight`, then fails over before the first byte on 5xx / 429 / connection errors.
+There is no strategy field. For a public model, xlite picks a channel in the lowest `priority` group by `weight`, then fails over before the first byte on 5xx / 429 / 402 / connection errors.
 
 ## YAML
 
