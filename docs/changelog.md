@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-17
+
 - **Native HTTP/1.1 + TLS LIFO upstream connection pool and `reqwest` removal (`src/upstream.rs`, `Cargo.toml`)**: Replaced `reqwest` with a built-in HTTP/1.1 + HTTPS (`tokio-rustls` + `webpki-roots`) LIFO keep-alive pool (`H1Pool`) featuring non-blocking `try_read` socket liveness probing on checkout, transparent 1x redial on stale keep-alive close races (`EOF`/`RST` before first response byte), zero-copy `Bytes` streaming for `Content-Length`/`chunked`/EOF-delimited bodies, a 5s TCP/TLS `CONNECT_TIMEOUT`, `TCP_NODELAY` + 30s OS-level `TcpKeepalive`, and removal of `reqwest`'s hardcoded 600s total-stream wall-clock cap.
 
 ## [0.6.1] - 2026-10-16

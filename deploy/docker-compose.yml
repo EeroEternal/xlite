@@ -24,7 +24,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: xlite:0.6.1
+    image: xlite:0.6.2
     environment:
       REDIS_URL: redis://redis:6379
       XLITE_UPSTREAM_H2C: ${XLITE_UPSTREAM_H2C:-1}
@@ -45,7 +45,7 @@ services:
 
   xlite-2:
     profiles: ["ha"]
-    image: xlite:0.6.1
+    image: xlite:0.6.2
     environment:
       REDIS_URL: redis://redis:6379
       XLITE_UPSTREAM_H2C: ${XLITE_UPSTREAM_H2C:-1}
