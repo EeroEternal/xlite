@@ -109,7 +109,7 @@
     <rect x="550" y="208" width="180" height="56" rx="7" fill="#FFFBEB" stroke="#FCD34D" stroke-width="1.5"/>
     <circle cx="566" cy="227" r="4" fill="#F59E0B"/>
     <text x="576" y="231" font-size="12.5" font-weight="700" fill="#92400E">Tier 1 · Failover</text>
-    <text x="562" y="250" font-size="10.5" fill="#B45309">Retry on 429 / 5xx / timeout</text>
+    <text x="562" y="250" font-size="10.5" fill="#B45309">Retry on 402 / 429 / 5xx</text>
   </g>
 
   <!-- Channels -> Upstream Providers Arrows -->
@@ -128,7 +128,7 @@
     <text x="884" y="93" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
 
     <rect x="810" y="132" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
-    <text x="884" y="153" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">DeepSeek / Gemini</text>
+    <text x="884" y="153" text-anchor="middle" font-size="12" font-weight="700" fill="#065F46">DeepSeek / Xiaomi MiMo</text>
     <text x="884" y="171" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
 
     <rect x="810" y="210" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>

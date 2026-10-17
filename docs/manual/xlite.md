@@ -26,7 +26,7 @@ Listen backlog is 65535 (kernel-clamped by `net.core.somaxconn`). For 30k concur
 
 `TOKIO_WORKER_THREADS` is a runtime variable: bare `#[tokio::main]` spawns one worker per core, which can cause excess spinlock contention on high-core-count machines under I/O-bound streaming loads. The bundled `deploy/env.example` defaults to **8** (or **24** for high-chunk-rate streaming workloads). Always set `TOKIO_WORKER_THREADS` explicitly in production.
 
-For high-concurrency HTTP/1.1 connection pooling, active/passive `/health` probing, TLS termination, and multi-replica load balancing in front of (or behind) `xlite`, pair `xlite` with [**xLB**](https://github.com/EeroEternal/xlb).
+For high-concurrency HTTP/1.1 connection pooling, active/passive `/health` probing, TLS termination, and pre-first-byte HTTP status rerouting (`402`/`404`/`429`/`5xx`, enabling multiple `xlite` instances to serve disjoint model catalogs without shared storage), pair `xlite` with [**xLB**](https://github.com/EeroEternal/xlb).
 
 ## Routing
 
