@@ -72,7 +72,7 @@ The request hot path performs **zero SQLite or Redis I/O** and acquires **zero m
 3. **Weighted Random Selection**: Within each priority tier, order channels using weighted random sampling without replacement (`weight / remaining_total_weight`).
 4. **Pre-First-Byte Failover**:
    - `xlite` attempts channels in the resulting order.
-   - If a channel fails **before response headers are committed to the client**—specifically on TCP/H2 dial errors, `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` expiry, HTTP `429 Too Many Requests`, or HTTP `5xx`—`xlite` transparently fails over to the next candidate channel.
+   - If a channel fails **before response headers are committed to the client**—specifically on TCP/H2 dial errors, `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` expiry, HTTP `402 Payment Required` (account balance/quota exhaustion), HTTP `429 Too Many Requests`, or HTTP `5xx`—`xlite` transparently fails over to the next candidate channel.
    - Once an upstream returns `200 OK` (or a non-failover `4xx` like `400`/`401`), response headers are flushed immediately and the stream is bound to that channel.
 
 There are no opaque strategy enums (`CostAware`, `LeastLatency`, etc.) or stateful session-affinity tables on the hot path.
@@ -109,7 +109,7 @@ flowchart LR
     Req["Client Request\nmodel: deepseek-r1"] --> T0{"Tier 0 (priority: 0)\nWeighted Pick"}
     T0 -->|"75% (weight: 3)"| C1["primary-us-east"]
     T0 -->|"25% (weight: 1)"| C2["primary-us-west"]
-    C1 -->|"429 / 5xx / Connect or Header Timeout\n(before 1st byte)"| C2
+    C1 -->|"402 / 429 / 5xx / Connect or Header Timeout\n(before 1st byte)"| C2
     C2 -->|"Also fails before 1st byte"| C3["Tier 1 Backup (priority: 1)\nbackup-openrouter"]
     C1 -->|"200 OK"| Stream["Raw SSE Bytes\nto Client"]
     C2 -->|"200 OK"| Stream

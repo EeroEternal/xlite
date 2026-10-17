@@ -32,6 +32,7 @@ import {
   INNER_PROVIDERS,
   findInnerModel,
   findInnerProvider,
+  resolveInnerBaseUrl,
 } from "@/lib/inner-providers"
 import type { Channel, Model } from "@/lib/api-types/models"
 import type { Provider } from "@/lib/api-types/providers"
@@ -248,7 +249,7 @@ export function ModelsPage() {
     }
     const res = await createProvider({
       name: selectedInner.name,
-      base_url: selectedInner.baseUrl,
+      base_url: resolveInnerBaseUrl(selectedInner, apiKey),
       api_key: apiKey,
       enabled: true,
       auth_scheme: "bearer",

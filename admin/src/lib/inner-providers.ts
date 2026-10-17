@@ -25,6 +25,8 @@ export interface InnerProvider {
   name: string
   /** OpenAI-compatible base URL; empty when unverified. */
   baseUrl: string
+  /** Optional Token Plan subscription base URL (`tp-` / `ttp-` API keys). */
+  tokenPlanBaseUrl?: string
   /** Chat path override when the vendor has no `/v1/chat/completions`; empty keeps the default. */
   chatPath: string
   models: InnerModel[]
@@ -67,10 +69,14 @@ export const INNER_PROVIDERS: InnerProvider[] = [
   {
     key: "xiaomi",
     name: "Xiaomi",
-    // Hosted API endpoint not published; MiMo ships as open weights.
-    baseUrl: "",
+    baseUrl: "https://api.xiaomimimo.com/v1",
+    tokenPlanBaseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
     chatPath: "",
-    models: [{ id: "mimo-7b-rl", context: "", kind: "reasoner" }],
+    models: [
+      { id: "mimo-v2.6-pro", context: "1M", kind: "reasoner" },
+      { id: "mimo-v2.6-flash", context: "1M", kind: "chat" },
+      { id: "mimo-v2.6-pro-ultraspeed", context: "1M", kind: "reasoner" },
+    ],
   },
   {
     key: "minimax",
@@ -90,6 +96,17 @@ function normalizeBaseUrl(url: string): string {
   return url.trim().replace(/\/+$/, "").toLowerCase()
 }
 
+/** Resolve the effective base URL for an inner provider preset given an API key. */
+export function resolveInnerBaseUrl(preset: InnerProvider, apiKey = ""): string {
+  if (preset.tokenPlanBaseUrl) {
+    const trimmed = apiKey.trim().toLowerCase()
+    if (trimmed.startsWith("tp-") || trimmed.startsWith("ttp-")) {
+      return preset.tokenPlanBaseUrl
+    }
+  }
+  return preset.baseUrl
+}
+
 /** Match a configured provider to a preset by base URL, then by name. */
 export function findInnerProvider(
   provider: { name: string; base_url: string } | undefined,
@@ -97,7 +114,11 @@ export function findInnerProvider(
   if (!provider) return undefined
   const base = normalizeBaseUrl(provider.base_url)
   if (base) {
-    const byUrl = INNER_PROVIDERS.find((item) => normalizeBaseUrl(item.baseUrl) === base)
+    const byUrl = INNER_PROVIDERS.find(
+      (item) =>
+        normalizeBaseUrl(item.baseUrl) === base ||
+        (item.tokenPlanBaseUrl !== undefined && normalizeBaseUrl(item.tokenPlanBaseUrl) === base),
+    )
     if (byUrl) return byUrl
   }
   return INNER_PROVIDERS.find((item) => item.name.toLowerCase() === provider.name.trim().toLowerCase())

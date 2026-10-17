@@ -3,7 +3,7 @@
 # Scheduling rule for every public model:
 #   1. Group enabled channels by `priority` ascending (0 = primary active tier; 1, 2, ... = backup tiers).
 #   2. Within each priority tier, pick channels by weighted random (`weight / tier_total_weight`).
-#   3. Fail over to the next candidate before the first response byte on connect/header timeout, 429, or 5xx.
+#   3. Fail over to the next candidate before the first response byte on connect/header timeout, 402, 429, or 5xx.
 #
 # Usage:
 #   xlite import examples/catalog.yaml --replace

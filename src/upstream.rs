@@ -1191,8 +1191,12 @@ pub fn authorization_header(api_key: &str) -> String {
 }
 
 /// Fail over only before the first byte has been written to the client.
+///
+/// Covers server errors (`5xx`), rate limits (`429 Too Many Requests`), and
+/// upstream quota/balance exhaustion (`402 Payment Required`) so requests
+/// transparently fall back to the next candidate channel.
 pub fn should_failover(status: u16, bytes_sent: bool) -> bool {
-    !bytes_sent && (status >= 500 || status == 429)
+    !bytes_sent && (status >= 500 || status == 429 || status == 402)
 }
 
 #[cfg(test)]
@@ -1249,11 +1253,14 @@ mod tests {
     }
 
     #[test]
-    fn failover_only_before_first_byte_on_5xx() {
+    fn failover_only_before_first_byte_on_5xx_429_and_402() {
         assert!(should_failover(502, false));
         assert!(should_failover(429, false));
+        assert!(should_failover(402, false));
         assert!(!should_failover(400, false));
+        assert!(!should_failover(401, false));
         assert!(!should_failover(502, true));
+        assert!(!should_failover(402, true));
         assert!(!should_failover(200, false));
     }
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Pre-first-byte failover on `HTTP 402 Payment Required` (`src/upstream.rs`)**: Extended `should_failover` to treat upstream `402 Payment Required` (account balance or credit exhaustion, e.g., Xiaomi MiMo pay-as-you-go or DeepSeek) as a retryable channel failure before the first response byte is sent, allowing transparent failover to backup channels or Token Plan subscriptions.
+- **Admin UI Xiaomi MiMo preset & Token Plan auto-resolution (`admin/src/lib/inner-providers.ts`, `admin/src/pages/models.tsx`)**: Updated the built-in Xiaomi provider preset with the official OpenAI-compatible pay-as-you-go endpoint (`https://api.xiaomimimo.com/v1`), Token Plan subscription endpoint (`https://token-plan-cn.xiaomimimo.com/v1`, automatically selected when `tp-` / `ttp-` API keys are used), and current 1M-context models (`mimo-v2.6-pro`, `mimo-v2.6-flash`, `mimo-v2.6-pro-ultraspeed`).
+
 ## [0.6.2] - 2026-10-17
 
 - **Native HTTP/1.1 + TLS LIFO upstream connection pool and `reqwest` removal (`src/upstream.rs`, `Cargo.toml`)**: Replaced `reqwest` with a built-in HTTP/1.1 + HTTPS (`tokio-rustls` + `webpki-roots`) LIFO keep-alive pool (`H1Pool`) featuring non-blocking `try_read` socket liveness probing on checkout, transparent 1x redial on stale keep-alive close races (`EOF`/`RST` before first response byte), zero-copy `Bytes` streaming for `Content-Length`/`chunked`/EOF-delimited bodies, a 5s TCP/TLS `CONNECT_TIMEOUT`, `TCP_NODELAY` + 30s OS-level `TcpKeepalive`, and removal of `reqwest`'s hardcoded 600s total-stream wall-clock cap.
