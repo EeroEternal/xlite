@@ -124,15 +124,15 @@
   <!-- ==================== 4. UPSTREAM PROVIDERS ==================== -->
   <g filter="url(#shadow)">
     <rect x="810" y="54" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
-    <text x="884" y="75" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">OpenAI / Anthropic</text>
-    <text x="884" y="93" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
+    <text x="884" y="75" text-anchor="middle" font-size="12" font-weight="700" fill="#065F46">OpenAI / Anthropic</text>
+    <text x="884" y="93" text-anchor="middle" font-size="10" fill="#047857">HTTP/2 Cloud APIs</text>
 
     <rect x="810" y="132" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
-    <text x="884" y="153" text-anchor="middle" font-size="12" font-weight="700" fill="#065F46">DeepSeek / Xiaomi MiMo</text>
-    <text x="884" y="171" text-anchor="middle" font-size="10" fill="#047857">Cloud Model APIs</text>
+    <text x="884" y="153" text-anchor="middle" font-size="12" font-weight="700" fill="#065F46">DeepSeek / MiMo</text>
+    <text x="884" y="171" text-anchor="middle" font-size="10" fill="#047857">HTTP/2 Cloud APIs</text>
 
     <rect x="810" y="210" width="148" height="52" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
-    <text x="884" y="231" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">vLLM / SGLang</text>
+    <text x="884" y="231" text-anchor="middle" font-size="12" font-weight="700" fill="#065F46">vLLM / SGLang</text>
     <text x="884" y="249" text-anchor="middle" font-size="10" fill="#047857">Self-hosted GPU Cluster</text>
   </g>
 
