@@ -1368,3 +1368,44 @@ async fn flow_control_credit_is_released_in_full() {
     }
     assert_eq!(total, 8 * 5);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lease_tracks_reused_state_and_evict_removes_connection_across_multiple_hosts() {
+    let (pool, dials) = test_pool(4, 4, true);
+
+    // Alternating across multiple hosts must reuse each host's connection without extra dials.
+    let l_a1 = pool.acquire("host-a:443").await.unwrap();
+    assert!(!l_a1.is_reused(), "first acquire on host-a dials fresh");
+    let l_b1 = pool.acquire("host-b:443").await.unwrap();
+    assert!(!l_b1.is_reused(), "first acquire on host-b dials fresh");
+    assert_eq!(dials.load(Ordering::SeqCst), 2);
+
+    let l_a2 = pool.acquire("host-a:443").await.unwrap();
+    assert!(
+        l_a2.is_reused(),
+        "second acquire on host-a reuses warm conn"
+    );
+    let l_b2 = pool.acquire("host-b:443").await.unwrap();
+    assert!(
+        l_b2.is_reused(),
+        "second acquire on host-b reuses warm conn"
+    );
+    assert_eq!(dials.load(Ordering::SeqCst), 2);
+
+    drop(l_a1);
+    drop(l_b1);
+    drop(l_b2);
+
+    // Evicting host-a's connection removes it immediately so the next acquire dials fresh.
+    l_a2.evict();
+    drop(l_a2);
+    assert_eq!(pool.connection_count("host-a:443"), 0);
+    assert_eq!(pool.connection_count("host-b:443"), 1);
+
+    let l_a3 = pool.acquire("host-a:443").await.unwrap();
+    assert!(
+        !l_a3.is_reused(),
+        "acquire after evict must dial a fresh connection"
+    );
+    assert_eq!(dials.load(Ordering::SeqCst), 3);
+}

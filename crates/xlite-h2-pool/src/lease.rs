@@ -1,14 +1,14 @@
 //! The [`Lease`] handle returned by [`crate::Pool::acquire`].
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
 use h2::SendStream;
 use h2::client::{ResponseFuture, SendRequest};
 use http::Request;
 
-use crate::pool::{ConnEntry, bump};
+use crate::pool::{ConnEntry, HostState, bump};
 
 /// A reserved stream slot on a specific connection.
 ///
@@ -17,13 +17,36 @@ use crate::pool::{ConnEntry, bump};
 /// the slot and wakes any queued acquirer.
 pub struct Lease {
     entry: Arc<ConnEntry>,
+    state: Weak<HostState>,
     send: SendRequest<Bytes>,
+    reused: bool,
 }
 
 impl Lease {
-    pub(crate) fn new(entry: Arc<ConnEntry>) -> Self {
+    pub(crate) fn new(entry: Arc<ConnEntry>, state: Weak<HostState>, reused: bool) -> Self {
         let send = entry.send.clone();
-        Self { entry, send }
+        Self {
+            entry,
+            state,
+            send,
+            reused,
+        }
+    }
+
+    /// Whether this lease was checked out from an already-established pooled
+    /// connection (`true`) rather than freshly dialed for this acquire (`false`).
+    pub fn is_reused(&self) -> bool {
+        self.reused
+    }
+
+    /// Immediately evict this lease's connection from the host pool so no
+    /// subsequent acquire reserves a stream on a connection that has just
+    /// failed with a transport/GOAWAY error.
+    pub fn evict(&self) {
+        if let Some(state) = self.state.upgrade() {
+            state.retain(|c| !Arc::ptr_eq(c, &self.entry));
+            bump(&state.generation_tx);
+        }
     }
 
     /// Whether this connection polls its streams in its own task

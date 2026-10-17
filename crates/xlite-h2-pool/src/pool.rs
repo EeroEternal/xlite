@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use h2::client::SendRequest;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -305,12 +305,6 @@ impl PoolStats {
     }
 }
 
-/// Most-recently-used host, consulted without taking the map lock.
-struct LastHost {
-    host: String,
-    state: Arc<HostState>,
-}
-
 /// Client-side flow-control windows (bytes).
 ///
 /// h2's spec defaults are 64 KiB for both the connection and each stream. That
@@ -343,11 +337,12 @@ pub struct Pool {
     pinned_poll: bool,
     dial: Dial,
     idle_timeout: Duration,
-    hosts: Mutex<HashMap<String, Arc<HostState>>>,
-    /// Lock-free fast path for the hot path: the gateway builds one pool per
-    /// upstream authority, so after the first request this always hits and the
-    /// per-acquire `String` allocation + map lock disappear.
-    last_host: ArcSwapOption<LastHost>,
+    /// Lock-free snapshot of per-host state: readers (`acquire`, `stats`,
+    /// `connection_count`) look up `&str` with zero allocation and zero mutex
+    /// contention regardless of how many upstream hosts are active concurrently.
+    hosts: ArcSwap<HashMap<String, Arc<HostState>>>,
+    /// Serializes rare first-time host insertions into `hosts`.
+    hosts_mutate: Mutex<()>,
 }
 
 /// Signal every waiter on this host that the slot landscape changed.
@@ -366,15 +361,15 @@ impl Pool {
             pinned_poll: config.pinned_poll,
             dial: config.dial,
             idle_timeout: config.idle_timeout,
-            hosts: Mutex::new(HashMap::new()),
-            last_host: ArcSwapOption::empty(),
+            hosts: ArcSwap::from_pointee(HashMap::new()),
+            hosts_mutate: Mutex::new(()),
         }
     }
 
     /// Number of live connections currently held for `host`.
     pub fn connection_count(&self, host: &str) -> usize {
-        let hosts = self.hosts.lock().unwrap();
-        hosts
+        self.hosts
+            .load()
             .get(host)
             .map(|state| state.connections())
             .unwrap_or(0)
@@ -404,7 +399,7 @@ impl Pool {
                 if let Some(start) = parked_since {
                     record_wait(&state, start.elapsed());
                 }
-                return Ok(Lease::new(entry));
+                return Ok(Lease::new(entry, Arc::downgrade(&state), true));
             }
 
             // All full: dial another connection if there is room and none is
@@ -431,7 +426,7 @@ impl Pool {
                         if let Some(start) = parked_since {
                             record_wait(&state, start.elapsed());
                         }
-                        return Ok(Lease::new(entry));
+                        return Ok(Lease::new(entry, Arc::downgrade(&state), false));
                     }
                     Err(err) => {
                         // A failed dial is what turns into the client's 502, and a
@@ -487,7 +482,7 @@ impl Pool {
                 if let Some(start) = parked_since {
                     record_wait(&state, start.elapsed());
                 }
-                return Ok(Lease::new(entry));
+                return Ok(Lease::new(entry, Arc::downgrade(&state), true));
             }
             if generation.changed().await.is_err() {
                 // Sender dropped: the pool is gone.
@@ -656,23 +651,19 @@ impl Pool {
     }
 
     fn host_state(&self, host: &str) -> Arc<HostState> {
-        // Hot path: no `String` allocation, no map lock.
-        if let Some(last) = self.last_host.load_full()
-            && last.host == host
-        {
-            return Arc::clone(&last.state);
+        // Hot path: lock-free, zero-allocation lookup for any number of hosts.
+        if let Some(state) = self.hosts.load().get(host) {
+            return Arc::clone(state);
         }
-        let state = {
-            let mut hosts = self.hosts.lock().unwrap();
-            hosts
-                .entry(host.to_string())
-                .or_insert_with(|| Arc::new(HostState::new()))
-                .clone()
-        };
-        self.last_host.store(Some(Arc::new(LastHost {
-            host: host.to_string(),
-            state: Arc::clone(&state),
-        })));
+        let _guard = self.hosts_mutate.lock().unwrap();
+        let current = self.hosts.load();
+        if let Some(state) = current.get(host) {
+            return Arc::clone(state);
+        }
+        let state = Arc::new(HostState::new());
+        let mut next = (**current).clone();
+        next.insert(host.to_string(), Arc::clone(&state));
+        self.hosts.store(Arc::new(next));
         state
     }
 
@@ -683,7 +674,7 @@ impl Pool {
     /// failure) can see whether the pool is saturated, still dialing, or waiting
     /// on its own ceilings. Nothing here is on the data path.
     pub fn stats(&self, host: &str) -> PoolStats {
-        let hosts = self.hosts.lock().unwrap();
+        let hosts = self.hosts.load();
         let Some(state) = hosts.get(host) else {
             return PoolStats {
                 connections: 0,
@@ -737,19 +728,12 @@ impl Pool {
     /// Point-in-time stats for **every** host this pool has dialed, sorted by host.
     ///
     /// The key is whatever `acquire` was called with (`host:port` for the
-    /// gateway). Snapshots the key list first, because [`Pool::stats`] takes the
-    /// same lock.
+    /// gateway).
     pub fn all_stats(&self) -> Vec<(String, PoolStats)> {
-        let hosts: Vec<String> = {
-            let map = self.hosts.lock().unwrap();
-            map.keys().cloned().collect()
-        };
-        let mut out: Vec<(String, PoolStats)> = hosts
-            .into_iter()
-            .map(|host| {
-                let stats = self.stats(&host);
-                (host, stats)
-            })
+        let map = self.hosts.load();
+        let mut out: Vec<(String, PoolStats)> = map
+            .keys()
+            .map(|host| (host.clone(), self.stats(host)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out

@@ -176,15 +176,17 @@ impl Store {
     pub async fn reload(&self) -> Result<()> {
         let routing = self.catalog.load_routing().await?;
         let next = snapshot_from_routing(routing)?;
+        let current = self.inner.load();
         // Skip the swap when nothing changed. The snapshot is rebuilt above on every
         // reload anyway, so this is not about allocation: `ArcSwap`'s pointer store is
         // O(1), while this `==` is a deep compare. What it buys is that a genuine
         // swap happens *only* on real change — so the previous snapshot is not handed
         // to the reclaimer (it is dropped by whichever thread releases the last
         // `Guard`, see §12.6) every few seconds for nothing.
-        if self.inner.load().as_ref() == &next {
+        if current.as_ref() == &next {
             return Ok(());
         }
+        carry_over_cooldowns(&current, &next);
         self.inner.store(Arc::new(next));
         Ok(())
     }
@@ -254,6 +256,32 @@ fn snapshot_from_routing(routing: RoutingSnapshot) -> Result<Snapshot> {
         );
     }
     Ok(Snapshot { keys, models })
+}
+
+/// Preserve active cooldown windows across snapshot rebuilds for channels whose
+/// identity and upstream target/credentials are unchanged. If the operator
+/// rotated `api_key`, changed `base_url`, or updated `upstream_model`, the
+/// cooldown is deliberately NOT carried over so the fixed configuration takes
+/// effect immediately.
+fn carry_over_cooldowns(prev: &Snapshot, next: &Snapshot) {
+    let now = monotonic_ms();
+    for (model_name, next_route) in &next.models {
+        let Some(prev_route) = prev.models.get(model_name) else {
+            continue;
+        };
+        for next_ch in &next_route.channels {
+            if let Some(prev_ch) = prev_route.channels.iter().find(|c| c.id == next_ch.id) {
+                let until = prev_ch.cooldown_until_ms.load(Ordering::Relaxed);
+                if until > now
+                    && prev_ch.base_url == next_ch.base_url
+                    && prev_ch.api_key == next_ch.api_key
+                    && prev_ch.upstream_model == next_ch.upstream_model
+                {
+                    next_ch.cooldown_until_ms.store(until, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 }
 
 fn to_channel(c: RoutingChannel) -> Result<Channel> {
@@ -637,5 +665,73 @@ api_keys:
         assert!(!primary.is_cooling_down());
         let ordered_restored = order_channels(&[Arc::clone(&primary), Arc::clone(&backup)]);
         assert_eq!(ordered_restored[0].id, 1);
+    }
+
+    #[tokio::test]
+    async fn reload_preserves_active_cooldown_unless_channel_target_or_credential_changed() {
+        let (store, ch_initial, key) = store_with_provider(&UpstreamShape::default()).await;
+        ch_initial.mark_cooldown(Duration::from_secs(30));
+        assert!(ch_initial.is_cooling_down());
+
+        // Trigger a real snapshot change by adding a second provider & channel.
+        let p2 = store
+            .catalog()
+            .create_provider(
+                "backup",
+                "http://127.0.0.1:19",
+                "sk-backup",
+                true,
+                &UpstreamShape::default(),
+            )
+            .await
+            .expect("create backup provider");
+        let models = store.catalog().list_models().await.expect("models");
+        store
+            .catalog()
+            .create_channel(models[0].id, p2.id, "gpt", 1, 1, true)
+            .await
+            .expect("create backup channel");
+        store.reload().await.expect("reload after adding backup");
+
+        let record = store.authenticate(&key).expect("key");
+        let channels = store.channels_for(&record, "gpt").expect("channels");
+        let ch1_after = channels
+            .iter()
+            .find(|c| c.id == ch_initial.id)
+            .expect("ch1");
+        assert!(
+            ch1_after.is_cooling_down(),
+            "adding an unrelated channel must preserve ch1's active cooldown"
+        );
+        assert_eq!(
+            channels[0].provider_id, p2.id,
+            "healthy backup channel must still be ordered ahead of cooled-down ch1"
+        );
+
+        // Now rotate ch1's provider API key to fix the credential error -> cooldown must reset!
+        store
+            .catalog()
+            .update_provider(
+                ch_initial.provider_id,
+                "p",
+                "http://127.0.0.1:9",
+                "sk-fixed-key",
+                true,
+                &UpstreamShape::default(),
+            )
+            .await
+            .expect("update provider api_key");
+        store.reload().await.expect("reload after key fix");
+
+        let channels_fixed = store.channels_for(&record, "gpt").expect("channels");
+        let ch1_fixed = channels_fixed
+            .iter()
+            .find(|c| c.id == ch_initial.id)
+            .expect("ch1");
+        assert!(
+            !ch1_fixed.is_cooling_down(),
+            "updating a channel's api_key or base_url must reset its cooldown immediately"
+        );
+        assert_eq!(channels_fixed[0].id, ch_initial.id);
     }
 }

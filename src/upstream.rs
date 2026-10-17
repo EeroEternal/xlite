@@ -17,6 +17,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use arc_swap::ArcSwap;
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
@@ -332,7 +333,9 @@ impl HostPool {
 struct H1Pool {
     max_idle_per_host: usize,
     idle_timeout: Duration,
-    hosts: Mutex<HashMap<(bool, String), Arc<HostPool>>>,
+    plain_hosts: ArcSwap<HashMap<String, Arc<HostPool>>>,
+    tls_hosts: ArcSwap<HashMap<String, Arc<HostPool>>>,
+    mutate: Mutex<()>,
 }
 
 impl H1Pool {
@@ -340,18 +343,31 @@ impl H1Pool {
         Self {
             max_idle_per_host,
             idle_timeout,
-            hosts: Mutex::new(HashMap::new()),
+            plain_hosts: ArcSwap::from_pointee(HashMap::new()),
+            tls_hosts: ArcSwap::from_pointee(HashMap::new()),
+            mutate: Mutex::new(()),
         }
     }
 
     fn host_pool(&self, is_tls: bool, authority: &str) -> Arc<HostPool> {
-        let mut guard = self.hosts.lock().expect("h1 hosts mutex poisoned");
-        let key = (is_tls, authority.to_string());
-        Arc::clone(
-            guard.entry(key).or_insert_with(|| {
-                Arc::new(HostPool::new(self.max_idle_per_host, self.idle_timeout))
-            }),
-        )
+        let map = if is_tls {
+            &self.tls_hosts
+        } else {
+            &self.plain_hosts
+        };
+        if let Some(pool) = map.load().get(authority) {
+            return Arc::clone(pool);
+        }
+        let _guard = self.mutate.lock().expect("h1 hosts mutex poisoned");
+        let current = map.load();
+        if let Some(pool) = current.get(authority) {
+            return Arc::clone(pool);
+        }
+        let pool = Arc::new(HostPool::new(self.max_idle_per_host, self.idle_timeout));
+        let mut next = (**current).clone();
+        next.insert(authority.to_string(), Arc::clone(&pool));
+        map.store(Arc::new(next));
+        pool
     }
 }
 
@@ -395,7 +411,7 @@ pub struct Upstream {
     tls_h1_connector: tokio_rustls::TlsConnector,
     /// `https://` authorities whose TLS handshake negotiated `http/1.1` (or no
     /// ALPN) rather than `h2`, so subsequent requests go straight to `H1Pool`.
-    h1_tls_hosts: Arc<Mutex<HashSet<String>>>,
+    h1_tls_hosts: Arc<ArcSwap<HashSet<String>>>,
     /// Bound on the request→response-headers wait (see
     /// [`Config::upstream_header_timeout`]). `Duration::ZERO` = unbounded.
     header_timeout: Duration,
@@ -449,14 +465,17 @@ impl Upstream {
             cfg.max_conns_per_host.max(64),
             xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
         ));
-        let h1_tls_hosts = Arc::new(Mutex::new(HashSet::new()));
+        let h1_tls_hosts = Arc::new(ArcSwap::from_pointee(HashSet::new()));
+        let h1_tls_mutate = Arc::new(Mutex::new(()));
 
         let h1_for_alpn = Arc::clone(&h1);
         let h1_tls_hosts_for_alpn = Arc::clone(&h1_tls_hosts);
+        let h1_tls_mutate_for_alpn = Arc::clone(&h1_tls_mutate);
         let dial_tls: Dial = Arc::new(move |authority: String| {
             let tls = tls_alpn_connector.clone();
             let h1 = Arc::clone(&h1_for_alpn);
             let h1_tls_hosts = Arc::clone(&h1_tls_hosts_for_alpn);
+            let h1_tls_mutate = Arc::clone(&h1_tls_mutate_for_alpn);
             Box::pin(async move {
                 let tcp = dial_tcp(authority.as_str()).await?;
                 let host = tls_host_from_authority(&authority);
@@ -482,8 +501,15 @@ impl Upstream {
                 if tls_stream.get_ref().1.alpn_protocol() == Some(b"h2") {
                     Ok(Box::new(tls_stream) as BoxIo)
                 } else {
-                    if let Ok(mut guard) = h1_tls_hosts.lock() {
-                        guard.insert(authority.clone());
+                    if !h1_tls_hosts.load().contains(&authority)
+                        && let Ok(_guard) = h1_tls_mutate.lock()
+                    {
+                        let current = h1_tls_hosts.load();
+                        if !current.contains(&authority) {
+                            let mut next = (**current).clone();
+                            next.insert(authority.clone());
+                            h1_tls_hosts.store(Arc::new(next));
+                        }
                     }
                     h1.host_pool(true, &authority)
                         .put(H1Stream::Tls(Box::new(tls_stream)));
@@ -591,9 +617,7 @@ impl Upstream {
     }
 
     fn is_h1_only_tls(&self, authority: &str) -> bool {
-        self.h1_tls_hosts
-            .lock()
-            .is_ok_and(|g| g.contains(authority))
+        self.h1_tls_hosts.load().contains(authority)
     }
 
     async fn post_h2_tls(
@@ -611,30 +635,62 @@ impl Upstream {
             }
             Err(err) => return Err(err).context("h2 pool acquire"),
         };
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri(endpoint)
-            .header("content-type", "application/json")
-            .header("content-length", body.len());
-        if let Some((name, value)) = auth {
-            builder = builder.header(name.clone(), value.clone());
-        }
-        for (name, value) in extra {
-            builder = builder.header(name.clone(), value.clone());
-        }
-        let request = builder.body(()).context("build h2 request")?;
-        self.send_h2_request(&mut lease, request, body).await.map(
-            |(status, content_type, inner)| {
-                Some(UpstreamResponse {
+        let build_req = || -> Result<Request<()>> {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(endpoint)
+                .header("content-type", "application/json")
+                .header("content-length", body.len());
+            if let Some((name, value)) = auth {
+                builder = builder.header(name.clone(), value.clone());
+            }
+            for (name, value) in extra {
+                builder = builder.header(name.clone(), value.clone());
+            }
+            builder.body(()).context("build h2 request")
+        };
+        let request = build_req()?;
+        match self
+            .send_h2_request(&mut lease, request, body.clone())
+            .await
+        {
+            Ok((status, content_type, inner)) => Ok(Some(UpstreamResponse {
+                status,
+                content_type,
+                body: UpstreamBody {
+                    inner,
+                    _lease: Some(lease),
+                },
+            })),
+            Err(H2SendError::Transport(_)) if lease.is_reused() => {
+                // The pooled HTTP/2 connection was closed by the upstream or an
+                // intermediate NAT/firewall right as we sent the request. Evict
+                // the stale connection and transparently redial once.
+                lease.evict();
+                drop(lease);
+                let mut fresh = match self.tls_pool.acquire(authority).await {
+                    Ok(lease) => lease,
+                    Err(PoolError::Dial(e)) if e.kind() == io::ErrorKind::Unsupported => {
+                        return Ok(None);
+                    }
+                    Err(err) => return Err(err).context("h2 pool acquire"),
+                };
+                let retry_req = build_req()?;
+                let (status, content_type, inner) = self
+                    .send_h2_request(&mut fresh, retry_req, body)
+                    .await
+                    .map_err(H2SendError::into_anyhow)?;
+                Ok(Some(UpstreamResponse {
                     status,
                     content_type,
                     body: UpstreamBody {
                         inner,
-                        _lease: Some(lease),
+                        _lease: Some(fresh),
                     },
-                })
-            },
-        )
+                }))
+            }
+            Err(err) => Err(err.into_anyhow()),
+        }
     }
 
     async fn post_h2c(
@@ -653,28 +709,58 @@ impl Upstream {
             .acquire(authority)
             .await
             .context("h2 pool acquire")?;
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri(path)
-            .header("host", authority)
-            .header("content-type", "application/json")
-            .header("content-length", body.len());
-        if let Some((name, value)) = auth {
-            builder = builder.header(name.clone(), value.clone());
+        let build_req = || -> Result<Request<()>> {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("host", authority)
+                .header("content-type", "application/json")
+                .header("content-length", body.len());
+            if let Some((name, value)) = auth {
+                builder = builder.header(name.clone(), value.clone());
+            }
+            for (name, value) in extra {
+                builder = builder.header(name.clone(), value.clone());
+            }
+            builder.body(()).context("build h2 request")
+        };
+        let request = build_req()?;
+        match self
+            .send_h2_request(&mut lease, request, body.clone())
+            .await
+        {
+            Ok((status, content_type, inner)) => Ok(UpstreamResponse {
+                status,
+                content_type,
+                body: UpstreamBody {
+                    inner,
+                    _lease: Some(lease),
+                },
+            }),
+            Err(H2SendError::Transport(_)) if lease.is_reused() => {
+                lease.evict();
+                drop(lease);
+                let mut fresh = self
+                    .pool
+                    .acquire(authority)
+                    .await
+                    .context("h2 pool acquire")?;
+                let retry_req = build_req()?;
+                let (status, content_type, inner) = self
+                    .send_h2_request(&mut fresh, retry_req, body)
+                    .await
+                    .map_err(H2SendError::into_anyhow)?;
+                Ok(UpstreamResponse {
+                    status,
+                    content_type,
+                    body: UpstreamBody {
+                        inner,
+                        _lease: Some(fresh),
+                    },
+                })
+            }
+            Err(err) => Err(err.into_anyhow()),
         }
-        for (name, value) in extra {
-            builder = builder.header(name.clone(), value.clone());
-        }
-        let request = builder.body(()).context("build h2 request")?;
-        let (status, content_type, inner) = self.send_h2_request(&mut lease, request, body).await?;
-        Ok(UpstreamResponse {
-            status,
-            content_type,
-            body: UpstreamBody {
-                inner,
-                _lease: Some(lease),
-            },
-        })
     }
 
     async fn send_h2_request(
@@ -682,17 +768,34 @@ impl Upstream {
         lease: &mut Lease,
         request: Request<()>,
         body: Bytes,
-    ) -> Result<(u16, Option<String>, BodyKind)> {
+    ) -> std::result::Result<(u16, Option<String>, BodyKind), H2SendError> {
         let eos = body.is_empty();
         let (response_future, mut send_stream) = lease
             .send_request(request, eos)
-            .map_err(|e| anyhow::anyhow!("h2 send_request: {e}"))?;
+            .map_err(|e| H2SendError::Transport(anyhow::anyhow!("h2 send_request: {e}")))?;
         if !eos {
             send_stream
                 .send_data(body, true)
-                .map_err(|e| anyhow::anyhow!("h2 send_data: {e}"))?;
+                .map_err(|e| H2SendError::Transport(anyhow::anyhow!("h2 send_data: {e}")))?;
         }
-        let response = self.await_headers(response_future, "h2 response").await?;
+        let response = if self.header_timeout.is_zero() {
+            response_future
+                .await
+                .map_err(|e| H2SendError::Transport(anyhow::anyhow!("h2 response: {e}")))?
+        } else {
+            match tokio::time::timeout(self.header_timeout, response_future).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    return Err(H2SendError::Transport(anyhow::anyhow!("h2 response: {e}")));
+                }
+                Err(_) => {
+                    return Err(H2SendError::HeaderTimeout(anyhow::anyhow!(
+                        "upstream returned no response headers within {}s",
+                        self.header_timeout.as_secs()
+                    )));
+                }
+            }
+        };
         drop(send_stream);
         let status = response.status().as_u16();
         let content_type = response
@@ -895,6 +998,44 @@ enum ChunkState {
     Trailers,
 }
 
+enum H2SendError {
+    Transport(anyhow::Error),
+    HeaderTimeout(anyhow::Error),
+}
+
+impl H2SendError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Transport(e) | Self::HeaderTimeout(e) => e,
+        }
+    }
+}
+
+async fn write_vectored_all(stream: &mut TcpStream, mut a: &[u8], mut b: &[u8]) -> io::Result<()> {
+    while !a.is_empty() || !b.is_empty() {
+        let n = if !a.is_empty() {
+            let slices = [io::IoSlice::new(a), io::IoSlice::new(b)];
+            stream.write_vectored(&slices).await?
+        } else {
+            return stream.write_all(b).await;
+        };
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write whole request buffer",
+            ));
+        }
+        if n <= a.len() {
+            a = &a[n..];
+        } else {
+            let rem = n - a.len();
+            a = &[];
+            b = &b[rem..];
+        }
+    }
+    Ok(())
+}
+
 async fn send_and_read_h1_head(
     stream: &mut H1Stream,
     req_head: &[u8],
@@ -903,6 +1044,8 @@ async fn send_and_read_h1_head(
 ) -> io::Result<ParsedResponseHead> {
     if body.is_empty() {
         stream.write_all(req_head).await?;
+    } else if let H1Stream::Plain(tcp) = stream {
+        write_vectored_all(tcp, req_head, body).await?;
     } else if req_head.len() + body.len() <= 16 * 1024 {
         let mut combined = Vec::with_capacity(req_head.len() + body.len());
         combined.extend_from_slice(req_head);
@@ -2041,5 +2184,94 @@ mod tests {
             1,
             "ALPN fallback must park the first TLS socket into H1Pool and reuse it with 0 extra handshakes"
         );
+    }
+
+    #[tokio::test]
+    async fn h2_transparently_redials_once_when_reused_connection_drops_before_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = test_tls_acceptor(vec![b"h2".to_vec()]);
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_bg = Arc::clone(&accepts);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    break;
+                };
+                let conn_no = accepts_bg.fetch_add(1, Ordering::SeqCst) + 1;
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let Ok(mut h2_conn) = h2::server::handshake(tls).await else {
+                        return;
+                    };
+                    let mut stream_no = 0usize;
+                    while let Some(Ok((_req, mut respond))) = h2_conn.accept().await {
+                        stream_no += 1;
+                        if conn_no == 1 && stream_no == 2 {
+                            // Simulate a silent NAT/GOAWAY drop right as the 2nd
+                            // request arrives on the warm connection: drop the
+                            // server connection before sending response headers.
+                            drop(respond);
+                            drop(h2_conn);
+                            return;
+                        }
+                        let resp = http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/json")
+                            .body(())
+                            .unwrap();
+                        let mut send = respond.send_response(resp, false).unwrap();
+                        send.send_data(Bytes::from(format!("{{\"conn\":{conn_no}}}")), true)
+                            .unwrap();
+                    }
+                });
+            }
+        });
+
+        let up = test_tls_upstream();
+        let authority = format!("127.0.0.1:{}", addr.port());
+        let endpoint = format!("https://{authority}/v1/chat/completions");
+
+        // Request 1 warms up connection #1.
+        let r1 = up
+            .post_stream(
+                &endpoint,
+                &authority,
+                "/v1/chat/completions",
+                None,
+                &[],
+                Bytes::from_static(b"{\"model\":\"m\"}"),
+            )
+            .await
+            .expect("request 1 succeeds");
+        assert_eq!(r1.status, 200);
+        drop(r1);
+
+        // Request 2 checks out the warm connection #1 (`lease.is_reused() == true`),
+        // which drops before sending headers; `post_h2_tls` evicts connection #1
+        // and transparently redials connection #2.
+        let r2 = up
+            .post_stream(
+                &endpoint,
+                &authority,
+                "/v1/chat/completions",
+                None,
+                &[],
+                Bytes::from_static(b"{\"model\":\"m\"}"),
+            )
+            .await
+            .expect("request 2 must transparently redial and succeed");
+        assert_eq!(r2.status, 200);
+        let mut body = Vec::new();
+        let mut stream = r2.body;
+        while let Some(c) = stream.next().await {
+            body.extend_from_slice(&c.expect("chunk"));
+        }
+        assert_eq!(&body[..], b"{\"conn\":2}");
+        assert_eq!(accepts.load(Ordering::SeqCst), 2);
     }
 }
