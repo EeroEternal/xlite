@@ -14,7 +14,7 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `ADMIN_PASSWORD` | `admin` | Console login |
 | `ADMIN_SESSION_SECRET` | unset | Overrides the key used to sign Admin session cookies; set the same on every node |
 | `XLITE_UPSTREAM_H2C` | off | Plaintext HTTP/2 (`h2c`) to `http://` upstreams via `xlite-h2-pool` |
-| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and minimum idle pool size for `reqwest` |
+| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and minimum idle pool size for the native HTTP/1.1 pool (`H1Pool`) |
 | `XLITE_UPSTREAM_STREAM_CAP` | peer's `SETTINGS` | Client-side cap on concurrent streams per upstream HTTP/2 connection |
 | `XLITE_CATALOG_RELOAD_SECS` | `5` | Snapshot reload period; `0` freezes the snapshot (load test) |
 | `XLITE_UPSTREAM_STALL_TIMEOUT_SECS` | `0` (disabled) | End a response body with `TimedOut` after this many seconds of silence between chunks |
