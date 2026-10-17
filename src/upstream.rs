@@ -614,7 +614,8 @@ impl Upstream {
         let mut builder = Request::builder()
             .method("POST")
             .uri(endpoint)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("content-length", body.len());
         if let Some((name, value)) = auth {
             builder = builder.header(name.clone(), value.clone());
         }
@@ -656,7 +657,8 @@ impl Upstream {
             .method("POST")
             .uri(path)
             .header("host", authority)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            .header("content-length", body.len());
         if let Some((name, value)) = auth {
             builder = builder.header(name.clone(), value.clone());
         }
@@ -690,8 +692,8 @@ impl Upstream {
                 .send_data(body, true)
                 .map_err(|e| anyhow::anyhow!("h2 send_data: {e}"))?;
         }
-        drop(send_stream);
         let response = self.await_headers(response_future, "h2 response").await?;
+        drop(send_stream);
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -1921,6 +1923,12 @@ mod tests {
                     while let Some(Ok((req, mut respond))) = h2_conn.accept().await {
                         assert_eq!(req.uri().scheme_str(), Some("https"));
                         assert_eq!(req.uri().path(), "/v1/chat/completions");
+                        assert_eq!(
+                            req.headers()
+                                .get("content-length")
+                                .and_then(|v| v.to_str().ok()),
+                            Some("13")
+                        );
                         tokio::spawn(async move {
                             let resp = http::Response::builder()
                                 .status(200)
