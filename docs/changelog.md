@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-17
+
 - **Lock-free multi-host pool lookup & zero-copy HTTP/1.1 vectored writes (`crates/xlite-h2-pool/src/pool.rs`, `src/upstream.rs`)**: Replaced the single-entry `last_host` cache and `Mutex<HashMap<...>>` in `xlite-h2-pool`, `H1Pool`, and `h1_tls_hosts` with `ArcSwap`-backed maps/sets so concurrent routing across multiple upstream authorities executes with zero mutex contention and zero per-request `String` allocations; switched cleartext HTTP/1.1 request forwarding to `write_vectored` (`writev`) to send request headers and bodies in a single syscall without intermediate buffer copying.
 - **Transparent 1x redial on stale reused HTTP/2 connections (`crates/xlite-h2-pool/src/lease.rs`, `src/upstream.rs`)**: Added `Lease::is_reused()` and `Lease::evict()` so that when a warm pooled HTTP/2 connection (`h2c` or `ALPN: h2`) is silently dropped by an upstream or intermediate NAT/firewall before response headers arrive, `xlite` immediately evicts the dead connection and transparently redials once before triggering channel failover or transient cooldown.
 - **Channel cooldown preservation across catalog reloads (`src/store.rs`)**: `Store::reload()` now carries over active `cooldown_until_ms` deadlines for channels whose `id`, `base_url`, `api_key`, and `upstream_model` are unchanged, while immediately clearing cooldowns when a channel's target or credentials are updated by an operator.
