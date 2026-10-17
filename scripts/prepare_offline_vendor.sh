@@ -8,7 +8,7 @@
 # Requires network access (crates.io) once to vendor dependencies. Afterward, both
 # commands below run completely offline:
 #   cargo build --release --bin xlite --offline
-#   docker build -t xlite:0.6.2 .
+#   docker build -t xlite:0.6.3 .
 #
 # Usage:
 #   scripts/prepare_offline_vendor.sh            # generate / refresh vendor scaffolding
@@ -112,5 +112,5 @@ ok "Offline resolution verified"
 echo
 ok "Done. Both commands below now run without network access:"
 echo "    cargo build --release --bin xlite --offline"
-echo "    docker build -t xlite:0.6.2 ."
+echo "    docker build -t xlite:0.6.3 ."
 echo "  Note: .cargo/ and vendor/ remain gitignored ($(du -sh vendor | cut -f1)); do not commit them."
