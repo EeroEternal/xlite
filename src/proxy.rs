@@ -326,6 +326,15 @@ fn err_chain(e: &anyhow::Error) -> String {
     format!("{e:#}")
 }
 
+/// Cooldown duration applied to a channel that returned a quota/balance or
+/// credential/route error (`401`, `402`, `403`, `404`), avoiding repeated
+/// upstream round-trips to an exhausted or revoked key on every request.
+const COOLDOWN_QUOTA_OR_AUTH: Duration = Duration::from_secs(30);
+
+/// Cooldown duration applied to a channel that returned a transient rate-limit
+/// (`429`), server error (`5xx`), or transport/header timeout error.
+const COOLDOWN_TRANSIENT: Duration = Duration::from_secs(5);
+
 async fn try_channel(
     state: &AppState,
     channel: &Channel,
@@ -345,13 +354,23 @@ async fn try_channel(
             body,
         )
         .await
-        .map_err(|e| err_chain(&e))?;
+        .map_err(|e| {
+            channel.mark_cooldown(COOLDOWN_TRANSIENT);
+            err_chain(&e)
+        })?;
     if should_failover(upstream.status, false) {
         // Read the status before draining: `drain_error_body` consumes `upstream`.
         let status = upstream.status;
+        let cooldown = if matches!(status, 401..=404) {
+            COOLDOWN_QUOTA_OR_AUTH
+        } else {
+            COOLDOWN_TRANSIENT
+        };
+        channel.mark_cooldown(cooldown);
         let _ = drain_error_body(upstream, state.config.upstream_stall_timeout).await;
         return Err(format!("upstream {} returned {}", channel.base_url, status));
     }
+    channel.clear_cooldown();
     Ok(forward_response(
         upstream,
         state.config.upstream_stall_timeout,
@@ -795,5 +814,159 @@ mod tests {
         let missing: ModelRef = serde_json::from_slice(br#"{"stream":true}"#).expect("scan");
         assert_eq!(missing.model, None);
         assert!(serde_json::from_slice::<ModelRef>(br#"not json"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn failover_on_402_and_401_cools_down_bad_channels_so_subsequent_requests_skip_them() {
+        use crate::catalog::{Catalog, yaml};
+        use crate::config::Config;
+        use crate::store::Store;
+        use crate::upstream::Upstream;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn spawn_mock(
+            status: u16,
+            body: &'static str,
+        ) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let hits_bg = Arc::clone(&hits);
+            tokio::spawn(async move {
+                while let Ok((mut s, _)) = listener.accept().await {
+                    let hits_conn = Arc::clone(&hits_bg);
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        while let Ok(n) = s.read(&mut buf).await {
+                            if n == 0 {
+                                break;
+                            }
+                            hits_conn.fetch_add(1, Ordering::SeqCst);
+                            let resp = format!(
+                                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            if s.write_all(resp.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            let _ = s.flush().await;
+                        }
+                    });
+                }
+            });
+            (addr, hits)
+        }
+
+        // Tier 0: returns 402 Payment Required (quota exhausted)
+        // Tier 1: returns 401 Unauthorized (revoked key)
+        // Tier 2: returns 200 OK
+        let (addr_402, hits_402) = spawn_mock(402, r#"{"error":"insufficient_balance"}"#).await;
+        let (addr_401, hits_401) = spawn_mock(401, r#"{"error":"invalid_api_key"}"#).await;
+        let (addr_200, hits_200) = spawn_mock(200, r#"{"id":"chatcmpl-ok"}"#).await;
+
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: false,
+            admin_password: "admin".into(),
+            session_secret: None,
+            max_conns_per_host: 4,
+            upstream_stream_cap: 250,
+            catalog_reload_secs: 0,
+            upstream_stall_timeout: Duration::from_secs(5),
+            upstream_header_timeout: Duration::from_secs(5),
+            sse_keepalive_interval: Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
+        };
+        let catalog = Catalog::connect(&cfg).await.unwrap();
+        let yaml_doc = format!(
+            r#"providers:
+  - name: p402
+    base_url: http://{addr_402}
+    api_key: sk-1
+    enabled: true
+  - name: p401
+    base_url: http://{addr_401}
+    api_key: sk-2
+    enabled: true
+  - name: p200
+    base_url: http://{addr_200}
+    api_key: sk-3
+    enabled: true
+models:
+  - name: mimo-v2-pro
+    enabled: true
+    channels:
+      - provider: p402
+        upstream_model: mimo-v2-pro
+        weight: 1
+        priority: 0
+        enabled: true
+      - provider: p401
+        upstream_model: mimo-v2-pro
+        weight: 1
+        priority: 1
+        enabled: true
+      - provider: p200
+        upstream_model: mimo-v2-pro
+        weight: 1
+        priority: 2
+        enabled: true
+api_keys:
+  - name: client
+    key: sk-client
+    models: []
+    enabled: true
+"#
+        );
+        yaml::import_yaml(&catalog, &yaml_doc, yaml::ImportMode::Replace)
+            .await
+            .unwrap();
+        let store = Store::new(catalog);
+        store.reload().await.unwrap();
+        let state = AppState {
+            store,
+            sessions: crate::auth::Sessions::new("secret", None),
+            admin_password: "admin".into(),
+            upstream: Upstream::new(&cfg),
+            config: cfg,
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer sk-client"),
+        );
+
+        for _ in 0..3 {
+            let resp = chat_completions(
+                State(state.clone()),
+                headers.clone(),
+                Bytes::from_static(br#"{"model":"mimo-v2-pro","messages":[]}"#),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        assert_eq!(
+            hits_402.load(Ordering::SeqCst),
+            1,
+            "402 channel must only be hit on the first request and skipped during cooldown"
+        );
+        assert_eq!(
+            hits_401.load(Ordering::SeqCst),
+            1,
+            "401 channel must fail over on the first request and be skipped during cooldown"
+        );
+        assert_eq!(
+            hits_200.load(Ordering::SeqCst),
+            3,
+            "healthy backup channel must serve all 3 requests"
+        );
     }
 }

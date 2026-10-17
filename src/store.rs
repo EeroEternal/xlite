@@ -5,7 +5,9 @@
 use anyhow::Result;
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
@@ -15,7 +17,14 @@ use crate::upstream::{
     build_auth, build_extra_headers, chat_completions_url, h2c_parts, upstream_url,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+fn monotonic_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    // Shift by +1 ms so `0` is unambiguously reserved for "not in cooldown".
+    (epoch.elapsed().as_millis() as u64).saturating_add(1)
+}
+
+#[derive(Debug)]
 pub struct Channel {
     pub id: i64,
     pub provider_id: i64,
@@ -36,6 +45,79 @@ pub struct Channel {
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
+    /// Lock-free monotonic deadline (`monotonic_ms()`) until which this channel
+    /// is deprioritized after a pre-first-byte upstream failure (`402`, `429`,
+    /// `5xx`, or dial/header timeout). `0` means healthy.
+    cooldown_until_ms: AtomicU64,
+}
+
+impl Clone for Channel {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            provider_id: self.provider_id,
+            base_url: self.base_url.clone(),
+            endpoint: self.endpoint.clone(),
+            authority: self.authority.clone(),
+            path: self.path.clone(),
+            api_key: self.api_key.clone(),
+            auth: self.auth.clone(),
+            extra_headers: self.extra_headers.clone(),
+            upstream_model: self.upstream_model.clone(),
+            weight: self.weight,
+            priority: self.priority,
+            cooldown_until_ms: AtomicU64::new(self.cooldown_until_ms.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl PartialEq for Channel {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.provider_id == other.provider_id
+            && self.base_url == other.base_url
+            && self.endpoint == other.endpoint
+            && self.authority == other.authority
+            && self.path == other.path
+            && self.api_key == other.api_key
+            && self.auth == other.auth
+            && self.extra_headers == other.extra_headers
+            && self.upstream_model == other.upstream_model
+            && self.weight == other.weight
+            && self.priority == other.priority
+    }
+}
+
+impl Eq for Channel {}
+
+impl Channel {
+    /// Returns `true` if this channel is currently in a post-failure cooldown
+    /// window.
+    #[inline]
+    pub fn is_cooling_down(&self) -> bool {
+        let until = self.cooldown_until_ms.load(Ordering::Relaxed);
+        until != 0 && monotonic_ms() < until
+    }
+
+    /// Deprioritize this channel for `duration` after an upstream error so
+    /// subsequent requests skip straight to healthy channels without paying an
+    /// extra round-trip to an exhausted (`402`) or rate-limited (`429`) key.
+    #[inline]
+    pub fn mark_cooldown(&self, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        let until = monotonic_ms().saturating_add(duration.as_millis() as u64);
+        self.cooldown_until_ms.store(until, Ordering::Relaxed);
+    }
+
+    /// Clear any active cooldown once a channel serves a request successfully.
+    #[inline]
+    pub fn clear_cooldown(&self) {
+        if self.cooldown_until_ms.load(Ordering::Relaxed) != 0 {
+            self.cooldown_until_ms.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,10 +282,39 @@ fn to_channel(c: RoutingChannel) -> Result<Channel> {
         upstream_model: c.upstream_model,
         weight: c.weight,
         priority: c.priority,
+        cooldown_until_ms: AtomicU64::new(0),
     })
 }
 
 pub fn order_channels(channels: &[Arc<Channel>]) -> Vec<Arc<Channel>> {
+    if channels.len() <= 1 {
+        return channels.to_vec();
+    }
+    let any_cooling = channels.iter().any(|c| c.is_cooling_down());
+    if !any_cooling {
+        return order_subset(channels);
+    }
+    let ready: Vec<Arc<Channel>> = channels
+        .iter()
+        .filter(|c| !c.is_cooling_down())
+        .cloned()
+        .collect();
+    if ready.is_empty() {
+        // Every candidate channel is in cooldown; keep normal priority + weight
+        // ordering so traffic is never blackholed.
+        return order_subset(channels);
+    }
+    let cooling: Vec<Arc<Channel>> = channels
+        .iter()
+        .filter(|c| c.is_cooling_down())
+        .cloned()
+        .collect();
+    let mut out = order_subset(&ready);
+    out.extend(order_subset(&cooling));
+    out
+}
+
+fn order_subset(channels: &[Arc<Channel>]) -> Vec<Arc<Channel>> {
     let min_p = channels.iter().map(|c| c.priority).min().unwrap_or(0);
     let first: Vec<&Arc<Channel>> = channels.iter().filter(|c| c.priority == min_p).collect();
     let rest: Vec<Arc<Channel>> = channels
@@ -263,6 +374,7 @@ mod tests {
             upstream_model: "m".into(),
             weight: w,
             priority: p,
+            cooldown_until_ms: AtomicU64::new(0),
         })
     }
 
@@ -487,5 +599,43 @@ api_keys:
             store.channels_for(&record, "gpt").is_some(),
             "the previous snapshot must keep serving after a failed reload"
         );
+    }
+
+    #[test]
+    fn cooling_down_channel_is_moved_behind_healthy_tiers_and_restored_on_clear() {
+        let primary = ch(1, 1, 0);
+        let backup = ch(2, 1, 1);
+
+        // Before cooldown: priority 0 is first.
+        let ordered = order_channels(&[Arc::clone(&primary), Arc::clone(&backup)]);
+        assert_eq!(ordered[0].id, 1);
+        assert_eq!(ordered[1].id, 2);
+
+        // Mark primary on 30s cooldown (e.g. after 402 Payment Required).
+        primary.mark_cooldown(Duration::from_secs(30));
+        assert!(primary.is_cooling_down());
+
+        let ordered_cool = order_channels(&[Arc::clone(&primary), Arc::clone(&backup)]);
+        assert_eq!(
+            ordered_cool[0].id, 2,
+            "healthy backup channel must be tried before cooling-down primary"
+        );
+        assert_eq!(
+            ordered_cool[1].id, 1,
+            "cooling-down channel remains at the tail as last-resort fallback"
+        );
+
+        // When ALL channels are in cooldown, priority order is preserved so traffic is not blackholed.
+        backup.mark_cooldown(Duration::from_secs(30));
+        let ordered_all_cool = order_channels(&[Arc::clone(&primary), Arc::clone(&backup)]);
+        assert_eq!(ordered_all_cool[0].id, 1);
+        assert_eq!(ordered_all_cool[1].id, 2);
+
+        // Clearing cooldown restores primary immediately.
+        primary.clear_cooldown();
+        backup.clear_cooldown();
+        assert!(!primary.is_cooling_down());
+        let ordered_restored = order_channels(&[Arc::clone(&primary), Arc::clone(&backup)]);
+        assert_eq!(ordered_restored[0].id, 1);
     }
 }

@@ -109,12 +109,14 @@ flowchart LR
     Req["Client Request\nmodel: deepseek-r1"] --> T0{"Tier 0 (priority: 0)\nWeighted Pick"}
     T0 -->|"75% (weight: 3)"| C1["primary-us-east"]
     T0 -->|"25% (weight: 1)"| C2["primary-us-west"]
-    C1 -->|"402 / 429 / 5xx / Connect or Header Timeout\n(before 1st byte)"| C2
+    C1 -->|"401–404 / 408 / 429 / 5xx / Timeout\n(before 1st byte + cooldown)"| C2
     C2 -->|"Also fails before 1st byte"| C3["Tier 1 Backup (priority: 1)\nbackup-openrouter"]
     C1 -->|"200 OK"| Stream["Raw SSE Bytes\nto Client"]
     C2 -->|"200 OK"| Stream
     C3 -->|"200 OK"| Stream
 ```
+
+When a channel fails before the first byte, `xlite` records a lock-free `AtomicU64` monotonic cooldown on that `Channel` (`30s` on `401–404` quota/auth/route errors, `5s` on `408`/`429`/`5xx` and transport/header timeouts). Subsequent requests immediately order healthy channels ahead of cooling-down channels with zero extra upstream RTT, while retaining cooling-down channels at the tail so traffic is never blackholed if all channels enter cooldown simultaneously.
 
 ---
 
@@ -122,14 +124,15 @@ flowchart LR
 
 Standard Rust HTTP clients (`reqwest` / `hyper-util`) reuse a single HTTP/2 connection per `(scheme, host, port)`. Once in-flight streams exceed the upstream server's `SETTINGS_MAX_CONCURRENT_STREAMS` (commonly 100–250), `hyper` queues excess streams *inside that single connection* instead of opening a second TCP connection. Under load tests, `upstream_ttft` spikes into seconds while client-side queue metrics appear idle.
 
-`crates/xlite-h2-pool` solves this with Go-style peer-`SETTINGS`-aware stream accounting:
+`crates/xlite-h2-pool` solves this for both cleartext `h2c` (`http://` with `XLITE_UPSTREAM_H2C=1`) and TLS `h2` (`https://` cloud providers such as DeepSeek, Xiaomi MiMo, OpenAI, and Anthropic via `ALPN: h2`) with Go-style peer-`SETTINGS`-aware stream accounting:
 
 1. Reads the peer's live `SETTINGS_MAX_CONCURRENT_STREAMS` frame during the HTTP/2 handshake (optionally clamped by `XLITE_UPSTREAM_STREAM_CAP`).
 2. Tracks each connection's active streams via lock-free atomics (`in_flight < cap`).
 3. Reserves a slot on the first non-saturated connection; when all open connections reach `cap`, dials a new connection up to `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` (default `32`).
 4. Only queues acquirers when all `max_conns_per_host` connections are simultaneously at full stream capacity.
+5. If an `https://` origin negotiates `http/1.1` during TLS ALPN instead of `h2`, `xlite` parks the warm TLS socket directly into its native LIFO `H1Pool` and serves the request with zero extra TLS handshake.
 
-For high-concurrency cleartext HTTP/1.1 upstreams (where one TCP connection carries one request at a time), `xlite` pairs with [**xLB**](https://github.com/EeroEternal/xlb)'s `thin-l7` bounded LIFO connection pool.
+For high-concurrency cleartext HTTP/1.1 upstreams (where one TCP connection carries one request at a time), `xlite` also pairs with [**xLB**](https://github.com/EeroEternal/xlb)'s `thin-l7` bounded LIFO connection pool.
 
 ---
 

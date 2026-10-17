@@ -1,12 +1,14 @@
 //! Upstream HTTP client.
 //!
-//! - Cleartext `http://` with `XLITE_UPSTREAM_H2C=1` uses the native
-//!   `xlite-h2-pool` (peer `SETTINGS`-aware HTTP/2 stream accounting).
-//! - HTTP/1.1 (`XLITE_UPSTREAM_H2C=0`) and `https://` use the native LIFO
-//!   HTTP/1.1 keep-alive pool (`H1Pool`) with non-blocking socket liveness
-//!   probing and transparent 1x redial on stale keep-alive races.
+//! - Cleartext `http://` with `XLITE_UPSTREAM_H2C=1` and `https://` endpoints
+//!   whose peer negotiates `ALPN: h2` use the native `xlite-h2-pool` (peer
+//!   `SETTINGS`-aware HTTP/2 stream accounting and `RST_STREAM(CANCEL)`).
+//! - HTTP/1.1 (`XLITE_UPSTREAM_H2C=0`) and `https://` endpoints that negotiate
+//!   `http/1.1` automatically use the native LIFO HTTP/1.1 keep-alive pool
+//!   (`H1Pool`) with non-blocking socket liveness probing and transparent 1x
+//!   redial on stale keep-alive races.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -21,7 +23,7 @@ use http::{HeaderName, HeaderValue, Request};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
-use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool};
+use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool, PoolError};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
 use crate::config::Config;
@@ -153,21 +155,46 @@ async fn dial_tcp(authority: &str) -> io::Result<TcpStream> {
     Ok(stream)
 }
 
+fn build_tls_connector(
+    alpn_protocols: Vec<Vec<u8>>,
+    extra_roots: &[rustls_pki_types::CertificateDer<'static>],
+) -> tokio_rustls::TlsConnector {
+    let mut root_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    for cert in extra_roots {
+        let _ = root_store.add(cert.clone());
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("rustls default protocol versions")
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    cfg.alpn_protocols = alpn_protocols;
+    tokio_rustls::TlsConnector::from(Arc::new(cfg))
+}
+
 fn shared_tls_connector() -> &'static tokio_rustls::TlsConnector {
     static TLS: OnceLock<tokio_rustls::TlsConnector> = OnceLock::new();
-    TLS.get_or_init(|| {
-        let root_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("rustls default protocol versions")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-        tokio_rustls::TlsConnector::from(Arc::new(cfg))
-    })
+    TLS.get_or_init(|| build_tls_connector(vec![b"http/1.1".to_vec()], &[]))
+}
+
+fn shared_tls_alpn_connector() -> &'static tokio_rustls::TlsConnector {
+    static TLS: OnceLock<tokio_rustls::TlsConnector> = OnceLock::new();
+    TLS.get_or_init(|| build_tls_connector(vec![b"h2".to_vec(), b"http/1.1".to_vec()], &[]))
+}
+
+fn tls_host_from_authority(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[')
+        && let Some((ipv6, _)) = rest.split_once(']')
+    {
+        return ipv6;
+    }
+    authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority)
 }
 
 enum H1Stream {
@@ -328,7 +355,11 @@ impl H1Pool {
     }
 }
 
-async fn dial_h1(authority: &str, tls_host: Option<&str>) -> io::Result<H1Stream> {
+async fn dial_h1(
+    authority: &str,
+    tls_host: Option<&str>,
+    tls_connector: &tokio_rustls::TlsConnector,
+) -> io::Result<H1Stream> {
     let tcp = dial_tcp(authority).await?;
     let Some(host) = tls_host else {
         return Ok(H1Stream::Plain(tcp));
@@ -341,8 +372,7 @@ async fn dial_h1(authority: &str, tls_host: Option<&str>) -> io::Result<H1Stream
                 format!("invalid TLS host `{clean_host}`: {e}"),
             )
         })?;
-    let tls = shared_tls_connector();
-    let tls_stream = tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(server_name, tcp))
+    let tls_stream = tokio::time::timeout(CONNECT_TIMEOUT, tls_connector.connect(server_name, tcp))
         .await
         .map_err(|_| {
             io::Error::new(
@@ -360,7 +390,12 @@ async fn dial_h1(authority: &str, tls_host: Option<&str>) -> io::Result<H1Stream
 pub struct Upstream {
     h2c: bool,
     pool: Arc<Pool>,
+    tls_pool: Arc<Pool>,
     h1: Arc<H1Pool>,
+    tls_h1_connector: tokio_rustls::TlsConnector,
+    /// `https://` authorities whose TLS handshake negotiated `http/1.1` (or no
+    /// ALPN) rather than `h2`, so subsequent requests go straight to `H1Pool`.
+    h1_tls_hosts: Arc<Mutex<HashSet<String>>>,
     /// Bound on the request→response-headers wait (see
     /// [`Config::upstream_header_timeout`]). `Duration::ZERO` = unbounded.
     header_timeout: Duration,
@@ -385,6 +420,18 @@ pub struct UpstreamResponse {
 
 impl Upstream {
     pub fn new(cfg: &Config) -> Self {
+        Self::with_tls_connectors(
+            cfg,
+            shared_tls_alpn_connector().clone(),
+            shared_tls_connector().clone(),
+        )
+    }
+
+    fn with_tls_connectors(
+        cfg: &Config,
+        tls_alpn_connector: tokio_rustls::TlsConnector,
+        tls_h1_connector: tokio_rustls::TlsConnector,
+    ) -> Self {
         let dial: Dial = Arc::new(|host: String| {
             Box::pin(async move {
                 let stream = dial_tcp(host.as_str()).await?;
@@ -398,14 +445,69 @@ impl Upstream {
             dial,
             idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
         });
-        let h1 = H1Pool::new(
+        let h1 = Arc::new(H1Pool::new(
             cfg.max_conns_per_host.max(64),
             xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
-        );
+        ));
+        let h1_tls_hosts = Arc::new(Mutex::new(HashSet::new()));
+
+        let h1_for_alpn = Arc::clone(&h1);
+        let h1_tls_hosts_for_alpn = Arc::clone(&h1_tls_hosts);
+        let dial_tls: Dial = Arc::new(move |authority: String| {
+            let tls = tls_alpn_connector.clone();
+            let h1 = Arc::clone(&h1_for_alpn);
+            let h1_tls_hosts = Arc::clone(&h1_tls_hosts_for_alpn);
+            Box::pin(async move {
+                let tcp = dial_tcp(authority.as_str()).await?;
+                let host = tls_host_from_authority(&authority);
+                let server_name =
+                    rustls_pki_types::ServerName::try_from(host.to_owned()).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("invalid TLS host `{host}`: {e}"),
+                        )
+                    })?;
+                let tls_stream =
+                    tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(server_name, tcp))
+                        .await
+                        .map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "upstream TLS handshake timeout after {}s",
+                                    CONNECT_TIMEOUT.as_secs()
+                                ),
+                            )
+                        })??;
+                if tls_stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+                    Ok(Box::new(tls_stream) as BoxIo)
+                } else {
+                    if let Ok(mut guard) = h1_tls_hosts.lock() {
+                        guard.insert(authority.clone());
+                    }
+                    h1.host_pool(true, &authority)
+                        .put(H1Stream::Tls(Box::new(tls_stream)));
+                    Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "upstream did not negotiate HTTP/2 (ALPN h2)",
+                    ))
+                }
+            })
+        });
+        let tls_pool = Pool::new(PoolConfig {
+            max_conns_per_host: cfg.max_conns_per_host.max(1),
+            stream_budget_per_conn: cfg.upstream_stream_cap,
+            pinned_poll: true,
+            dial: dial_tls,
+            idle_timeout: xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
+        });
         Self {
             h2c: cfg.h2c,
             pool: Arc::new(pool),
-            h1: Arc::new(h1),
+            tls_pool: Arc::new(tls_pool),
+            h1,
+            tls_h1_connector,
+            h1_tls_hosts,
             header_timeout: cfg.upstream_header_timeout,
         }
     }
@@ -439,7 +541,13 @@ impl Upstream {
 
     /// Read-only pool snapshot for the control plane (`GET /api/pool`).
     pub fn pool_stats(&self) -> Vec<(String, xlite_h2_pool::PoolStats)> {
-        self.pool.all_stats()
+        let mut out = self.pool.all_stats();
+        let tls_stats = self.tls_pool.all_stats();
+        if !tls_stats.is_empty() {
+            out.extend(tls_stats);
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        out
     }
 
     pub async fn post_stream(
@@ -451,11 +559,81 @@ impl Upstream {
         extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
     ) -> Result<UpstreamResponse> {
+        if endpoint.starts_with("https://") {
+            let resolved_auth;
+            let auth_key = if authority.is_empty() {
+                resolved_auth = h2c_parts(endpoint).map(|(a, _)| a).unwrap_or_default();
+                resolved_auth.as_str()
+            } else {
+                authority
+            };
+            if !auth_key.is_empty() && !self.is_h1_only_tls(auth_key) {
+                match self
+                    .post_h2_tls(endpoint, auth_key, auth, extra, body.clone())
+                    .await?
+                {
+                    Some(resp) => return Ok(resp),
+                    None => {
+                        // Peer negotiated HTTP/1.1 during ALPN and its warm TLS
+                        // socket is already parked in `self.h1`; fall through.
+                    }
+                }
+            }
+            return self
+                .post_h1(endpoint, authority, path, auth, extra, body)
+                .await;
+        }
         if self.h2c && endpoint.starts_with("http://") {
             return self.post_h2c(authority, path, auth, extra, body).await;
         }
         self.post_h1(endpoint, authority, path, auth, extra, body)
             .await
+    }
+
+    fn is_h1_only_tls(&self, authority: &str) -> bool {
+        self.h1_tls_hosts
+            .lock()
+            .is_ok_and(|g| g.contains(authority))
+    }
+
+    async fn post_h2_tls(
+        &self,
+        endpoint: &str,
+        authority: &str,
+        auth: Option<&(HeaderName, HeaderValue)>,
+        extra: &[(HeaderName, HeaderValue)],
+        body: Bytes,
+    ) -> Result<Option<UpstreamResponse>> {
+        let mut lease = match self.tls_pool.acquire(authority).await {
+            Ok(lease) => lease,
+            Err(PoolError::Dial(e)) if e.kind() == io::ErrorKind::Unsupported => {
+                return Ok(None);
+            }
+            Err(err) => return Err(err).context("h2 pool acquire"),
+        };
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(endpoint)
+            .header("content-type", "application/json");
+        if let Some((name, value)) = auth {
+            builder = builder.header(name.clone(), value.clone());
+        }
+        for (name, value) in extra {
+            builder = builder.header(name.clone(), value.clone());
+        }
+        let request = builder.body(()).context("build h2 request")?;
+        self.send_h2_request(&mut lease, request, body).await.map(
+            |(status, content_type, inner)| {
+                Some(UpstreamResponse {
+                    status,
+                    content_type,
+                    body: UpstreamBody {
+                        inner,
+                        _lease: Some(lease),
+                    },
+                })
+            },
+        )
     }
 
     async fn post_h2c(
@@ -474,7 +652,6 @@ impl Upstream {
             .acquire(authority)
             .await
             .context("h2 pool acquire")?;
-        let eos = body.is_empty();
         let mut builder = Request::builder()
             .method("POST")
             .uri(path)
@@ -487,6 +664,24 @@ impl Upstream {
             builder = builder.header(name.clone(), value.clone());
         }
         let request = builder.body(()).context("build h2 request")?;
+        let (status, content_type, inner) = self.send_h2_request(&mut lease, request, body).await?;
+        Ok(UpstreamResponse {
+            status,
+            content_type,
+            body: UpstreamBody {
+                inner,
+                _lease: Some(lease),
+            },
+        })
+    }
+
+    async fn send_h2_request(
+        &self,
+        lease: &mut Lease,
+        request: Request<()>,
+        body: Bytes,
+    ) -> Result<(u16, Option<String>, BodyKind)> {
+        let eos = body.is_empty();
         let (response_future, mut send_stream) = lease
             .send_request(request, eos)
             .map_err(|e| anyhow::anyhow!("h2 send_request: {e}"))?;
@@ -509,14 +704,7 @@ impl Upstream {
         } else {
             BodyKind::H2(recv, 0)
         };
-        Ok(UpstreamResponse {
-            status,
-            content_type,
-            body: UpstreamBody {
-                inner,
-                _lease: Some(lease),
-            },
-        })
+        Ok((status, content_type, inner))
     }
 
     async fn post_h1(
@@ -539,9 +727,13 @@ impl Upstream {
         let (mut stream, reused) = match host_pool.take_idle() {
             Some(s) => (s, true),
             None => {
-                let s = dial_h1(&target.authority, target.tls_host.as_deref())
-                    .await
-                    .context("upstream connect")?;
+                let s = dial_h1(
+                    &target.authority,
+                    target.tls_host.as_deref(),
+                    &self.tls_h1_connector,
+                )
+                .await
+                .context("upstream connect")?;
                 (s, false)
             }
         };
@@ -556,8 +748,12 @@ impl Upstream {
                             // The idle keep-alive socket was closed by the upstream
                             // right as we wrote the request or waited for the first
                             // response byte. Transparently redial a fresh socket once.
-                            let mut fresh =
-                                dial_h1(&target.authority, target.tls_host.as_deref()).await?;
+                            let mut fresh = dial_h1(
+                                &target.authority,
+                                target.tls_host.as_deref(),
+                                &self.tls_h1_connector,
+                            )
+                            .await?;
                             buf.clear();
                             let head =
                                 send_and_read_h1_head(&mut fresh, &req_head, &body, &mut buf)
@@ -1192,11 +1388,14 @@ pub fn authorization_header(api_key: &str) -> String {
 
 /// Fail over only before the first byte has been written to the client.
 ///
-/// Covers server errors (`5xx`), rate limits (`429 Too Many Requests`), and
-/// upstream quota/balance exhaustion (`402 Payment Required`) so requests
-/// transparently fall back to the next candidate channel.
+/// Covers server errors (`5xx`), rate limits (`429 Too Many Requests`),
+/// request timeouts (`408 Request Timeout`), quota/balance exhaustion
+/// (`402 Payment Required`), credential rejection on a single provider key
+/// (`401 Unauthorized`, `403 Forbidden`), and missing upstream model routes
+/// (`404 Not Found`) so requests transparently fall back to the next candidate
+/// channel. Client payload validation errors (`400`, `422`) are not retried.
 pub fn should_failover(status: u16, bytes_sent: bool) -> bool {
-    !bytes_sent && (status >= 500 || status == 429 || status == 402)
+    !bytes_sent && (status >= 500 || matches!(status, 401 | 402 | 403 | 404 | 408 | 429))
 }
 
 #[cfg(test)]
@@ -1253,14 +1452,19 @@ mod tests {
     }
 
     #[test]
-    fn failover_only_before_first_byte_on_5xx_429_and_402() {
+    fn failover_only_before_first_byte_on_5xx_429_408_and_401_to_404() {
         assert!(should_failover(502, false));
         assert!(should_failover(429, false));
+        assert!(should_failover(408, false));
+        assert!(should_failover(404, false));
+        assert!(should_failover(403, false));
         assert!(should_failover(402, false));
+        assert!(should_failover(401, false));
         assert!(!should_failover(400, false));
-        assert!(!should_failover(401, false));
+        assert!(!should_failover(422, false));
         assert!(!should_failover(502, true));
         assert!(!should_failover(402, true));
+        assert!(!should_failover(401, true));
         assert!(!should_failover(200, false));
     }
 
@@ -1425,7 +1629,7 @@ mod tests {
         }
     }
 
-    async fn read_http_request(stream: &mut TcpStream) -> io::Result<()> {
+    async fn read_http_request<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<()> {
         let mut pending = Vec::new();
         let mut buf = [0u8; 4096];
         while !pending.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1631,5 +1835,203 @@ mod tests {
                 "Connection: close / UntilClose socket must not be reused"
             );
         }
+    }
+
+    const TEST_CERT_DER: &[u8] = &[
+        48, 130, 1, 149, 48, 130, 1, 59, 160, 3, 2, 1, 2, 2, 20, 25, 12, 191, 172, 208, 75, 168,
+        104, 18, 72, 233, 180, 175, 224, 50, 53, 4, 239, 127, 163, 48, 10, 6, 8, 42, 134, 72, 206,
+        61, 4, 3, 2, 48, 20, 49, 18, 48, 16, 6, 3, 85, 4, 3, 12, 9, 108, 111, 99, 97, 108, 104,
+        111, 115, 116, 48, 32, 23, 13, 50, 54, 49, 48, 49, 55, 48, 57, 48, 50, 52, 49, 90, 24, 15,
+        50, 49, 50, 54, 48, 57, 50, 51, 48, 57, 48, 50, 52, 49, 90, 48, 20, 49, 18, 48, 16, 6, 3,
+        85, 4, 3, 12, 9, 108, 111, 99, 97, 108, 104, 111, 115, 116, 48, 89, 48, 19, 6, 7, 42, 134,
+        72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206, 61, 3, 1, 7, 3, 66, 0, 4, 183, 232, 130, 207,
+        171, 112, 7, 29, 251, 205, 242, 176, 43, 146, 32, 93, 212, 117, 134, 255, 170, 176, 81,
+        114, 157, 179, 153, 10, 236, 84, 15, 195, 130, 112, 151, 146, 188, 36, 240, 97, 224, 192,
+        150, 240, 90, 229, 141, 66, 107, 26, 221, 230, 195, 184, 60, 128, 248, 144, 158, 55, 126,
+        17, 240, 40, 163, 105, 48, 103, 48, 29, 6, 3, 85, 29, 14, 4, 22, 4, 20, 241, 51, 241, 146,
+        229, 131, 30, 114, 192, 131, 200, 237, 181, 128, 181, 129, 168, 103, 245, 142, 48, 31, 6,
+        3, 85, 29, 35, 4, 24, 48, 22, 128, 20, 241, 51, 241, 146, 229, 131, 30, 114, 192, 131, 200,
+        237, 181, 128, 181, 129, 168, 103, 245, 142, 48, 9, 6, 3, 85, 29, 19, 4, 2, 48, 0, 48, 26,
+        6, 3, 85, 29, 17, 4, 19, 48, 17, 130, 9, 108, 111, 99, 97, 108, 104, 111, 115, 116, 135, 4,
+        127, 0, 0, 1, 48, 10, 6, 8, 42, 134, 72, 206, 61, 4, 3, 2, 3, 72, 0, 48, 69, 2, 33, 0, 166,
+        73, 217, 91, 116, 205, 164, 132, 103, 44, 20, 61, 220, 80, 223, 68, 184, 135, 147, 158, 83,
+        57, 238, 148, 147, 231, 124, 39, 202, 63, 218, 254, 2, 32, 57, 13, 205, 93, 116, 171, 53,
+        104, 33, 3, 195, 106, 211, 149, 132, 230, 164, 216, 139, 159, 244, 48, 96, 101, 68, 246,
+        46, 4, 240, 145, 65, 31,
+    ];
+
+    const TEST_KEY_DER: &[u8] = &[
+        48, 129, 135, 2, 1, 0, 48, 19, 6, 7, 42, 134, 72, 206, 61, 2, 1, 6, 8, 42, 134, 72, 206,
+        61, 3, 1, 7, 4, 109, 48, 107, 2, 1, 1, 4, 32, 39, 48, 169, 252, 153, 124, 0, 56, 94, 66,
+        150, 237, 57, 40, 33, 133, 196, 184, 208, 89, 164, 234, 120, 252, 101, 139, 237, 17, 233,
+        103, 242, 186, 161, 68, 3, 66, 0, 4, 183, 232, 130, 207, 171, 112, 7, 29, 251, 205, 242,
+        176, 43, 146, 32, 93, 212, 117, 134, 255, 170, 176, 81, 114, 157, 179, 153, 10, 236, 84,
+        15, 195, 130, 112, 151, 146, 188, 36, 240, 97, 224, 192, 150, 240, 90, 229, 141, 66, 107,
+        26, 221, 230, 195, 184, 60, 128, 248, 144, 158, 55, 126, 17, 240, 40,
+    ];
+
+    fn test_tls_acceptor(alpn: Vec<Vec<u8>>) -> tokio_rustls::TlsAcceptor {
+        let cert = rustls_pki_types::CertificateDer::from(TEST_CERT_DER);
+        let key = rustls_pki_types::PrivateKeyDer::Pkcs8(
+            rustls_pki_types::PrivatePkcs8KeyDer::from(TEST_KEY_DER),
+        );
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut server_cfg = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        server_cfg.alpn_protocols = alpn;
+        tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg))
+    }
+
+    fn test_tls_upstream() -> Upstream {
+        let cert = rustls_pki_types::CertificateDer::from(TEST_CERT_DER);
+        let alpn = build_tls_connector(
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            std::slice::from_ref(&cert),
+        );
+        let h1 = build_tls_connector(vec![b"http/1.1".to_vec()], std::slice::from_ref(&cert));
+        Upstream::with_tls_connectors(&h1_test_cfg(), alpn, h1)
+    }
+
+    #[tokio::test]
+    async fn https_negotiates_alpn_h2_and_multiplexes_via_tls_pool() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = test_tls_acceptor(vec![b"h2".to_vec()]);
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_bg = Arc::clone(&accepts);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    break;
+                };
+                accepts_bg.fetch_add(1, Ordering::SeqCst);
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let Ok(mut h2_conn) = h2::server::handshake(tls).await else {
+                        return;
+                    };
+                    while let Some(Ok((req, mut respond))) = h2_conn.accept().await {
+                        assert_eq!(req.uri().scheme_str(), Some("https"));
+                        assert_eq!(req.uri().path(), "/v1/chat/completions");
+                        tokio::spawn(async move {
+                            let resp = http::Response::builder()
+                                .status(200)
+                                .header("content-type", "text/event-stream")
+                                .body(())
+                                .unwrap();
+                            let mut send = respond.send_response(resp, false).unwrap();
+                            send.send_data(Bytes::from_static(b"data: {\"h2\":true}\n\n"), true)
+                                .unwrap();
+                        });
+                    }
+                });
+            }
+        });
+
+        let up = test_tls_upstream();
+        let authority = format!("127.0.0.1:{}", addr.port());
+        let endpoint = format!("https://{authority}/v1/chat/completions");
+
+        for _ in 0..3 {
+            let resp = up
+                .post_stream(
+                    &endpoint,
+                    &authority,
+                    "/v1/chat/completions",
+                    None,
+                    &[],
+                    Bytes::from_static(b"{\"model\":\"m\"}"),
+                )
+                .await
+                .expect("TLS h2 request succeeds");
+            assert_eq!(resp.status, 200);
+            assert_eq!(resp.content_type.as_deref(), Some("text/event-stream"));
+            let mut body = Vec::new();
+            let mut stream = resp.body;
+            while let Some(c) = stream.next().await {
+                body.extend_from_slice(&c.expect("chunk"));
+            }
+            assert_eq!(&body[..], b"data: {\"h2\":true}\n\n");
+        }
+
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "all 3 HTTPS requests must multiplex over a single TLS HTTP/2 connection"
+        );
+        let stats = up.pool_stats();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].0, authority);
+        assert_eq!(stats[0].1.connections, 1);
+    }
+
+    #[tokio::test]
+    async fn https_falls_back_to_h1_pool_with_zero_extra_handshake_when_peer_speaks_http1() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = test_tls_acceptor(vec![b"http/1.1".to_vec()]);
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_bg = Arc::clone(&accepts);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    break;
+                };
+                accepts_bg.fetch_add(1, Ordering::SeqCst);
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    while read_http_request(&mut tls).await.is_ok() {
+                        let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"h1\":true}";
+                        if tls.write_all(resp).await.is_err() {
+                            break;
+                        }
+                        let _ = tls.flush().await;
+                    }
+                });
+            }
+        });
+
+        let up = test_tls_upstream();
+        let authority = format!("127.0.0.1:{}", addr.port());
+        let endpoint = format!("https://{authority}/v1/chat/completions");
+
+        for _ in 0..2 {
+            let resp = up
+                .post_stream(
+                    &endpoint,
+                    &authority,
+                    "/v1/chat/completions",
+                    None,
+                    &[],
+                    Bytes::from_static(b"{\"model\":\"m\"}"),
+                )
+                .await
+                .expect("TLS h1 fallback request succeeds");
+            assert_eq!(resp.status, 200);
+            let mut body = Vec::new();
+            let mut stream = resp.body;
+            while let Some(c) = stream.next().await {
+                body.extend_from_slice(&c.expect("chunk"));
+            }
+            assert_eq!(&body[..], b"{\"h1\":true}");
+        }
+
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            1,
+            "ALPN fallback must park the first TLS socket into H1Pool and reuse it with 0 extra handshakes"
+        );
     }
 }
