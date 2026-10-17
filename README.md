@@ -15,6 +15,10 @@ Full-stack AI gateways ([LiteLLM](https://github.com/BerriAI/litellm), [New API]
 - **Purpose-Built 10k+ Streaming HTTP/2 Pool (`xlite-h2-pool`)** — Standard `reqwest` reuses a single HTTP/2 connection per host and queues streams internally once `SETTINGS_MAX_CONCURRENT_STREAMS` fills up. `xlite-h2-pool` reads live peer `SETTINGS` during the handshake and scales TCP connections horizontally up to `XLITE_UPSTREAM_MAX_CONNS_PER_HOST`, paired with `StallGuard` and instant `RST_STREAM(CANCEL)` propagation ([deep dive](docs/architecture.md#5-native-upstream-http2-pool-xlite-h2-pool)).
 - **0 Hot-Path DB I/O + Single-Binary Web Console** — Precomputes SHA-256 API key hashes, channel tiers, and HTTP headers into a lock-free in-memory snapshot ([deep dive](docs/architecture.md#3-lock-free-arcswap-snapshot-srcstorers)), while embedding a complete React Admin Console, GitOps YAML import/export, and pluggable **SQLite / In-Memory / Redis** catalog storage in one static binary.
 
+<p align="center">
+  <img src="docs/assets/scenarios.svg" alt="xlite Core Feature Scenarios" width="100%">
+</p>
+
 | Dimension | **xlite** | **[LiteLLM](https://github.com/BerriAI/litellm)** | **[New API](https://github.com/QuantumNous/new-api)** | **[AISIX OSS](https://github.com/api7/aisix)** |
 | :--- | :--- | :--- | :--- | :--- |
 | **Runtime & Role** | **Rust · Ultra-thin OpenAI streaming load balancer** | Python · Multi-SDK adapter & spend governance | Go · Multi-tenant SaaS billing & quota portal | Rust · Full protocol-translation & Agent gateway |
