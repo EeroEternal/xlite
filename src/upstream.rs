@@ -1501,6 +1501,24 @@ pub fn chat_completions_url(base: &str) -> String {
     }
 }
 
+pub fn responses_url(base: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    if b.ends_with("/v1") {
+        format!("{b}/responses")
+    } else {
+        format!("{b}/v1/responses")
+    }
+}
+
+pub fn embeddings_url(base: &str) -> String {
+    let b = base.trim().trim_end_matches('/');
+    if b.ends_with("/v1") {
+        format!("{b}/embeddings")
+    } else {
+        format!("{b}/v1/embeddings")
+    }
+}
+
 /// `base_url` + an explicit provider path (the `chat_path` override).
 pub fn upstream_url(base: &str, path: &str) -> String {
     let b = base.trim().trim_end_matches('/');

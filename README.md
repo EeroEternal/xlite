@@ -1,6 +1,6 @@
 # xlite
 
-**xlite** is an ultra-thin, high-concurrency OpenAI streaming load balancer written in Rust. It isolates **model channel scheduling and failover (`priority + weight + pre-first-byte failover`)** into a **zero-JSON-per-chunk, zero-hot-path-DB-I/O Rust data plane** backed by a purpose-built 10k+ streaming HTTP/2 connection pool (`xlite-h2-pool`), while shipping an **out-of-the-box single-binary Web Console**.
+**xlite** is a headless, ultra-thin, multi-protocol AI traffic gateway written in Rust. It isolates **model channel scheduling and failover (`priority + weight + pre-first-byte failover`)** and **multi-protocol translation (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`)** into a **zero-hot-path-DB-I/O Rust data plane** backed by a purpose-built 10k+ streaming HTTP/2 connection pool (`xlite-h2-pool`), controlled programmatically via a stateless REST API (`Authorization: Bearer <ADMIN_PASSWORD>`) or GitOps YAML catalog.
 
 <p align="center">
   <img src="docs/assets/architecture.svg" alt="xlite Architecture Topology" width="100%">
@@ -70,5 +70,4 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 - [Operator Manual & Configuration Reference](docs/manual/xlite.md) — all `XLITE_*` environment variables, storage modes (`SQLite` / `memory` / `Redis`), and pool tuning
 - [Getting Started Guide](docs/getting-started.md) — 5-minute closed-loop setup, YAML catalog workflow, and `/health` & `/ready` probes
 - [Docker Compose Deployment (`xlite` + Redis)](deploy/README.md) — production-ready single-node or multi-replica (`--profile ha`) Docker Compose stack
-- [Admin UI Design Specification](docs/design.md) — embedded React console visual and interaction design
 - [Changelog](docs/changelog.md) — release history

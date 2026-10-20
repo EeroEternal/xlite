@@ -1,6 +1,5 @@
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,7 +8,6 @@ use axum::routing::{get, post};
 use axum::serve::ListenerExt;
 use tokio::net::{TcpListener, TcpSocket};
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -181,14 +179,28 @@ async fn run_server() -> Result<()> {
         info!("catalog snapshot reload disabled");
     }
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/health", get(proxy::health))
+        .route("/v1/health", get(proxy::health))
         .route("/ready", get(proxy::ready))
         .route("/v1/models", get(proxy::list_models))
         .route(
             "/v1/chat/completions",
             post(proxy::chat_completions)
                 .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes)),
+        )
+        .route(
+            "/v1/messages",
+            post(proxy::anthropic_messages)
+                .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes)),
+        )
+        .route(
+            "/v1/responses",
+            post(proxy::responses).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes)),
+        )
+        .route(
+            "/v1/embeddings",
+            post(proxy::embeddings).layer(axum::extract::DefaultBodyLimit::max(max_body_bytes)),
         )
         .merge(admin::router())
         .layer(
@@ -202,6 +214,9 @@ async fn run_server() -> Result<()> {
                     axum::http::header::AUTHORIZATION,
                     axum::http::header::CONTENT_TYPE,
                     axum::http::header::COOKIE,
+                    axum::http::HeaderName::from_static("x-api-key"),
+                    axum::http::HeaderName::from_static("x-admin-token"),
+                    axum::http::HeaderName::from_static("anthropic-version"),
                 ])
                 .allow_methods([
                     axum::http::Method::GET,
@@ -212,13 +227,6 @@ async fn run_server() -> Result<()> {
                 ]),
         )
         .with_state(state);
-
-    let dist = PathBuf::from("admin/dist");
-    if dist.join("index.html").exists() {
-        let index = ServeFile::new(dist.join("index.html"));
-        app = app.fallback_service(ServeDir::new(dist).not_found_service(index));
-        info!("serving admin UI from admin/dist");
-    }
 
     let addr: SocketAddr = config.listen.parse().context("parse listen address")?;
     let listener = bind_listener(addr).with_context(|| format!("bind {addr}"))?;

@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" role="img" aria-labelledby="title">
-  <title id="title">X</title>
-  <g fill="#2744A5">
-    <path d="M27 29h69l171 172c29 29 29 69 0 98L96 472H27v-69l152-153L27 99V29Z"/>
-    <path d="M398 29h74v74l-74 74-74-74 74-74Z"/>
-    <path d="M281 325h117l74 74v74h-74L271 346c-8-8-2-21 10-21Z"/>
-  </g>
-</svg>

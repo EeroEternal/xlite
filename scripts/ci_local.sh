@@ -87,9 +87,9 @@ if [[ -n "$merge" ]]; then
   )"
 fi
 
-want_rust=0 want_admin=0 want_meta=0
+want_rust=0 want_meta=0
 if [[ "$FORCE_ALL" == "1" || "$scope_known" == "0" || -z "$paths" ]]; then
-  want_rust=1 want_admin=1 want_meta=1
+  want_rust=1 want_meta=1
   if [[ "$FORCE_ALL" == "1" ]]; then
     printf 'scope: every face (--all)\n'
   elif [[ -z "$ONLY" ]]; then
@@ -104,15 +104,12 @@ else
       src/*|crates/*|tests/*|migrations/*|benches/*|build.rs|Cargo.toml|Cargo.lock|rust-toolchain.toml) want_rust=1 ;;
     esac
     case "$p" in
-      admin/*) want_admin=1 ;;
-    esac
-    case "$p" in
-      docs/*|*.md|.agents/*|.github/*|scripts/*|.mise.toml) want_meta=1 ;;
+      docs/*|*.md|.agents/*|.github/*|scripts/*|.mise.toml|Dockerfile|deploy/*) want_meta=1 ;;
     esac
   done <<< "$paths"
   if [[ -z "$ONLY" ]]; then
     printf 'scope: %s changed path(s) vs %s\n' "$changed_n" "$BASE"
-    if [[ "$want_rust" == "0" && "$want_admin" == "0" && "$want_meta" == "0" ]]; then
+    if [[ "$want_rust" == "0" && "$want_meta" == "0" ]]; then
       warn "no face matched the changed paths — running meta. Teach the routing table in this script about those paths."
       want_meta=1
     fi
@@ -122,14 +119,13 @@ fi
 # --only overrides path scoping: handy when you want exactly one face (e.g. after a
 # docs-only change). All tiers run locally on macOS or Linux.
 if [[ -n "$ONLY" ]]; then
-  want_rust=0 want_admin=0 want_meta=0
+  want_rust=0 want_meta=0
   IFS=',' read -r -a faces <<< "$ONLY"
   for f in "${faces[@]}"; do
     case "$f" in
       rust)  want_rust=1 ;;
-      admin) want_admin=1 ;;
       meta)  want_meta=1 ;;
-      *) echo "unknown face: $f (want rust|admin|meta)" >&2; exit 2 ;;
+      *) echo "unknown face: $f (want rust|meta)" >&2; exit 2 ;;
     esac
   done
   printf 'scope: forced faces (--only %s)\n' "$ONLY"
@@ -192,23 +188,6 @@ if [[ "$want_rust" == "1" ]]; then
   ok "cargo test"
 else
   skip "rust: no src/** | crates/** | tests/** | migrations/** | Cargo.* change"
-fi
-
-# ---- admin -----------------------------------------------------------------
-if [[ "$want_admin" == "1" ]]; then
-  say "admin"
-  (
-    cd admin
-    npx tsc -b --noEmit
-    npm run lint
-    npx vitest run
-    if [[ "$TIER" != "t0" ]]; then
-      npm run build
-    fi
-  )
-  ok "admin"
-else
-  skip "admin: no admin/** change"
 fi
 
 if [[ "$TIER" == "t0" ]]; then

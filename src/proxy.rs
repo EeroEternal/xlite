@@ -17,8 +17,17 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::admin::AppState;
+use crate::protocol::{
+    ParsedResponsesRequest, build_openai_chat_body_from_anthropic,
+    build_openai_chat_body_from_responses, build_openai_responses_body, collect_upstream_body,
+    format_anthropic_error_body, parse_anthropic_request, parse_responses_request,
+    translate_openai_chat_to_anthropic_json, translate_openai_chat_to_responses_json,
+    translate_openai_sse_to_anthropic_stream, translate_openai_sse_to_responses_stream,
+};
 use crate::store::Channel;
-use crate::upstream::{UpstreamResponse, should_failover};
+use crate::upstream::{
+    UpstreamResponse, embeddings_url, h2c_parts, responses_url, should_failover,
+};
 
 /// SSE comment frame emitted during silent upstream prefill or reasoning pauses.
 /// Per the WHATWG `EventSource` specification, lines starting with `:` are
@@ -276,7 +285,7 @@ pub async fn chat_completions(
             };
         }
     };
-    let Some(model) = model_ref.model else {
+    let Some(model) = model_ref.model.map(str::trim).filter(|m| !m.is_empty()) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -295,21 +304,556 @@ pub async fn chat_completions(
             .into_response();
     };
 
-    let mut last_error = "no channel available".to_string();
+    let mut last_failure = ChannelFailure::Transport {
+        message: "no channel available".to_string(),
+        channel_id: 0,
+        provider_id: 0,
+        upstream_model: String::new(),
+    };
     let mut plan: Option<RewritePlan> = None;
     for channel in channels {
         match try_channel(&state, &channel, model, &body, &mut plan).await {
             Ok(response) => return response,
-            Err(err) => last_error = err,
+            Err(failure) => last_failure = failure,
         }
     }
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(json!({
-            "error": { "message": last_error, "type": "upstream_error" }
-        })),
+    last_failure.into_openai_response()
+}
+
+/// Anthropic `/v1/messages` compatibility endpoint powered by `unigateway-protocol`.
+pub async fn anthropic_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    let Some(token) = bearer_key(&headers) else {
+        return anthropic_unauthorized();
+    };
+    let Some(key) = state.store.authenticate(token) else {
+        return anthropic_unauthorized();
+    };
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return anthropic_bad_request("request body must be JSON");
+        }
+    };
+    let request = match parse_anthropic_request(&payload) {
+        Ok(r) => r,
+        Err(msg) => return anthropic_bad_request(&msg),
+    };
+    let Some(channels) = state.store.channels_for(&key, &request.model) else {
+        let body = format_anthropic_error_body(
+            404,
+            b"",
+            &format!("model {} is not available", request.model),
+        );
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
+    };
+
+    let mut last_failure = ChannelFailure::Transport {
+        message: "no channel available".to_string(),
+        channel_id: 0,
+        provider_id: 0,
+        upstream_model: String::new(),
+    };
+    for channel in channels {
+        let out_body = match build_openai_chat_body_from_anthropic(&channel, &request) {
+            Ok(b) => b,
+            Err(e) => return anthropic_bad_request(&e),
+        };
+        let upstream = match state
+            .upstream
+            .post_stream(
+                &channel.endpoint,
+                &channel.authority,
+                &channel.path,
+                channel.auth.as_ref(),
+                &channel.extra_headers,
+                out_body,
+            )
+            .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                channel.mark_cooldown(COOLDOWN_TRANSIENT);
+                last_failure = ChannelFailure::Transport {
+                    message: err_chain(&e),
+                    channel_id: channel.id,
+                    provider_id: channel.provider_id,
+                    upstream_model: channel.upstream_model.clone(),
+                };
+                continue;
+            }
+        };
+        if should_failover(upstream.status, false) {
+            let status = upstream.status;
+            let cooldown = if matches!(status, 401..=404) {
+                COOLDOWN_QUOTA_OR_AUTH
+            } else {
+                COOLDOWN_TRANSIENT
+            };
+            channel.mark_cooldown(cooldown);
+            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            last_failure = ChannelFailure::UpstreamStatus {
+                status,
+                body: err_bytes,
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+                base_url: channel.base_url.clone(),
+            };
+            continue;
+        }
+        if !(200..300).contains(&upstream.status) {
+            let status = upstream.status;
+            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            return ChannelFailure::UpstreamStatus {
+                status,
+                body: err_bytes,
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+                base_url: channel.base_url.clone(),
+            }
+            .into_anthropic_response();
+        }
+        channel.clear_cooldown();
+        if request.stream {
+            let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+            let anthropic_sse =
+                translate_openai_sse_to_anthropic_stream(guarded, request.model.clone());
+            let with_ka = StallGuard::with_keepalive(
+                anthropic_sse,
+                Duration::ZERO,
+                state.config.sse_keepalive_interval,
+            );
+            return attach_channel_headers(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                    .header(axum::http::header::CACHE_CONTROL, "no-cache")
+                    .header("x-accel-buffering", "no"),
+                &channel,
+            )
+            .body(Body::from_stream(with_ka))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+        let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+        let raw_bytes = match collect_upstream_body(guarded, state.config.max_body_bytes).await {
+            Ok(b) => b,
+            Err(e) => {
+                last_failure = ChannelFailure::Transport {
+                    message: e,
+                    channel_id: channel.id,
+                    provider_id: channel.provider_id,
+                    upstream_model: channel.upstream_model.clone(),
+                };
+                continue;
+            }
+        };
+        match translate_openai_chat_to_anthropic_json(&raw_bytes, &request.model) {
+            Ok(json_val) => {
+                return attach_channel_headers(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                    &channel,
+                )
+                .body(Body::from(
+                    serde_json::to_vec(&json_val).unwrap_or_default(),
+                ))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+            Err(e) => {
+                last_failure = ChannelFailure::Transport {
+                    message: e,
+                    channel_id: channel.id,
+                    provider_id: channel.provider_id,
+                    upstream_model: channel.upstream_model.clone(),
+                };
+            }
+        }
+    }
+    last_failure.into_anthropic_response()
+}
+
+/// OpenAI `/v1/responses` endpoint with automatic fallback to `/v1/chat/completions`
+/// when an upstream provider only implements Chat Completions (`404`/`405`).
+pub async fn responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    let Some(token) = bearer_key(&headers) else {
+        return unauthorized();
+    };
+    let Some(key) = state.store.authenticate(token) else {
+        return unauthorized();
+    };
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": { "message": "request body must be JSON", "type": "invalid_request_error" }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let request = match parse_responses_request(&payload) {
+        Ok(r) => r,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": { "message": msg, "type": "invalid_request_error" }
+                })),
+            )
+                .into_response();
+        }
+    };
+    let Some(channels) = state.store.channels_for(&key, &request.model) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": { "message": format!("model {} is not available", request.model), "type": "invalid_request_error" }
+            })),
+        )
+            .into_response();
+    };
+
+    let mut last_failure = ChannelFailure::Transport {
+        message: "no channel available".to_string(),
+        channel_id: 0,
+        provider_id: 0,
+        upstream_model: String::new(),
+    };
+    for channel in channels {
+        let out_body = match build_openai_responses_body(&channel, &request) {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": { "message": e, "type": "invalid_request_error" } })),
+                )
+                    .into_response();
+            }
+        };
+        let resp_ep = responses_url(&channel.base_url);
+        let (resp_auth, resp_path) = h2c_parts(&resp_ep)
+            .unwrap_or_else(|| (channel.authority.clone(), "/v1/responses".into()));
+        let upstream = match state
+            .upstream
+            .post_stream(
+                &resp_ep,
+                &resp_auth,
+                &resp_path,
+                channel.auth.as_ref(),
+                &channel.extra_headers,
+                out_body,
+            )
+            .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                channel.mark_cooldown(COOLDOWN_TRANSIENT);
+                last_failure = ChannelFailure::Transport {
+                    message: err_chain(&e),
+                    channel_id: channel.id,
+                    provider_id: channel.provider_id,
+                    upstream_model: channel.upstream_model.clone(),
+                };
+                continue;
+            }
+        };
+
+        if matches!(upstream.status, 404 | 405) {
+            let _ = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            match try_responses_via_chat(&state, &channel, &request).await {
+                Ok(resp) => return resp,
+                Err(failure) => {
+                    last_failure = failure;
+                    continue;
+                }
+            }
+        }
+
+        if should_failover(upstream.status, false) {
+            let status = upstream.status;
+            let cooldown = if matches!(status, 401..=404) {
+                COOLDOWN_QUOTA_OR_AUTH
+            } else {
+                COOLDOWN_TRANSIENT
+            };
+            channel.mark_cooldown(cooldown);
+            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            last_failure = ChannelFailure::UpstreamStatus {
+                status,
+                body: err_bytes,
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+                base_url: channel.base_url.clone(),
+            };
+            continue;
+        }
+        channel.clear_cooldown();
+        return forward_response_with_channel(
+            upstream,
+            &channel,
+            state.config.upstream_stall_timeout,
+            state.config.sse_keepalive_interval,
+        );
+    }
+    last_failure.into_openai_response()
+}
+
+async fn try_responses_via_chat(
+    state: &AppState,
+    channel: &Channel,
+    request: &ParsedResponsesRequest,
+) -> Result<Response, ChannelFailure> {
+    let chat_body = build_openai_chat_body_from_responses(channel, request).map_err(|e| {
+        ChannelFailure::Transport {
+            message: e,
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        }
+    })?;
+    let upstream = state
+        .upstream
+        .post_stream(
+            &channel.endpoint,
+            &channel.authority,
+            &channel.path,
+            channel.auth.as_ref(),
+            &channel.extra_headers,
+            chat_body,
+        )
+        .await
+        .map_err(|e| {
+            channel.mark_cooldown(COOLDOWN_TRANSIENT);
+            ChannelFailure::Transport {
+                message: err_chain(&e),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            }
+        })?;
+    if should_failover(upstream.status, false) {
+        let status = upstream.status;
+        let cooldown = if matches!(status, 401..=404) {
+            COOLDOWN_QUOTA_OR_AUTH
+        } else {
+            COOLDOWN_TRANSIENT
+        };
+        channel.mark_cooldown(cooldown);
+        let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+        return Err(ChannelFailure::UpstreamStatus {
+            status,
+            body: err_bytes,
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+            base_url: channel.base_url.clone(),
+        });
+    }
+    if !(200..300).contains(&upstream.status) {
+        let status = upstream.status;
+        let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+        return Ok(ChannelFailure::UpstreamStatus {
+            status,
+            body: err_bytes,
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+            base_url: channel.base_url.clone(),
+        }
+        .into_openai_response());
+    }
+    channel.clear_cooldown();
+    if request.stream {
+        let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+        let resp_sse = translate_openai_sse_to_responses_stream(guarded, request.model.clone());
+        let with_ka = StallGuard::with_keepalive(
+            resp_sse,
+            Duration::ZERO,
+            state.config.sse_keepalive_interval,
+        );
+        return Ok(attach_channel_headers(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                .header(axum::http::header::CACHE_CONTROL, "no-cache")
+                .header("x-accel-buffering", "no"),
+            channel,
+        )
+        .body(Body::from_stream(with_ka))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()));
+    }
+    let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+    let raw_bytes = collect_upstream_body(guarded, state.config.max_body_bytes)
+        .await
+        .map_err(|e| ChannelFailure::Transport {
+            message: e,
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        })?;
+    let json_val =
+        translate_openai_chat_to_responses_json(&raw_bytes, &request.model).map_err(|e| {
+            ChannelFailure::Transport {
+                message: e,
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            }
+        })?;
+    Ok(attach_channel_headers(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(axum::http::header::CONTENT_TYPE, "application/json"),
+        channel,
     )
-        .into_response()
+    .body(Body::from(
+        serde_json::to_vec(&json_val).unwrap_or_default(),
+    ))
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+/// OpenAI `/v1/embeddings` endpoint with zero-DOM `"model"` splicing and failover.
+pub async fn embeddings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    let Some(token) = bearer_key(&headers) else {
+        return unauthorized();
+    };
+    let Some(key) = state.store.authenticate(token) else {
+        return unauthorized();
+    };
+    let model_ref: ModelRef = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return match serde_json::from_slice::<Value>(&body) {
+                Err(_) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": { "message": "request body must be JSON", "type": "invalid_request_error" }
+                    })),
+                )
+                    .into_response(),
+                Ok(_) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": { "message": "missing model", "type": "invalid_request_error" }
+                    })),
+                )
+                    .into_response(),
+            };
+        }
+    };
+    let Some(model) = model_ref.model.map(str::trim).filter(|m| !m.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "message": "missing model", "type": "invalid_request_error" }
+            })),
+        )
+            .into_response();
+    };
+    let Some(channels) = state.store.channels_for(&key, model) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": { "message": format!("model {model} is not available"), "type": "invalid_request_error" }
+            })),
+        )
+            .into_response();
+    };
+
+    let mut last_failure = ChannelFailure::Transport {
+        message: "no channel available".to_string(),
+        channel_id: 0,
+        provider_id: 0,
+        upstream_model: String::new(),
+    };
+    let mut plan: Option<RewritePlan> = None;
+    for channel in channels {
+        let out_body = match outbound_body(model, &channel.upstream_model, &body, &mut plan) {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": { "message": e, "type": "invalid_request_error" } })),
+                )
+                    .into_response();
+            }
+        };
+        let emb_ep = embeddings_url(&channel.base_url);
+        let (emb_auth, emb_path) = h2c_parts(&emb_ep)
+            .unwrap_or_else(|| (channel.authority.clone(), "/v1/embeddings".into()));
+        let upstream = match state
+            .upstream
+            .post_stream(
+                &emb_ep,
+                &emb_auth,
+                &emb_path,
+                channel.auth.as_ref(),
+                &channel.extra_headers,
+                out_body,
+            )
+            .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                channel.mark_cooldown(COOLDOWN_TRANSIENT);
+                last_failure = ChannelFailure::Transport {
+                    message: err_chain(&e),
+                    channel_id: channel.id,
+                    provider_id: channel.provider_id,
+                    upstream_model: channel.upstream_model.clone(),
+                };
+                continue;
+            }
+        };
+        if should_failover(upstream.status, false) {
+            let status = upstream.status;
+            let cooldown = if matches!(status, 401..=404) {
+                COOLDOWN_QUOTA_OR_AUTH
+            } else {
+                COOLDOWN_TRANSIENT
+            };
+            channel.mark_cooldown(cooldown);
+            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            last_failure = ChannelFailure::UpstreamStatus {
+                status,
+                body: err_bytes,
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+                base_url: channel.base_url.clone(),
+            };
+            continue;
+        }
+        channel.clear_cooldown();
+        return forward_response_with_channel(
+            upstream,
+            &channel,
+            state.config.upstream_stall_timeout,
+            state.config.sse_keepalive_interval,
+        );
+    }
+    last_failure.into_openai_response()
 }
 
 /// Render an upstream error together with its full cause chain.
@@ -335,14 +879,190 @@ const COOLDOWN_QUOTA_OR_AUTH: Duration = Duration::from_secs(30);
 /// (`429`), server error (`5xx`), or transport/header timeout error.
 const COOLDOWN_TRANSIENT: Duration = Duration::from_secs(5);
 
+enum ChannelFailure {
+    Transport {
+        message: String,
+        channel_id: i64,
+        provider_id: i64,
+        upstream_model: String,
+    },
+    UpstreamStatus {
+        status: u16,
+        body: Bytes,
+        channel_id: i64,
+        provider_id: i64,
+        upstream_model: String,
+        base_url: String,
+    },
+}
+
+/// Map `502`/`504` to `503 Service Unavailable` when returning a terminal
+/// JSON error payload so reverse proxies / CDNs (such as Cloudflare Orange
+/// Cloud) pass the JSON body through instead of replacing `502`/`504` with a
+/// generic gateway error page.
+fn cloudflare_safe_error_status(status: u16) -> StatusCode {
+    match status {
+        400..=499 => StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+        500 | 503 => StatusCode::from_u16(status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+        502 | 504 => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_GATEWAY,
+    }
+}
+
+impl ChannelFailure {
+    fn into_openai_response(self) -> Response {
+        match self {
+            Self::Transport {
+                message,
+                channel_id,
+                provider_id,
+                upstream_model,
+            } => attach_failure_headers(
+                Response::builder()
+                    .status(StatusCode::BAD_GATEWAY)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                channel_id,
+                provider_id,
+                &upstream_model,
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "error": { "message": message, "type": "upstream_error" }
+                }))
+                .unwrap_or_default(),
+            ))
+            .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()),
+            Self::UpstreamStatus {
+                status,
+                body,
+                channel_id,
+                provider_id,
+                upstream_model,
+                base_url,
+            } => {
+                let http_status = cloudflare_safe_error_status(status);
+                let out_body = if serde_json::from_slice::<Value>(&body).is_ok() {
+                    body
+                } else {
+                    let text = std::str::from_utf8(&body)
+                        .ok()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("upstream {base_url} returned {status}"));
+                    Bytes::from(
+                        serde_json::to_vec(&json!({
+                            "error": { "message": text, "type": "upstream_error" }
+                        }))
+                        .unwrap_or_default(),
+                    )
+                };
+                attach_failure_headers(
+                    Response::builder()
+                        .status(http_status)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                    channel_id,
+                    provider_id,
+                    &upstream_model,
+                )
+                .body(Body::from(out_body))
+                .unwrap_or_else(|_| http_status.into_response())
+            }
+        }
+    }
+
+    fn into_anthropic_response(self) -> Response {
+        match self {
+            Self::Transport {
+                message,
+                channel_id,
+                provider_id,
+                upstream_model,
+            } => {
+                let body = format_anthropic_error_body(502, b"", &message);
+                attach_failure_headers(
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                    channel_id,
+                    provider_id,
+                    &upstream_model,
+                )
+                .body(Body::from(body))
+                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+            }
+            Self::UpstreamStatus {
+                status,
+                body,
+                channel_id,
+                provider_id,
+                upstream_model,
+                base_url,
+            } => {
+                let http_status = cloudflare_safe_error_status(status);
+                let fallback = format!("upstream {base_url} returned {status}");
+                let out_body = format_anthropic_error_body(status, &body, &fallback);
+                attach_failure_headers(
+                    Response::builder()
+                        .status(http_status)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json"),
+                    channel_id,
+                    provider_id,
+                    &upstream_model,
+                )
+                .body(Body::from(out_body))
+                .unwrap_or_else(|_| http_status.into_response())
+            }
+        }
+    }
+}
+
+fn attach_channel_headers(
+    builder: axum::http::response::Builder,
+    channel: &Channel,
+) -> axum::http::response::Builder {
+    attach_failure_headers(
+        builder,
+        channel.id,
+        channel.provider_id,
+        &channel.upstream_model,
+    )
+}
+
+fn attach_failure_headers(
+    mut builder: axum::http::response::Builder,
+    channel_id: i64,
+    provider_id: i64,
+    upstream_model: &str,
+) -> axum::http::response::Builder {
+    if channel_id > 0 {
+        builder = builder
+            .header("x-xlite-channel-id", channel_id.to_string())
+            .header("x-xlite-provider-id", provider_id.to_string());
+    }
+    if !upstream_model.is_empty()
+        && let Ok(val) = axum::http::HeaderValue::from_str(upstream_model)
+    {
+        builder = builder.header("x-xlite-upstream-model", val);
+    }
+    builder
+}
+
 async fn try_channel(
     state: &AppState,
     channel: &Channel,
     model: &str,
     original: &Bytes,
     plan: &mut Option<RewritePlan>,
-) -> Result<Response, String> {
-    let body = outbound_body(model, &channel.upstream_model, original, plan)?;
+) -> Result<Response, ChannelFailure> {
+    let body = outbound_body(model, &channel.upstream_model, original, plan).map_err(|e| {
+        ChannelFailure::Transport {
+            message: e,
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        }
+    })?;
     let upstream = state
         .upstream
         .post_stream(
@@ -356,10 +1076,15 @@ async fn try_channel(
         .await
         .map_err(|e| {
             channel.mark_cooldown(COOLDOWN_TRANSIENT);
-            err_chain(&e)
+            ChannelFailure::Transport {
+                message: err_chain(&e),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            }
         })?;
     if should_failover(upstream.status, false) {
-        // Read the status before draining: `drain_error_body` consumes `upstream`.
+        // Read the status before draining: `read_error_body` consumes `upstream`.
         let status = upstream.status;
         let cooldown = if matches!(status, 401..=404) {
             COOLDOWN_QUOTA_OR_AUTH
@@ -367,12 +1092,20 @@ async fn try_channel(
             COOLDOWN_TRANSIENT
         };
         channel.mark_cooldown(cooldown);
-        let _ = drain_error_body(upstream, state.config.upstream_stall_timeout).await;
-        return Err(format!("upstream {} returned {}", channel.base_url, status));
+        let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+        return Err(ChannelFailure::UpstreamStatus {
+            status,
+            body: err_bytes,
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+            base_url: channel.base_url.clone(),
+        });
     }
     channel.clear_cooldown();
-    Ok(forward_response(
+    Ok(forward_response_with_channel(
         upstream,
+        channel,
         state.config.upstream_stall_timeout,
         state.config.sse_keepalive_interval,
     ))
@@ -385,13 +1118,26 @@ fn is_event_stream(content_type: &str) -> bool {
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
-fn forward_response(
+fn forward_response_with_channel(
+    upstream: UpstreamResponse,
+    channel: &Channel,
+    stall_timeout: Duration,
+    sse_keepalive_interval: Duration,
+) -> Response {
+    let builder = attach_channel_headers(
+        Response::builder()
+            .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY)),
+        channel,
+    );
+    finish_forward_response(builder, upstream, stall_timeout, sse_keepalive_interval)
+}
+
+fn finish_forward_response(
+    mut builder: axum::http::response::Builder,
     upstream: UpstreamResponse,
     stall_timeout: Duration,
     sse_keepalive_interval: Duration,
 ) -> Response {
-    let mut builder = Response::builder()
-        .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY));
     let content_type = upstream
         .content_type
         .unwrap_or_else(|| "application/json".into());
@@ -514,38 +1260,57 @@ where
     }
 }
 
-/// Read (and discard) an error body before failing over, capped in both size and
+/// Read an upstream error body before failing over, capped in both size and
 /// per-chunk silence so a broken upstream streaming an unbounded or hung error
-/// body cannot stall the failover.
-async fn drain_error_body(upstream: UpstreamResponse, stall_timeout: Duration) {
-    drain_stream(upstream.body, stall_timeout).await;
+/// body cannot stall the failover while still preserving structured JSON errors
+/// if all candidate channels fail.
+async fn read_error_body(upstream: UpstreamResponse, stall_timeout: Duration) -> Bytes {
+    read_error_stream(upstream.body, stall_timeout).await
 }
 
-async fn drain_stream<S>(stream: S, stall_timeout: Duration)
+async fn read_error_stream<S>(stream: S, stall_timeout: Duration) -> Bytes
 where
     S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
 {
     const MAX_DRAIN: usize = 64 * 1024;
     let mut body = StallGuard::new(stream, stall_timeout);
-    let mut seen = 0usize;
+    let mut out = Vec::new();
     while let Some(chunk) = body.next().await {
         match chunk {
             Ok(bytes) => {
-                seen += bytes.len();
-                if seen >= MAX_DRAIN {
+                let take = bytes.len().min(MAX_DRAIN.saturating_sub(out.len()));
+                out.extend_from_slice(&bytes[..take]);
+                if out.len() >= MAX_DRAIN {
                     break;
                 }
             }
             Err(_) => break,
         }
     }
+    Bytes::from(out)
+}
+
+#[cfg(test)]
+async fn drain_stream<S>(stream: S, stall_timeout: Duration)
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    let _ = read_error_stream(stream, stall_timeout).await;
 }
 
 fn bearer_key(headers: &HeaderMap) -> Option<&str> {
-    headers
+    if let Some(bearer) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(bearer);
+    }
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|v| !v.is_empty())
 }
@@ -555,6 +1320,28 @@ fn unauthorized() -> Response {
         StatusCode::UNAUTHORIZED,
         Json(json!({
             "error": { "message": "invalid api key", "type": "invalid_request_error" }
+        })),
+    )
+        .into_response()
+}
+
+fn anthropic_unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "type": "error",
+            "error": { "type": "authentication_error", "message": "invalid api key" }
+        })),
+    )
+        .into_response()
+}
+
+fn anthropic_bad_request(message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "type": "error",
+            "error": { "type": "invalid_request_error", "message": message }
         })),
     )
         .into_response()
@@ -968,5 +1755,286 @@ api_keys:
             3,
             "healthy backup channel must serve all 3 requests"
         );
+    }
+
+    #[tokio::test]
+    async fn all_channels_failing_with_402_preserves_402_status_and_json_body() {
+        use crate::catalog::{Catalog, yaml};
+        use crate::config::Config;
+        use crate::store::Store;
+        use crate::upstream::Upstream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    if s.read(&mut buf).await.unwrap_or(0) > 0 {
+                        let body = r#"{"error":{"code":"api_error","message":"insufficient balance","type":"api_error"}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = s.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: false,
+            admin_password: "admin".into(),
+            session_secret: None,
+            max_conns_per_host: 4,
+            upstream_stream_cap: 250,
+            catalog_reload_secs: 0,
+            upstream_stall_timeout: Duration::from_secs(5),
+            upstream_header_timeout: Duration::from_secs(5),
+            sse_keepalive_interval: Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
+        };
+        let catalog = Catalog::connect(&cfg).await.unwrap();
+        let yaml_doc = format!(
+            r#"providers:
+  - name: p402
+    base_url: http://{addr}
+    api_key: sk-1
+    enabled: true
+models:
+  - name: gpt-5.4
+    enabled: true
+    channels:
+      - provider: p402
+        upstream_model: gpt-5.4-up
+        weight: 1
+        priority: 0
+        enabled: true
+api_keys:
+  - name: client
+    key: sk-client
+    models: []
+    enabled: true
+"#
+        );
+        yaml::import_yaml(&catalog, &yaml_doc, yaml::ImportMode::Replace)
+            .await
+            .unwrap();
+        let store = Store::new(catalog);
+        store.reload().await.unwrap();
+        let state = AppState {
+            store,
+            sessions: crate::auth::Sessions::new("secret", None),
+            admin_password: "admin".into(),
+            upstream: Upstream::new(&cfg),
+            config: cfg,
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer sk-client"),
+        );
+
+        let resp = chat_completions(
+            State(state),
+            headers,
+            Bytes::from_static(br#"{"model":"gpt-5.4","messages":[]}"#),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            resp.headers()
+                .get("x-xlite-upstream-model")
+                .and_then(|v| v.to_str().ok()),
+            Some("gpt-5.4-up")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["error"]["message"], "insufficient balance");
+    }
+
+    #[tokio::test]
+    async fn multi_protocol_messages_responses_and_embeddings_work_end_to_end() {
+        use crate::catalog::{Catalog, yaml};
+        use crate::config::Config;
+        use crate::store::Store;
+        use crate::upstream::Upstream;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        let req_str = String::from_utf8_lossy(&buf[..n]);
+                        let first_line = req_str.lines().next().unwrap_or("");
+                        if first_line.contains("POST /v1/responses ") {
+                            // Return 404 on /v1/responses to trigger automatic fallback to /v1/chat/completions
+                            let body = r#"{"error":"not found"}"#;
+                            let resp = format!(
+                                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = s.write_all(resp.as_bytes()).await;
+                        } else if first_line.contains("POST /v1/embeddings ") {
+                            let body = r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"model":"emb-up","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = s.write_all(resp.as_bytes()).await;
+                        } else if req_str.contains("\"stream\":true") {
+                            let sse = "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think...\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HELLO\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n";
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{sse}",
+                                sse.len()
+                            );
+                            let _ = s.write_all(resp.as_bytes()).await;
+                        } else {
+                            let body = r#"{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"PONG"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}"#;
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = s.write_all(resp.as_bytes()).await;
+                        }
+                        let _ = s.flush().await;
+                    }
+                });
+            }
+        });
+
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: false,
+            admin_password: "admin".into(),
+            session_secret: None,
+            max_conns_per_host: 4,
+            upstream_stream_cap: 250,
+            catalog_reload_secs: 0,
+            upstream_stall_timeout: Duration::from_secs(5),
+            upstream_header_timeout: Duration::from_secs(5),
+            sse_keepalive_interval: Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
+        };
+        let catalog = Catalog::connect(&cfg).await.unwrap();
+        let yaml_doc = format!(
+            r#"providers:
+  - name: mock-up
+    base_url: http://{addr}
+    api_key: sk-up
+    enabled: true
+models:
+  - name: claude-sonnet-4-6
+    enabled: true
+    channels:
+      - provider: mock-up
+        upstream_model: claude-sonnet-4-6-up
+        weight: 1
+        priority: 0
+        enabled: true
+api_keys:
+  - name: client
+    key: sk-client
+    models: []
+    enabled: true
+"#
+        );
+        yaml::import_yaml(&catalog, &yaml_doc, yaml::ImportMode::Replace)
+            .await
+            .unwrap();
+        let store = Store::new(catalog);
+        store.reload().await.unwrap();
+        let state = AppState {
+            store,
+            sessions: crate::auth::Sessions::new("secret", None),
+            admin_password: "admin".into(),
+            upstream: Upstream::new(&cfg),
+            config: cfg,
+        };
+
+        // 1. Anthropic /v1/messages with x-api-key header (non-streaming)
+        let mut anthropic_headers = HeaderMap::new();
+        anthropic_headers.insert(
+            "x-api-key",
+            axum::http::HeaderValue::from_static("sk-client"),
+        );
+        let resp = anthropic_messages(
+            State(state.clone()),
+            anthropic_headers.clone(),
+            Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-6","max_tokens":64,"messages":[{"role":"user","content":"ping"}]}"#,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let b = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["content"][0]["text"], "PONG");
+        assert_eq!(v["usage"]["input_tokens"], 4);
+
+        // 2. Anthropic /v1/messages (streaming SSE)
+        let resp_stream = anthropic_messages(
+            State(state.clone()),
+            anthropic_headers.clone(),
+            Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-6","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"ping"}]}"#,
+            ),
+        )
+        .await;
+        assert_eq!(resp_stream.status(), StatusCode::OK);
+        let sse_bytes = axum::body::to_bytes(resp_stream.into_body(), 65536)
+            .await
+            .unwrap();
+        let sse_text = String::from_utf8_lossy(&sse_bytes);
+        assert!(sse_text.contains("event: message_start"), "{sse_text}");
+        assert!(sse_text.contains("\"thinking_delta\""), "{sse_text}");
+        assert!(sse_text.contains("\"text_delta\""), "{sse_text}");
+        assert!(sse_text.contains("event: message_stop"), "{sse_text}");
+
+        // 3. OpenAI /v1/responses with automatic fallback to /v1/chat/completions on 404
+        let resp_responses = responses(
+            State(state.clone()),
+            anthropic_headers.clone(),
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-6","input":"ping"}"#),
+        )
+        .await;
+        assert_eq!(resp_responses.status(), StatusCode::OK);
+        let rb = axum::body::to_bytes(resp_responses.into_body(), 65536)
+            .await
+            .unwrap();
+        let rv: Value = serde_json::from_slice(&rb).unwrap();
+        assert_eq!(rv["object"], "response");
+        assert_eq!(rv["output_text"], "PONG");
+
+        // 4. OpenAI /v1/embeddings
+        let resp_emb = embeddings(
+            State(state),
+            anthropic_headers,
+            Bytes::from_static(br#"{"model":"claude-sonnet-4-6","input":"hello"}"#),
+        )
+        .await;
+        assert_eq!(resp_emb.status(), StatusCode::OK);
+        let eb = axum::body::to_bytes(resp_emb.into_body(), 65536)
+            .await
+            .unwrap();
+        let ev: Value = serde_json::from_slice(&eb).unwrap();
+        assert_eq!(ev["object"], "list");
     }
 }

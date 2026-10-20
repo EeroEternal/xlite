@@ -6,13 +6,13 @@ resolver = "2"
 name = "xlite"
 version = "0.6.4"
 edition = "2024"
-description = "Thin OpenAI-compatible AI gateway. Simple channel routing, streaming passthrough."
+description = "Headless multi-protocol AI traffic gateway. High-concurrency HTTP/2 pooling, channel routing, and protocol translation."
 
 [dependencies]
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.8", features = ["json", "macros"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 h2 = { version = "0.4", features = ["stream"] }
 bytes = "1"
 arc-swap = "1"

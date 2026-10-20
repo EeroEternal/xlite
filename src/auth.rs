@@ -86,6 +86,27 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+pub fn constant_time_str_eq(a: &str, b: &str) -> bool {
+    constant_time_eq(a.as_bytes(), b.as_bytes())
+}
+
+pub fn bearer_or_header_token(headers: &HeaderMap) -> Option<&str> {
+    if let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(bearer);
+    }
+    headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
 pub fn cookie_value(headers: &HeaderMap) -> Option<String> {
     let cookie = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     cookie.split(';').find_map(|part| {

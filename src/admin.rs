@@ -67,6 +67,11 @@ fn err(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
 }
 
 fn require_session(state: &AppState, headers: &HeaderMap) -> Option<(StatusCode, Json<Value>)> {
+    if let Some(token) = auth::bearer_or_header_token(headers)
+        && (auth::constant_time_str_eq(token, &state.admin_password) || state.sessions.valid(token))
+    {
+        return None;
+    }
     let Some(token) = auth::cookie_value(headers) else {
         return Some(err(StatusCode::UNAUTHORIZED, "Unauthorized"));
     };
