@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
 - **Headless traffic gateway architecture (`Dockerfile`, `src/main.rs`, `src/admin.rs`, `src/auth.rs`)**: Removed the embedded React frontend (`admin/`) and Node.js Docker build stage so `xlite` operates as a pure, headless Rust data-plane traffic gateway; added stateless `Authorization: Bearer <ADMIN_PASSWORD>` and `x-admin-token: <ADMIN_PASSWORD>` authentication to all `/api/*` control-plane endpoints alongside session cookies so external control planes (such as ParaRouter) can provision providers, models, channels, API keys, and YAML catalogs programmatically.
 - **Multi-protocol translation engine ported from `unigateway` (`src/protocol.rs`, `src/proxy.rs`, `src/main.rs`)**: Added `POST /v1/messages` (Anthropic Messages API request/response/SSE stream translation with `x-api-key` and `Authorization: Bearer` support), `POST /v1/responses` (OpenAI Responses API with automatic fallback to `/v1/chat/completions` on `404`/`405`), and `POST /v1/embeddings` (OpenAI Embeddings API with zero-DOM `"model"` byte splicing and failover).
 - **Upstream error status & JSON payload preservation (`src/proxy.rs`)**: Replaced `drain_error_body` with bounded `read_error_body` (`64 KiB` cap) so that when all candidate channels fail, `xlite` preserves the upstream HTTP status (`400..=499`, `500`, `503` preserved; `502`/`504` mapped to `503 Service Unavailable` to prevent Cloudflare Orange Cloud HTML/text error replacement) and returns the upstream JSON error payload together with `x-xlite-channel-id`, `x-xlite-provider-id`, and `x-xlite-upstream-model` response headers.
