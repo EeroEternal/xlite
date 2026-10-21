@@ -397,6 +397,11 @@ pub fn build_openai_chat_body_from_anthropic(
     for (k, v) in &request.extra {
         payload.entry(k.clone()).or_insert_with(|| v.clone());
     }
+    if request.stream {
+        payload
+            .entry("stream_options".to_string())
+            .or_insert_with(|| json!({ "include_usage": true }));
+    }
 
     serde_json::to_vec(&Value::Object(payload))
         .map(Bytes::from)
@@ -1199,6 +1204,12 @@ pub fn build_openai_chat_body_from_responses(
         chat.insert(
             "reasoning_effort".to_string(),
             Value::String(effort.to_string()),
+        );
+    }
+    if request.stream {
+        chat.insert(
+            "stream_options".to_string(),
+            json!({ "include_usage": true }),
         );
     }
 

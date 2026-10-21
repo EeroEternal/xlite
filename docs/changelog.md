@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Automatic `stream_options.include_usage` injection & developer documentation (`src/proxy.rs`, `src/protocol.rs`, `README.md`, `docs/`)**: Automatically inject `"stream_options": {"include_usage": true}` on streaming `/v1/chat/completions` (via zero-DOM flat buffer splicing when `XLITE_USAGE_WEBHOOK_URL` is configured) and translated streaming `/v1/messages` / `/v1/responses` requests so upstream providers emit final SSE token usage chunks even when clients omit `stream_options`; updated `README.md`, architecture docs, operator manual, and `deploy/env.example` with the complete `v0.7.x` headless gateway & usage webhook contract.
+
 ## [0.7.1] - 2026-10-21
 
 - **Asynchronous usage & billing webhook reporting (`src/proxy.rs`, `src/upstream.rs`, `src/store.rs`, `src/catalog/`)**: Added non-blocking `XLITE_USAGE_WEBHOOK_URL` (and optional `XLITE_USAGE_WEBHOOK_TOKEN`) usage reporting across `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, and `/v1/embeddings` (both non-streaming JSON and streaming SSE), carrying `api_key_name`, `provider_name`, `model`, `upstream_model`, `input_tokens`, `output_tokens`, `cache_hit_tokens`, `tokens`, `latency`, and `status` over `H1Pool` keep-alive connections.

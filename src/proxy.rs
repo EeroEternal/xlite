@@ -35,12 +35,30 @@ use crate::upstream::{
 /// intermediate NATs, reverse proxies, and client read timers alive.
 const SSE_KEEPALIVE_FRAME: &[u8] = b": keep-alive\n\n";
 
-/// Borrowed view of the only field the gateway needs from the request body.
+/// Borrowed view of the only fields the gateway needs from the request body.
 /// Deserializing this scans (and validates) the whole JSON without building a
 /// `Value` DOM — no allocation proportional to the messages array.
 #[derive(Deserialize)]
 struct ModelRef<'a> {
     model: Option<&'a str>,
+    #[serde(default)]
+    stream: Option<bool>,
+    #[serde(default)]
+    stream_options: Option<serde::de::IgnoredAny>,
+}
+
+/// Append `"stream_options":{"include_usage":true}` before the closing `}` of a
+/// validated non-empty JSON object without allocating a `serde_json::Value` DOM.
+fn ensure_stream_include_usage(body: &Bytes) -> Bytes {
+    if let Some(close) = body.iter().rposition(|&b| b == b'}') {
+        const SUFFIX: &[u8] = b",\"stream_options\":{\"include_usage\":true}}";
+        let mut out = Vec::with_capacity(close + SUFFIX.len());
+        out.extend_from_slice(&body[..close]);
+        out.extend_from_slice(SUFFIX);
+        Bytes::from(out)
+    } else {
+        body.clone()
+    }
 }
 
 /// Cached per-request strategy for rewriting `"model"` when a channel maps the
@@ -305,6 +323,14 @@ pub async fn chat_completions(
     };
 
     let started_at = std::time::Instant::now();
+    let effective_body = if usage_webhook_target().is_some()
+        && model_ref.stream == Some(true)
+        && model_ref.stream_options.is_none()
+    {
+        ensure_stream_include_usage(&body)
+    } else {
+        body.clone()
+    };
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -313,7 +339,17 @@ pub async fn chat_completions(
     };
     let mut plan: Option<RewritePlan> = None;
     for channel in channels {
-        match try_channel(&state, &key, &channel, model, &body, &mut plan, started_at).await {
+        match try_channel(
+            &state,
+            &key,
+            &channel,
+            model,
+            &effective_body,
+            &mut plan,
+            started_at,
+        )
+        .await
+        {
             Ok(response) => return response,
             Err(failure) => last_failure = failure,
         }
@@ -2409,5 +2445,10 @@ api_keys:
                 total_tokens: 20,
             }
         );
+
+        let raw = Bytes::from_static(br#"{"model":"glm-5","stream":true,"messages":[]} "#);
+        let patched = ensure_stream_include_usage(&raw);
+        let parsed: Value = serde_json::from_slice(&patched).expect("valid patched json");
+        assert_eq!(parsed["stream_options"]["include_usage"], true);
     }
 }
