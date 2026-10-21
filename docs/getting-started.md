@@ -18,17 +18,18 @@ docker run -d --name xlite -p 8080:8080 \
 ADMIN_PASSWORD=admin ./xlite
 ```
 
-Default listen is `0.0.0.0:8080` (serving both `/v1/*` and the embedded Web Console). Catalog defaults to `sqlite:xlite.db`.
+Default listen is `0.0.0.0:8080` (serving `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, and `/api/*`). Catalog defaults to `sqlite:xlite.db`.
 
 | Need | Set |
 | --- | --- |
-| Load-test catalog | `DATABASE_URL=memory` |
+| Load-test / stateless catalog | `DATABASE_URL=memory://` |
 | Shared cluster catalog | `REDIS_URL=redis://127.0.0.1:6379` |
 | Plaintext HTTP/2 (`h2c`) upstreams | `XLITE_UPSTREAM_H2C=1` |
+| Async usage & billing webhook | `XLITE_USAGE_WEBHOOK_URL=http://hub:3000/api/gateway/usage` |
 
 ## Load a routing catalog
 
-Open the Web Console at `http://127.0.0.1:8080` (`Settings → Import YAML`) or import [`examples/catalog.yaml`](../examples/catalog.yaml) via the CLI:
+Import [`examples/catalog.yaml`](../examples/catalog.yaml) via the CLI or push it over HTTP (`POST /api/catalog/import` with `Authorization: Bearer <ADMIN_PASSWORD>`):
 
 ```bash
 xlite import examples/catalog.yaml --replace
@@ -42,8 +43,6 @@ curl -H "Authorization: Bearer sk-..." \
   -d '{"model":"mock","stream":true,"messages":[{"role":"user","content":"hi"}]}' \
   http://127.0.0.1:8080/v1/chat/completions
 ```
-
-Admin → Settings can import or export the same YAML.
 
 ## Docker Compose (`xlite` + Redis)
 

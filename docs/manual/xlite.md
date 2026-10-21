@@ -11,8 +11,10 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `DATABASE_URL` | `sqlite:xlite.db` | SQLite file, or `memory` |
 | `REDIS_URL` | unset | If set, catalog is Redis (`xlite:catalog`) |
 | `PORT` / `LISTEN_HOST` | `8080` / `0.0.0.0` | Listen address |
-| `ADMIN_PASSWORD` | `admin` | Console login |
+| `ADMIN_PASSWORD` | `admin` | Control-plane token (`Authorization: Bearer <ADMIN_PASSWORD>` / `x-admin-token`) and login password |
 | `ADMIN_SESSION_SECRET` | unset | Overrides the key used to sign Admin session cookies; set the same on every node |
+| `XLITE_USAGE_WEBHOOK_URL` | unset | Optional HTTP(S) webhook URL receiving async post-request JSON usage & billing payloads (`model`, `upstream_model`, `api_key_name`, `provider_name`, `input_tokens`, `output_tokens`, `cache_hit_tokens`, `tokens`, `latency`, `status`) |
+| `XLITE_USAGE_WEBHOOK_TOKEN` | unset | Optional Bearer token sent in `Authorization: Bearer <token>` when calling `XLITE_USAGE_WEBHOOK_URL` |
 | `XLITE_UPSTREAM_H2C` | off | Plaintext HTTP/2 (`h2c`) to `http://` upstreams via `xlite-h2-pool` |
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and minimum idle pool size for the native HTTP/1.1 pool (`H1Pool`) |
 | `XLITE_UPSTREAM_STREAM_CAP` | peer's `SETTINGS` | Client-side cap on concurrent streams per upstream HTTP/2 connection |
