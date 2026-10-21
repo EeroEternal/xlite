@@ -304,6 +304,7 @@ pub async fn chat_completions(
             .into_response();
     };
 
+    let started_at = std::time::Instant::now();
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -312,7 +313,7 @@ pub async fn chat_completions(
     };
     let mut plan: Option<RewritePlan> = None;
     for channel in channels {
-        match try_channel(&state, &channel, model, &body, &mut plan).await {
+        match try_channel(&state, &key, &channel, model, &body, &mut plan, started_at).await {
             Ok(response) => return response,
             Err(failure) => last_failure = failure,
         }
@@ -355,6 +356,7 @@ pub async fn anthropic_messages(
             .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
     };
 
+    let started_at = std::time::Instant::now();
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -423,10 +425,19 @@ pub async fn anthropic_messages(
             .into_anthropic_response();
         }
         channel.clear_cooldown();
+        let usage_ctx = UsageReportContext::from_state(
+            &state,
+            &key,
+            &channel,
+            &request.model,
+            started_at,
+            upstream.status,
+        );
         if request.stream {
             let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+            let observed = UsageStream::new(guarded, true, usage_ctx);
             let anthropic_sse =
-                translate_openai_sse_to_anthropic_stream(guarded, request.model.clone());
+                translate_openai_sse_to_anthropic_stream(observed, request.model.clone());
             let with_ka = StallGuard::with_keepalive(
                 anthropic_sse,
                 Duration::ZERO,
@@ -458,6 +469,9 @@ pub async fn anthropic_messages(
         };
         match translate_openai_chat_to_anthropic_json(&raw_bytes, &request.model) {
             Ok(json_val) => {
+                if let Some(ctx) = usage_ctx {
+                    ctx.emit_from_json_bytes(&raw_bytes);
+                }
                 return attach_channel_headers(
                     Response::builder()
                         .status(StatusCode::OK)
@@ -529,6 +543,7 @@ pub async fn responses(
             .into_response();
     };
 
+    let started_at = std::time::Instant::now();
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -576,7 +591,7 @@ pub async fn responses(
 
         if matches!(upstream.status, 404 | 405) {
             let _ = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-            match try_responses_via_chat(&state, &channel, &request).await {
+            match try_responses_via_chat(&state, &key, &channel, &request, started_at).await {
                 Ok(resp) => return resp,
                 Err(failure) => {
                     last_failure = failure;
@@ -605,11 +620,20 @@ pub async fn responses(
             continue;
         }
         channel.clear_cooldown();
+        let usage_ctx = UsageReportContext::from_state(
+            &state,
+            &key,
+            &channel,
+            &request.model,
+            started_at,
+            upstream.status,
+        );
         return forward_response_with_channel(
             upstream,
             &channel,
             state.config.upstream_stall_timeout,
             state.config.sse_keepalive_interval,
+            usage_ctx,
         );
     }
     last_failure.into_openai_response()
@@ -617,8 +641,10 @@ pub async fn responses(
 
 async fn try_responses_via_chat(
     state: &AppState,
+    key: &crate::store::KeyRecord,
     channel: &Channel,
     request: &ParsedResponsesRequest,
+    started_at: std::time::Instant,
 ) -> Result<Response, ChannelFailure> {
     let chat_body = build_openai_chat_body_from_responses(channel, request).map_err(|e| {
         ChannelFailure::Transport {
@@ -680,9 +706,18 @@ async fn try_responses_via_chat(
         .into_openai_response());
     }
     channel.clear_cooldown();
+    let usage_ctx = UsageReportContext::from_state(
+        state,
+        key,
+        channel,
+        &request.model,
+        started_at,
+        upstream.status,
+    );
     if request.stream {
         let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
-        let resp_sse = translate_openai_sse_to_responses_stream(guarded, request.model.clone());
+        let observed = UsageStream::new(guarded, true, usage_ctx);
+        let resp_sse = translate_openai_sse_to_responses_stream(observed, request.model.clone());
         let with_ka = StallGuard::with_keepalive(
             resp_sse,
             Duration::ZERO,
@@ -717,6 +752,9 @@ async fn try_responses_via_chat(
                 upstream_model: channel.upstream_model.clone(),
             }
         })?;
+    if let Some(ctx) = usage_ctx {
+        ctx.emit_from_json_bytes(&raw_bytes);
+    }
     Ok(attach_channel_headers(
         Response::builder()
             .status(StatusCode::OK)
@@ -781,6 +819,7 @@ pub async fn embeddings(
             .into_response();
     };
 
+    let started_at = std::time::Instant::now();
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -846,11 +885,20 @@ pub async fn embeddings(
             continue;
         }
         channel.clear_cooldown();
+        let usage_ctx = UsageReportContext::from_state(
+            &state,
+            &key,
+            &channel,
+            model,
+            started_at,
+            upstream.status,
+        );
         return forward_response_with_channel(
             upstream,
             &channel,
             state.config.upstream_stall_timeout,
             state.config.sse_keepalive_interval,
+            usage_ctx,
         );
     }
     last_failure.into_openai_response()
@@ -1050,10 +1098,12 @@ fn attach_failure_headers(
 
 async fn try_channel(
     state: &AppState,
+    key: &crate::store::KeyRecord,
     channel: &Channel,
     model: &str,
     original: &Bytes,
     plan: &mut Option<RewritePlan>,
+    started_at: std::time::Instant,
 ) -> Result<Response, ChannelFailure> {
     let body = outbound_body(model, &channel.upstream_model, original, plan).map_err(|e| {
         ChannelFailure::Transport {
@@ -1103,11 +1153,14 @@ async fn try_channel(
         });
     }
     channel.clear_cooldown();
+    let usage_ctx =
+        UsageReportContext::from_state(state, key, channel, model, started_at, upstream.status);
     Ok(forward_response_with_channel(
         upstream,
         channel,
         state.config.upstream_stall_timeout,
         state.config.sse_keepalive_interval,
+        usage_ctx,
     ))
 }
 
@@ -1123,13 +1176,20 @@ fn forward_response_with_channel(
     channel: &Channel,
     stall_timeout: Duration,
     sse_keepalive_interval: Duration,
+    usage_ctx: Option<UsageReportContext>,
 ) -> Response {
     let builder = attach_channel_headers(
         Response::builder()
             .status(StatusCode::from_u16(upstream.status).unwrap_or(StatusCode::BAD_GATEWAY)),
         channel,
     );
-    finish_forward_response(builder, upstream, stall_timeout, sse_keepalive_interval)
+    finish_forward_response(
+        builder,
+        upstream,
+        stall_timeout,
+        sse_keepalive_interval,
+        usage_ctx,
+    )
 }
 
 fn finish_forward_response(
@@ -1137,6 +1197,7 @@ fn finish_forward_response(
     upstream: UpstreamResponse,
     stall_timeout: Duration,
     sse_keepalive_interval: Duration,
+    usage_ctx: Option<UsageReportContext>,
 ) -> Response {
     let content_type = upstream
         .content_type
@@ -1156,7 +1217,8 @@ fn finish_forward_response(
     } else {
         Duration::ZERO
     };
-    let body = StallGuard::with_keepalive(upstream.body, stall_timeout, keepalive);
+    let observed = UsageStream::new(upstream.body, sse, usage_ctx);
+    let body = StallGuard::with_keepalive(observed, stall_timeout, keepalive);
     builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1164,6 +1226,286 @@ fn finish_forward_response(
         )
             .into_response()
     })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UsageStats {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_hit_tokens: u64,
+    total_tokens: u64,
+}
+
+impl UsageStats {
+    fn merge_usage_obj(&mut self, usage: &Value) {
+        if let Some(inp) = usage
+            .get("prompt_tokens")
+            .or_else(|| usage.get("input_tokens"))
+            .and_then(Value::as_u64)
+            && inp > 0
+        {
+            self.input_tokens = inp;
+        }
+        if let Some(out) = usage
+            .get("completion_tokens")
+            .or_else(|| usage.get("output_tokens"))
+            .and_then(Value::as_u64)
+            && out > 0
+        {
+            self.output_tokens = out;
+        }
+        let cached = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .or_else(|| {
+                usage
+                    .get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+            })
+            .or_else(|| usage.get("cache_read_input_tokens"))
+            .or_else(|| usage.get("prompt_cache_hit_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if cached > 0 {
+            self.cache_hit_tokens = cached;
+        }
+        if let Some(tot) = usage.get("total_tokens").and_then(Value::as_u64)
+            && tot > 0
+        {
+            self.total_tokens = tot;
+        } else if self.input_tokens > 0 || self.output_tokens > 0 {
+            self.total_tokens = self.input_tokens + self.output_tokens;
+        }
+    }
+
+    fn inspect_json_value(&mut self, val: &Value) {
+        if let Some(u) = val.get("usage") {
+            self.merge_usage_obj(u);
+        }
+        if let Some(u) = val.get("response").and_then(|r| r.get("usage")) {
+            self.merge_usage_obj(u);
+        }
+        if let Some(u) = val.get("message").and_then(|m| m.get("usage")) {
+            self.merge_usage_obj(u);
+        }
+    }
+
+    fn inspect_json_bytes(&mut self, raw: &[u8]) {
+        if raw.windows(7).any(|w| w == b"\"usage\"")
+            && let Ok(val) = serde_json::from_slice::<Value>(raw)
+        {
+            self.inspect_json_value(&val);
+        }
+    }
+
+    fn inspect_sse_line(&mut self, line: &[u8]) {
+        let Ok(text) = std::str::from_utf8(line) else {
+            return;
+        };
+        let trimmed = text.trim();
+        let data = trimmed
+            .strip_prefix("data:")
+            .map(str::trim)
+            .unwrap_or(trimmed);
+        if data.starts_with('{')
+            && data.contains("\"usage\"")
+            && let Ok(val) = serde_json::from_str::<Value>(data)
+        {
+            self.inspect_json_value(&val);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WebhookTarget {
+    url: String,
+    auth: Option<(http::HeaderName, http::HeaderValue)>,
+}
+
+fn usage_webhook_target() -> Option<&'static WebhookTarget> {
+    static TARGET: std::sync::OnceLock<Option<WebhookTarget>> = std::sync::OnceLock::new();
+    TARGET
+        .get_or_init(|| {
+            let url = std::env::var("XLITE_USAGE_WEBHOOK_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())?;
+            let token = std::env::var("XLITE_USAGE_WEBHOOK_TOKEN")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
+            let auth = crate::upstream::build_auth("bearer", "authorization", &token)
+                .ok()
+                .flatten();
+            Some(WebhookTarget { url, auth })
+        })
+        .as_ref()
+}
+
+#[derive(Clone)]
+struct UsageReportContext {
+    upstream: crate::upstream::Upstream,
+    target: WebhookTarget,
+    model: String,
+    upstream_model: String,
+    api_key_name: String,
+    provider_name: String,
+    started_at: std::time::Instant,
+    status: u16,
+}
+
+impl UsageReportContext {
+    fn from_state(
+        state: &AppState,
+        key: &crate::store::KeyRecord,
+        channel: &Channel,
+        model: &str,
+        started_at: std::time::Instant,
+        status: u16,
+    ) -> Option<Self> {
+        let target = usage_webhook_target()?.clone();
+        if !(200..300).contains(&status) {
+            return None;
+        }
+        let provider_name = state
+            .store
+            .provider_name(channel.provider_id)
+            .unwrap_or_default();
+        Some(Self {
+            upstream: state.upstream.clone(),
+            target,
+            model: model.to_string(),
+            upstream_model: channel.upstream_model.clone(),
+            api_key_name: key.name.clone(),
+            provider_name,
+            started_at,
+            status,
+        })
+    }
+
+    fn emit(self, stats: UsageStats) {
+        let latency_ms = self.started_at.elapsed().as_millis() as u64;
+        let payload = json!({
+            "model": self.model,
+            "upstream_model": self.upstream_model,
+            "api_key_name": self.api_key_name,
+            "provider_name": self.provider_name,
+            "input_tokens": stats.input_tokens,
+            "output_tokens": stats.output_tokens,
+            "cache_hit_tokens": stats.cache_hit_tokens,
+            "tokens": stats.total_tokens,
+            "latency": latency_ms,
+            "status": self.status,
+        });
+        let Ok(body) = serde_json::to_vec(&payload).map(Bytes::from) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _ = self
+                .upstream
+                .post_json_h1(&self.target.url, self.target.auth.as_ref(), body)
+                .await;
+        });
+    }
+
+    fn emit_from_json_bytes(self, raw_bytes: &[u8]) {
+        let mut stats = UsageStats::default();
+        stats.inspect_json_bytes(raw_bytes);
+        self.emit(stats);
+    }
+}
+
+struct UsageStream<S> {
+    inner: S,
+    ctx: Option<UsageReportContext>,
+    is_sse: bool,
+    buf: Vec<u8>,
+    stats: UsageStats,
+}
+
+impl<S> UsageStream<S> {
+    fn new(inner: S, is_sse: bool, ctx: Option<UsageReportContext>) -> Self {
+        Self {
+            inner,
+            ctx,
+            is_sse,
+            buf: Vec::new(),
+            stats: UsageStats::default(),
+        }
+    }
+
+    fn feed_chunk(&mut self, chunk: &[u8]) {
+        if self.ctx.is_none() {
+            return;
+        }
+        if self.is_sse {
+            const MAX_SSE_LINE_BUF: usize = 256 * 1024;
+            if self.buf.len() + chunk.len() > MAX_SSE_LINE_BUF {
+                self.buf.clear();
+            }
+            self.buf.extend_from_slice(chunk);
+            while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+                let line = &self.buf[..pos];
+                self.stats.inspect_sse_line(line);
+                self.buf.drain(..=pos);
+            }
+        } else {
+            const MAX_JSON_BUF: usize = 512 * 1024;
+            let remaining = MAX_JSON_BUF.saturating_sub(self.buf.len());
+            if remaining > 0 {
+                let take = chunk.len().min(remaining);
+                self.buf.extend_from_slice(&chunk[..take]);
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        let Some(ctx) = self.ctx.take() else {
+            return;
+        };
+        if self.is_sse {
+            if !self.buf.is_empty() {
+                self.stats.inspect_sse_line(&self.buf);
+                self.buf.clear();
+            }
+        } else if !self.buf.is_empty() {
+            self.stats.inspect_json_bytes(&self.buf);
+            self.buf.clear();
+        }
+        ctx.emit(self.stats);
+    }
+}
+
+impl<S> Drop for UsageStream<S> {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+impl<S> Stream for UsageStream<S>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Stream::poll_next(Pin::new(&mut this.inner), cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.feed_chunk(&bytes);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                this.finish();
+                Poll::Ready(Some(Err(err)))
+            }
+            Poll::Ready(None) => {
+                this.finish();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// End a response body with a `TimedOut` error when the upstream has produced
@@ -2036,5 +2378,36 @@ api_keys:
             .unwrap();
         let ev: Value = serde_json::from_slice(&eb).unwrap();
         assert_eq!(ev["object"], "list");
+    }
+
+    #[test]
+    fn usage_stats_parses_openai_anthropic_and_responses_payloads() {
+        let mut s = UsageStats::default();
+        s.inspect_json_bytes(
+            br#"{"id":"chatcmpl-1","usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20,"prompt_tokens_details":{"cached_tokens":4}}}"#,
+        );
+        assert_eq!(
+            s,
+            UsageStats {
+                input_tokens: 12,
+                output_tokens: 8,
+                cache_hit_tokens: 4,
+                total_tokens: 20,
+            }
+        );
+
+        let mut sse_stats = UsageStats::default();
+        sse_stats.inspect_sse_line(
+            br#"data: {"type":"response.completed","response":{"usage":{"input_tokens":15,"output_tokens":5,"total_tokens":20,"input_tokens_details":{"cached_tokens":3}}}}"#,
+        );
+        assert_eq!(
+            sse_stats,
+            UsageStats {
+                input_tokens: 15,
+                output_tokens: 5,
+                cache_hit_tokens: 3,
+                total_tokens: 20,
+            }
+        );
     }
 }

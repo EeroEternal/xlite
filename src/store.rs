@@ -132,6 +132,7 @@ pub struct ModelRoute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyRecord {
     pub id: i64,
+    pub name: String,
     pub allowed_model_ids: Option<Vec<i64>>,
 }
 
@@ -139,6 +140,7 @@ pub struct KeyRecord {
 pub struct Snapshot {
     pub keys: HashMap<String, Arc<KeyRecord>>,
     pub models: HashMap<String, Arc<ModelRoute>>,
+    pub provider_names: HashMap<i64, String>,
 }
 
 #[derive(Clone)]
@@ -224,6 +226,10 @@ impl Store {
         }
         Some(order_channels(&route.channels))
     }
+
+    pub fn provider_name(&self, provider_id: i64) -> Option<String> {
+        self.inner.load().provider_names.get(&provider_id).cloned()
+    }
 }
 
 fn snapshot_from_routing(routing: RoutingSnapshot) -> Result<Snapshot> {
@@ -233,6 +239,7 @@ fn snapshot_from_routing(routing: RoutingSnapshot) -> Result<Snapshot> {
             k.key_hash,
             Arc::new(KeyRecord {
                 id: k.id,
+                name: k.name,
                 allowed_model_ids: k.allowed_model_ids,
             }),
         );
@@ -255,7 +262,11 @@ fn snapshot_from_routing(routing: RoutingSnapshot) -> Result<Snapshot> {
             }),
         );
     }
-    Ok(Snapshot { keys, models })
+    Ok(Snapshot {
+        keys,
+        models,
+        provider_names: routing.provider_names,
+    })
 }
 
 /// Preserve active cooldown windows across snapshot rebuilds for channels whose

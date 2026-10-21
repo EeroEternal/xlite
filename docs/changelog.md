@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Asynchronous usage & billing webhook reporting (`src/proxy.rs`, `src/upstream.rs`, `src/store.rs`, `src/catalog/`)**: Added non-blocking `XLITE_USAGE_WEBHOOK_URL` (and optional `XLITE_USAGE_WEBHOOK_TOKEN`) usage reporting across `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, and `/v1/embeddings` (both non-streaming JSON and streaming SSE), carrying `api_key_name`, `provider_name`, `model`, `upstream_model`, `input_tokens`, `output_tokens`, `cache_hit_tokens`, `tokens`, `latency`, and `status` over `H1Pool` keep-alive connections.
+
 ## [0.7.0] - 2026-10-20
 
 - **Headless traffic gateway architecture (`Dockerfile`, `src/main.rs`, `src/admin.rs`, `src/auth.rs`)**: Removed the embedded React frontend (`admin/`) and Node.js Docker build stage so `xlite` operates as a pure, headless Rust data-plane traffic gateway; added stateless `Authorization: Bearer <ADMIN_PASSWORD>` and `x-admin-token: <ADMIN_PASSWORD>` authentication to all `/api/*` control-plane endpoints alongside session cookies so external control planes (such as ParaRouter) can provision providers, models, channels, API keys, and YAML catalogs programmatically.

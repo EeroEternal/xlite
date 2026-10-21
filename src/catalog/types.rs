@@ -131,6 +131,7 @@ pub struct RoutingModel {
 #[derive(Clone, Debug)]
 pub struct RoutingKey {
     pub id: i64,
+    pub name: String,
     pub key_hash: String,
     pub allowed_model_ids: Option<Vec<i64>>,
 }
@@ -139,6 +140,7 @@ pub struct RoutingKey {
 pub struct RoutingSnapshot {
     pub keys: Vec<RoutingKey>,
     pub models: Vec<RoutingModel>,
+    pub provider_names: std::collections::HashMap<i64, String>,
 }
 
 #[derive(Clone, Debug)]

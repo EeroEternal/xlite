@@ -891,6 +891,24 @@ impl Upstream {
             },
         })
     }
+
+    /// Fire-and-forget JSON `POST` over the HTTP/1.1 keep-alive pool, draining
+    /// the response body so the underlying socket is recycled into `H1Pool`.
+    pub async fn post_json_h1(
+        &self,
+        endpoint: &str,
+        auth: Option<&(HeaderName, HeaderValue)>,
+        body: Bytes,
+    ) -> Result<u16> {
+        use futures_util::StreamExt;
+        let mut resp = self.post_h1(endpoint, "", "", auth, &[], body).await?;
+        while let Some(chunk) = resp.body.next().await {
+            if chunk.is_err() {
+                break;
+            }
+        }
+        Ok(resp.status)
+    }
 }
 
 struct H1Target {

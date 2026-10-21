@@ -138,6 +138,7 @@ impl RedisCatalog {
             .filter(|k| k.enabled)
             .map(|k| RoutingKey {
                 id: k.id,
+                name: k.name.clone(),
                 key_hash: k.key_hash.clone(),
                 allowed_model_ids: if k.model_ids.is_empty() {
                     None
@@ -148,6 +149,8 @@ impl RedisCatalog {
             .collect();
         let mut by_model: std::collections::HashMap<i64, Vec<RoutingChannel>> =
             std::collections::HashMap::new();
+        let mut provider_names: std::collections::HashMap<i64, String> =
+            std::collections::HashMap::new();
         for ch in dump.channels.iter().filter(|c| c.enabled) {
             let Some(provider) = dump
                 .providers
@@ -156,6 +159,9 @@ impl RedisCatalog {
             else {
                 continue;
             };
+            provider_names
+                .entry(provider.id)
+                .or_insert_with(|| provider.name.clone());
             by_model
                 .entry(ch.model_id)
                 .or_default()
@@ -185,7 +191,11 @@ impl RedisCatalog {
                 })
             })
             .collect();
-        Ok(RoutingSnapshot { keys, models })
+        Ok(RoutingSnapshot {
+            keys,
+            models,
+            provider_names,
+        })
     }
 
     pub async fn list_provider_secrets(&self) -> Result<Vec<ProviderSecret>> {

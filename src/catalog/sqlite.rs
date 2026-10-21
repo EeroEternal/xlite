@@ -153,6 +153,7 @@ impl SqliteCatalog {
             .into_iter()
             .map(|k| RoutingKey {
                 id: k.id,
+                name: k.name,
                 key_hash: k.key_hash,
                 allowed_model_ids: allowed.get(&k.id).cloned(),
             })
@@ -166,7 +167,7 @@ impl SqliteCatalog {
         let channels = sqlx::query(
             r#"
             SELECT c.id, c.model_id, c.provider_id, c.upstream_model, c.weight, c.priority,
-                   p.base_url, p.api_key, p.auth_scheme, p.auth_header, p.extra_headers, p.chat_path
+                   p.name AS provider_name, p.base_url, p.api_key, p.auth_scheme, p.auth_header, p.extra_headers, p.chat_path
             FROM channels c
             JOIN providers p ON p.id = c.provider_id
             WHERE c.enabled = 1 AND p.enabled = 1
@@ -177,12 +178,17 @@ impl SqliteCatalog {
         .await?;
         let mut by_model: std::collections::HashMap<i64, Vec<RoutingChannel>> =
             std::collections::HashMap::new();
+        let mut provider_names: std::collections::HashMap<i64, String> =
+            std::collections::HashMap::new();
         for row in channels {
             let model_id: i64 = row.get("model_id");
+            let provider_id: i64 = row.get("provider_id");
+            let provider_name: String = row.get("provider_name");
+            provider_names.entry(provider_id).or_insert(provider_name);
             let extra_headers: String = row.get("extra_headers");
             by_model.entry(model_id).or_default().push(RoutingChannel {
                 id: row.get("id"),
-                provider_id: row.get("provider_id"),
+                provider_id,
                 base_url: row.get("base_url"),
                 api_key: row.get("api_key"),
                 upstream_model: row.get("upstream_model"),
@@ -209,6 +215,7 @@ impl SqliteCatalog {
         Ok(RoutingSnapshot {
             keys: routing_keys,
             models: routing_models,
+            provider_names,
         })
     }
 
