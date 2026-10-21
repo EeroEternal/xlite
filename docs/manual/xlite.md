@@ -34,8 +34,47 @@ For high-concurrency HTTP/1.1 connection pooling, active/passive `/health` probi
 
 There is no strategy field. For a public model, xlite picks a channel in the lowest `priority` group by `weight`, then fails over before the first byte on 5xx / 429 / 402 / connection errors.
 
-## YAML
+## YAML & Control Plane API (Language-Agnostic)
 
 See `examples/catalog.yaml`. Commands: `xlite import <file.yaml>` (optional `--replace`) and `xlite export [file.yaml]`. Export omits user API key plaintext.
+
+Any external application (Node.js, Python, Go, Java, etc.) can manage `xlite` over standard HTTP using `Authorization: Bearer <ADMIN_PASSWORD>`:
+
+```http
+POST /api/catalog/import HTTP/1.1
+Host: xlite:8080
+Authorization: Bearer <ADMIN_PASSWORD>
+Content-Type: application/json
+
+{
+  "replace": true,
+  "yaml": "version: 1\nproviders:\n  - name: openai:primary\n    base_url: https://api.openai.com/v1\n    api_key: sk-upstream-...\n    enabled: true\nmodels:\n  - name: gpt-5.4\n    enabled: true\n    channels:\n      - provider: openai:primary\n        upstream_model: gpt-5.4\n        weight: 100\n        priority: 0\n        enabled: true\napi_keys:\n  - name: user-key:u_12345\n    key: sk-client-...\n    enabled: true\n    models:\n      - gpt-5.4\n"
+}
+```
+
+## Async Usage & Billing Webhook (`XLITE_USAGE_WEBHOOK_URL`)
+
+When `XLITE_USAGE_WEBHOOK_URL` is set (for example `http://my-app:3000/webhooks/xlite-usage`), `xlite` automatically extracts token usage from both non-streaming JSON and streaming SSE responses across `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, and `/v1/embeddings`, and asynchronously sends an HTTP `POST` request after each completed response:
+
+- **Method**: `POST`
+- **Headers**:
+  - `Content-Type: application/json`
+  - `Authorization: Bearer <XLITE_USAGE_WEBHOOK_TOKEN>` (only sent when `XLITE_USAGE_WEBHOOK_TOKEN` is configured)
+- **JSON Body**:
+
+```json
+{
+  "model": "gpt-5.4",
+  "upstream_model": "gpt-5.4",
+  "api_key_name": "user-key:u_12345",
+  "provider_name": "openai:primary",
+  "input_tokens": 120,
+  "output_tokens": 340,
+  "cache_hit_tokens": 64,
+  "tokens": 460,
+  "latency": 1420,
+  "status": 200
+}
+```
 
 Docker Compose (`xlite` + Redis): [`deploy/README.md`](../../deploy/README.md).
