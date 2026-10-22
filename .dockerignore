@@ -18,7 +18,5 @@ bench
 *.md
 .mise.toml
 .env.example
-
-# Note: Do NOT add `.cargo/` or `vendor/` here. They are optional local offline build
-# directories (see scripts/prepare_offline_vendor.sh) inspected via `RUN --mount=type=bind`
-# inside Dockerfile.
+.cargo
+vendor

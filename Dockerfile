@@ -18,27 +18,18 @@ COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src ./src
 COPY migrations ./migrations
-ARG RUSTUP_MIRROR=https://mirrors.ustc.edu.cn/rust-static
-ARG CRATES_MIRROR=sparse+https://rsproxy.cn/index/
-RUN --mount=type=bind,target=/ctx,ro \
-    if [ -n "$RUSTUP_MIRROR" ]; then \
+ARG RUSTUP_MIRROR=
+ARG CRATES_MIRROR=
+RUN if [ -n "$RUSTUP_MIRROR" ]; then \
       export RUSTUP_DIST_SERVER="$RUSTUP_MIRROR" RUSTUP_UPDATE_ROOT="$RUSTUP_MIRROR/rustup"; \
     fi; \
-    if [ -f /ctx/.cargo/config.toml ] && [ -d /ctx/vendor ] && [ -n "$(ls -A /ctx/vendor)" ]; then \
-      echo ">> offline build: using .cargo/ + vendor/ from the build context"; \
-      cp -a /ctx/.cargo /ctx/vendor /src/; \
-      cargo build --release --bin xlite --offline; \
-    else \
-      if [ -n "$CRATES_MIRROR" ]; then \
-        echo ">> online build via crates mirror: $CRATES_MIRROR"; \
-        mkdir -p /src/.cargo \
-          && printf '[source.crates-io]\nreplace-with = "crates-mirror"\n\n[source.crates-mirror]\nregistry = "%s"\n' \
-             "$CRATES_MIRROR" > /src/.cargo/config.toml; \
-      else \
-        echo ">> online build: no .cargo/ + vendor/ in the build context; fetching from crates.io"; \
-      fi; \
-      cargo build --release --bin xlite; \
-    fi
+    if [ -n "$CRATES_MIRROR" ]; then \
+      echo ">> online build via crates mirror: $CRATES_MIRROR"; \
+      mkdir -p /src/.cargo \
+        && printf '[source.crates-io]\nreplace-with = "crates-mirror"\n\n[source.crates-mirror]\nregistry = "%s"\n' \
+           "$CRATES_MIRROR" > /src/.cargo/config.toml; \
+    fi; \
+    cargo build --release --bin xlite
 
 FROM debian:bookworm-slim
 RUN apt-get update \
