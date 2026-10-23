@@ -15,6 +15,8 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `ADMIN_SESSION_SECRET` | unset | Overrides the key used to sign Admin session cookies; set the same on every node |
 | `XLITE_USAGE_WEBHOOK_URL` | unset | Optional HTTP(S) webhook URL receiving async post-request JSON usage & billing payloads (`model`, `upstream_model`, `api_key_name`, `provider_name`, `input_tokens`, `output_tokens`, `cache_hit_tokens`, `tokens`, `latency`, `status`) |
 | `XLITE_USAGE_WEBHOOK_TOKEN` | unset | Optional Bearer token sent in `Authorization: Bearer <token>` when calling `XLITE_USAGE_WEBHOOK_URL` |
+| `XLITE_ATTEMPT_WEBHOOK_URL` | unset | Optional HTTP(S) webhook receiving **one event per upstream attempt**, posted as soon as that attempt finishes (`event`, `request_id`, `model`, `api_key_name`, `attempt`) |
+| `XLITE_ATTEMPT_WEBHOOK_TOKEN` | unset | Optional Bearer token sent in `Authorization: Bearer <token>` when calling `XLITE_ATTEMPT_WEBHOOK_URL` |
 | `XLITE_UPSTREAM_H2C` | off | Plaintext HTTP/2 (`h2c`) to `http://` upstreams via `xlite-h2-pool` |
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and minimum idle pool size for the native HTTP/1.1 pool (`H1Pool`) |
 | `XLITE_UPSTREAM_STREAM_CAP` | peer's `SETTINGS` | Client-side cap on concurrent streams per upstream HTTP/2 connection |
@@ -107,13 +109,40 @@ When `XLITE_USAGE_WEBHOOK_URL` is set (for example `http://my-app:3000/webhooks/
 }
 ```
 
+`request_id` correlates this batch report with the per-attempt events below.
+
 `attempts` lists **every** upstream attempt of the request in order, so a control plane can attribute failures, retries and cooldowns per channel instead of only seeing the final result. `error` is the upstream body (truncated to 512 chars) or the transport error; `cooled_down` is `true` when that failure started a cooldown window.
+
+### Per-attempt events (`XLITE_ATTEMPT_WEBHOOK_URL`)
+
+The batch payload above arrives once the request finished. For live failover
+visibility, set `XLITE_ATTEMPT_WEBHOOK_URL` (and optionally
+`XLITE_ATTEMPT_WEBHOOK_TOKEN`) and xlite posts one event per attempt immediately:
+
+```json
+{
+  "event": "attempt",
+  "request_id": "6f1c9f1e-...",
+  "model": "gpt-5.4",
+  "api_key_name": "user-key:u_12345",
+  "attempt": {
+    "channel_id": 7, "provider_id": 3, "upstream_model": "gpt-5.4",
+    "status": 402, "error": "{\"error\":\"quota exhausted\"}",
+    "latency_ms": 83, "cooled_down": true
+  }
+}
+```
+
+Events are posted asynchronously, so their relative arrival order with respect to
+the batch report is not guaranteed — use `request_id` to join them. Both webhooks
+are opt-in: with neither configured, no attempt records are materialised at all.
 
 ## Channel Cooldown Metrics & Control
 
 Cooldowns are per process and previously invisible. Both endpoints require the usual `Authorization: Bearer <ADMIN_PASSWORD>`:
 
-- `GET /api/channels` — every row now also carries `cooling_down` (bool) and `cooldown_remaining_ms` (0 = healthy).
+- `GET /api/channels` — every row also carries `cooling_down` (bool), `cooldown_remaining_ms` (0 = healthy), and — when that upstream has a live pool — `pool`: `connections`, `in_flight`, `waiting` (requests parked on the per-host cap), `effective_ceiling` and `wait_ms_p50` / `wait_ms_p99`. The pool is keyed by upstream authority, so channels that share a base URL report the same numbers; this is the per-channel view of the concurrency signal that `/api/pool` only shows cluster-wide.
 - `POST /api/channels/{id}/cooldown` with `{"millis": 5000}` — deprioritize that channel for 5s; `{"millis": 0}` clears the cooldown immediately (useful after fixing a quota/auth problem). Unknown ids return `404`; the response echoes `cooling_down` and `cooldown_remaining_ms`.
+- An operator cooldown is stored outside the routing snapshot, so it survives reloads (including ones that change the channel's credential, where automatic carry-over gives up). A channel that exists in the catalog but is not routed right now still accepts the cooldown and returns `"pending_reload": true`; it applies as soon as the channel enters a snapshot. Cooldown state is **per process**: with several replicas, call the endpoint on each one (automatic cooldowns are per replica for the same reason).
 
 Docker Compose (`xlite` + Redis): [`deploy/README.md`](../../deploy/README.md).

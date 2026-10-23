@@ -193,6 +193,22 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response
     }
 }
 
+/// Per-channel view of the (per-authority) connection pool: depth of the wait
+/// queue and how long requests park there, i.e. the concurrency signal that used
+/// to be visible only as a cluster-wide average.
+fn channel_pool_view(stats: &xlite_h2_pool::PoolStats, max_conns: usize) -> Value {
+    json!({
+        "connections": stats.connections,
+        "in_flight": stats.in_flight,
+        "waiting": stats.waiting,
+        "effective_ceiling": stats
+            .effective_streams_per_conn()
+            .map(|n| n.saturating_mul(max_conns)),
+        "wait_ms_p50": wait_percentile(&stats.wait_buckets, 50),
+        "wait_ms_p99": wait_percentile(&stats.wait_buckets, 99),
+    })
+}
+
 /// Coarse percentile out of a wait-time histogram ([`PoolStats::wait_buckets`]).
 ///
 /// Returns the **upper edge** of the bucket the percentile lands in, or `None` when
@@ -530,10 +546,16 @@ async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Res
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
+    // Pool state is keyed by upstream authority, and several channels (one per
+    // upstream model) can share it; map it once per request instead of per row.
+    let max_conns = state.config.max_conns_per_host;
+    let pools: std::collections::HashMap<String, xlite_h2_pool::PoolStats> =
+        state.upstream.pool_stats().into_iter().collect();
     match state.store.catalog().list_channels().await {
         Ok(rows) => {
-            // Catalog rows carry the persistent config; cooldowns live in this
-            // process, so report them alongside instead of hiding them.
+            // Catalog rows carry the persistent config; cooldowns and the live
+            // connection pool live in this process, so report them alongside
+            // instead of hiding them.
             let rows: Vec<Value> = rows
                 .into_iter()
                 .map(|row| {
@@ -546,6 +568,9 @@ async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Res
                             "cooldown_remaining_ms".into(),
                             json!(channel.cooldown_remaining_ms()),
                         );
+                        if let Some(stats) = pools.get(&channel.authority) {
+                            obj.insert("pool".into(), channel_pool_view(stats, max_conns));
+                        }
                     }
                     value
                 })
@@ -650,12 +675,32 @@ async fn update_channel_cooldown(
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    let Some(channel) = state.store.channel_by_id(id) else {
-        return err(StatusCode::NOT_FOUND, "channel not found").into_response();
+    let channel = state.store.channel_by_id(id);
+    if channel.is_none() {
+        // A channel that exists in the catalog but is not routed right now still
+        // accepts a cooldown: the override is applied on the next snapshot build.
+        let known = state
+            .store
+            .catalog()
+            .list_channels()
+            .await
+            .map(|rows| rows.iter().any(|row| row.id == id))
+            .unwrap_or(false);
+        if !known {
+            return err(StatusCode::NOT_FOUND, "channel not found").into_response();
+        }
+    }
+    state.store.set_cooldown_override(id, body.millis);
+    let Some(channel) = channel else {
+        return ok(json!({
+            "channel_id": id,
+            "cooling_down": body.millis > 0,
+            "cooldown_remaining_ms": body.millis,
+            "pending_reload": true,
+        }))
+        .into_response();
     };
-    if body.millis == 0 {
-        channel.clear_cooldown();
-    } else {
+    if body.millis > 0 {
         channel.mark_cooldown(std::time::Duration::from_millis(body.millis));
     }
     ok(json!({

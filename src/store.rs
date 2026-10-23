@@ -169,6 +169,10 @@ pub struct Store {
     /// **falsified hypothesis, not a claim**: measured at +0.15% (inside noise).
     inner: Arc<ArcSwap<Snapshot>>,
     catalog: Catalog,
+    /// Operator-set cooldowns (`channel id → monotonic deadline`). Kept outside
+    /// the snapshot so an explicit cooldown survives reloads instead of
+    /// depending on the channel's target staying byte-identical.
+    cooldown_overrides: Arc<std::sync::Mutex<HashMap<i64, u64>>>,
 }
 
 impl Store {
@@ -176,6 +180,47 @@ impl Store {
         Self {
             inner: Arc::new(ArcSwap::from_pointee(Snapshot::default())),
             catalog,
+            cooldown_overrides: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Apply an operator cooldown that survives reloads: `millis == 0` clears it.
+    pub fn set_cooldown_override(&self, channel_id: i64, millis: u64) {
+        {
+            let mut overrides = self
+                .cooldown_overrides
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if millis == 0 {
+                overrides.remove(&channel_id);
+            } else {
+                let until = monotonic_ms().saturating_add(millis);
+                overrides.insert(channel_id, until);
+            }
+        }
+        // Clearing must also drop the cooldown already carried by the live
+        // snapshot, otherwise `carry_over_cooldowns` would copy it forward.
+        if millis == 0
+            && let Some(channel) = self.channel_by_id(channel_id)
+        {
+            channel.clear_cooldown();
+        }
+    }
+
+    /// Copy still-active operator cooldowns onto a freshly built snapshot.
+    fn apply_cooldown_overrides(&self, next: &Snapshot) {
+        let mut overrides = self
+            .cooldown_overrides
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = monotonic_ms();
+        overrides.retain(|_, until| *until > now);
+        for route in next.models.values() {
+            for channel in &route.channels {
+                if let Some(until) = overrides.get(&channel.id) {
+                    channel.cooldown_until_ms.store(*until, Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -197,6 +242,7 @@ impl Store {
             return Ok(());
         }
         carry_over_cooldowns(&current, &next);
+        self.apply_cooldown_overrides(&next);
         self.inner.store(Arc::new(next));
         Ok(())
     }
@@ -613,6 +659,55 @@ api_keys:
         assert!(
             store.channel_by_id(-1).is_none(),
             "unknown channel id => none"
+        );
+    }
+
+    /// An operator cooldown must outlive a reload that changes the channel's
+    /// credential (which is exactly when the automatic carry-over gives up).
+    #[tokio::test]
+    async fn operator_cooldown_survives_a_reload_that_changes_the_credential() {
+        let (store, channel, _) = store_with_provider(&UpstreamShape::default()).await;
+        let channel_id = channel.id;
+
+        store.set_cooldown_override(channel_id, 60_000);
+        let provider = store
+            .catalog()
+            .list_providers()
+            .await
+            .expect("providers")
+            .into_iter()
+            .next()
+            .expect("provider");
+        store
+            .catalog()
+            .update_provider(
+                provider.id,
+                &provider.name,
+                &provider.base_url,
+                "sk-rotated",
+                provider.enabled,
+                &UpstreamShape::default(),
+            )
+            .await
+            .expect("rotate credential");
+        store.reload().await.expect("reload");
+
+        let live = store.channel_by_id(channel_id).expect("channel");
+        assert!(live.is_cooling_down(), "explicit cooldown must survive");
+        let remaining = live.cooldown_remaining_ms();
+        assert!(
+            (1..=60_000).contains(&remaining),
+            "remaining inside the window, got {remaining}"
+        );
+
+        store.set_cooldown_override(channel_id, 0);
+        store.reload().await.expect("reload");
+        assert!(
+            !store
+                .channel_by_id(channel_id)
+                .expect("channel")
+                .is_cooling_down(),
+            "clearing the override must clear the channel"
         );
     }
 

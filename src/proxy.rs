@@ -29,16 +29,6 @@ use crate::upstream::{
     UpstreamResponse, embeddings_url, h2c_parts, responses_url, should_failover,
 };
 
-/// Append an attempt record only when a usage webhook is configured: without it
-/// the trail is never sent, so the hot path stays allocation-free.
-macro_rules! record_attempt {
-    ($attempts:expr, $record:expr) => {
-        if usage_webhook_target().is_some() {
-            $attempts.push($record);
-        }
-    };
-}
-
 /// SSE comment frame emitted during silent upstream prefill or reasoning pauses.
 /// Per the WHATWG `EventSource` specification, lines starting with `:` are
 /// comments and are ignored by OpenAI SDKs and SSE parsers while keeping
@@ -348,7 +338,7 @@ pub async fn chat_completions(
         upstream_model: String::new(),
     };
     let mut plan: Option<RewritePlan> = None;
-    let mut attempts: Vec<AttemptRecord> = Vec::new();
+    let mut attempts = AttemptLog::new(&state, &key, model);
     for channel in channels {
         match try_channel(
             &state,
@@ -411,7 +401,7 @@ pub async fn anthropic_messages(
         provider_id: 0,
         upstream_model: String::new(),
     };
-    let mut attempts: Vec<AttemptRecord> = Vec::new();
+    let mut attempts = AttemptLog::new(&state, &key, &request.model);
     for channel in channels {
         let attempt_started = std::time::Instant::now();
         let out_body = match build_openai_chat_body_from_anthropic(&channel, &request) {
@@ -439,10 +429,7 @@ pub async fn anthropic_messages(
                     provider_id: channel.provider_id,
                     upstream_model: channel.upstream_model.clone(),
                 };
-                record_attempt!(
-                    attempts,
-                    AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-                );
+                attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
                 last_failure = failure;
                 continue;
             }
@@ -464,10 +451,7 @@ pub async fn anthropic_messages(
                 upstream_model: channel.upstream_model.clone(),
                 base_url: channel.base_url.clone(),
             };
-            record_attempt!(
-                attempts,
-                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-            );
+            attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
             last_failure = failure;
             continue;
         }
@@ -485,13 +469,10 @@ pub async fn anthropic_messages(
             .into_anthropic_response();
         }
         channel.clear_cooldown();
-        record_attempt!(
-            attempts,
-            AttemptRecord::succeeded(
-                &channel,
-                upstream.status,
-                attempt_started.elapsed().as_millis() as u64,
-            )
+        attempts.succeeded(
+            &channel,
+            upstream.status,
+            attempt_started.elapsed().as_millis() as u64,
         );
         let usage_ctx = UsageReportContext::from_state(
             &state,
@@ -500,7 +481,7 @@ pub async fn anthropic_messages(
             &request.model,
             started_at,
             upstream.status,
-            std::mem::take(&mut attempts),
+            attempts.take(),
         );
         if request.stream {
             let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
@@ -619,7 +600,7 @@ pub async fn responses(
         provider_id: 0,
         upstream_model: String::new(),
     };
-    let mut attempts: Vec<AttemptRecord> = Vec::new();
+    let mut attempts = AttemptLog::new(&state, &key, &request.model);
     for channel in channels {
         let attempt_started = std::time::Instant::now();
         let out_body = match build_openai_responses_body(&channel, &request) {
@@ -656,10 +637,7 @@ pub async fn responses(
                     provider_id: channel.provider_id,
                     upstream_model: channel.upstream_model.clone(),
                 };
-                record_attempt!(
-                    attempts,
-                    AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-                );
+                attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
                 last_failure = failure;
                 continue;
             }
@@ -702,21 +680,15 @@ pub async fn responses(
                 upstream_model: channel.upstream_model.clone(),
                 base_url: channel.base_url.clone(),
             };
-            record_attempt!(
-                attempts,
-                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-            );
+            attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
             last_failure = failure;
             continue;
         }
         channel.clear_cooldown();
-        record_attempt!(
-            attempts,
-            AttemptRecord::succeeded(
-                &channel,
-                upstream.status,
-                attempt_started.elapsed().as_millis() as u64,
-            )
+        attempts.succeeded(
+            &channel,
+            upstream.status,
+            attempt_started.elapsed().as_millis() as u64,
         );
         let usage_ctx = UsageReportContext::from_state(
             &state,
@@ -725,7 +697,7 @@ pub async fn responses(
             &request.model,
             started_at,
             upstream.status,
-            std::mem::take(&mut attempts),
+            attempts.take(),
         );
         return forward_response_with_channel(
             upstream,
@@ -744,7 +716,7 @@ async fn try_responses_via_chat(
     channel: &Channel,
     request: &ParsedResponsesRequest,
     started_at: std::time::Instant,
-    attempts: &mut Vec<AttemptRecord>,
+    attempts: &mut AttemptLog,
 ) -> Result<Response, ChannelFailure> {
     let attempt_started = std::time::Instant::now();
     let chat_body = build_openai_chat_body_from_responses(channel, request).map_err(|e| {
@@ -776,10 +748,7 @@ async fn try_responses_via_chat(
                 provider_id: channel.provider_id,
                 upstream_model: channel.upstream_model.clone(),
             };
-            record_attempt!(
-                attempts,
-                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-            );
+            attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
             return Err(failure);
         }
     };
@@ -800,10 +769,7 @@ async fn try_responses_via_chat(
             upstream_model: channel.upstream_model.clone(),
             base_url: channel.base_url.clone(),
         };
-        record_attempt!(
-            attempts,
-            AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-        );
+        attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
         return Err(failure);
     }
     if !(200..300).contains(&upstream.status) {
@@ -820,13 +786,10 @@ async fn try_responses_via_chat(
         .into_openai_response());
     }
     channel.clear_cooldown();
-    record_attempt!(
-        attempts,
-        AttemptRecord::succeeded(
-            channel,
-            upstream.status,
-            attempt_started.elapsed().as_millis() as u64,
-        )
+    attempts.succeeded(
+        channel,
+        upstream.status,
+        attempt_started.elapsed().as_millis() as u64,
     );
     let usage_ctx = UsageReportContext::from_state(
         state,
@@ -835,7 +798,7 @@ async fn try_responses_via_chat(
         &request.model,
         started_at,
         upstream.status,
-        std::mem::take(attempts),
+        attempts.take(),
     );
     if request.stream {
         let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
@@ -950,7 +913,7 @@ pub async fn embeddings(
         upstream_model: String::new(),
     };
     let mut plan: Option<RewritePlan> = None;
-    let mut attempts: Vec<AttemptRecord> = Vec::new();
+    let mut attempts = AttemptLog::new(&state, &key, model);
     for channel in channels {
         let attempt_started = std::time::Instant::now();
         let out_body = match outbound_body(model, &channel.upstream_model, &body, &mut plan) {
@@ -987,10 +950,7 @@ pub async fn embeddings(
                     provider_id: channel.provider_id,
                     upstream_model: channel.upstream_model.clone(),
                 };
-                record_attempt!(
-                    attempts,
-                    AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-                );
+                attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
                 last_failure = failure;
                 continue;
             }
@@ -1012,21 +972,15 @@ pub async fn embeddings(
                 upstream_model: channel.upstream_model.clone(),
                 base_url: channel.base_url.clone(),
             };
-            record_attempt!(
-                attempts,
-                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-            );
+            attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
             last_failure = failure;
             continue;
         }
         channel.clear_cooldown();
-        record_attempt!(
-            attempts,
-            AttemptRecord::succeeded(
-                &channel,
-                upstream.status,
-                attempt_started.elapsed().as_millis() as u64,
-            )
+        attempts.succeeded(
+            &channel,
+            upstream.status,
+            attempt_started.elapsed().as_millis() as u64,
         );
         let usage_ctx = UsageReportContext::from_state(
             &state,
@@ -1035,7 +989,7 @@ pub async fn embeddings(
             model,
             started_at,
             upstream.status,
-            std::mem::take(&mut attempts),
+            attempts.take(),
         );
         return forward_response_with_channel(
             upstream,
@@ -1248,7 +1202,7 @@ async fn try_channel(
     original: &Bytes,
     plan: &mut Option<RewritePlan>,
     started_at: std::time::Instant,
-    attempts: &mut Vec<AttemptRecord>,
+    attempts: &mut AttemptLog,
 ) -> Result<Response, ChannelFailure> {
     let attempt_started = std::time::Instant::now();
     let body = outbound_body(model, &channel.upstream_model, original, plan).map_err(|e| {
@@ -1280,10 +1234,7 @@ async fn try_channel(
                 provider_id: channel.provider_id,
                 upstream_model: channel.upstream_model.clone(),
             };
-            record_attempt!(
-                attempts,
-                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-            );
+            attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
             return Err(failure);
         }
     };
@@ -1305,20 +1256,14 @@ async fn try_channel(
             upstream_model: channel.upstream_model.clone(),
             base_url: channel.base_url.clone(),
         };
-        record_attempt!(
-            attempts,
-            AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
-        );
+        attempts.failed(&failure, attempt_started.elapsed().as_millis() as u64);
         return Err(failure);
     }
     channel.clear_cooldown();
-    record_attempt!(
-        attempts,
-        AttemptRecord::succeeded(
-            channel,
-            upstream.status,
-            attempt_started.elapsed().as_millis() as u64,
-        )
+    attempts.succeeded(
+        channel,
+        upstream.status,
+        attempt_started.elapsed().as_millis() as u64,
     );
     let usage_ctx = UsageReportContext::from_state(
         state,
@@ -1327,7 +1272,7 @@ async fn try_channel(
         model,
         started_at,
         upstream.status,
-        std::mem::take(attempts),
+        attempts.take(),
     );
     Ok(forward_response_with_channel(
         upstream,
@@ -1526,6 +1471,8 @@ struct UsageReportContext {
     provider_name: String,
     started_at: std::time::Instant,
     status: u16,
+    /// Correlates the batch report with the per-attempt events of the same request.
+    request_id: String,
     /// Every upstream attempt of this request, in order, so callers can attribute
     /// failures and cooldowns per channel instead of only seeing the final result.
     attempts: Vec<AttemptRecord>,
@@ -1581,6 +1528,103 @@ impl AttemptRecord {
     }
 }
 
+/// Correlates per-attempt events with the batch usage report of the same request.
+///
+/// Records are only materialised when a usage webhook is configured, and a
+/// single-attempt event is only posted when `XLITE_ATTEMPT_WEBHOOK_URL` is set,
+/// so both channels stay off the hot path by default.
+struct AttemptLog {
+    request_id: String,
+    upstream: Option<crate::upstream::Upstream>,
+    target: Option<&'static AttemptEventTarget>,
+    api_key_name: String,
+    model: String,
+    records: Vec<AttemptRecord>,
+}
+
+impl AttemptLog {
+    fn new(state: &AppState, key: &crate::store::KeyRecord, model: &str) -> Self {
+        let target = attempt_event_target();
+        Self {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            upstream: target.map(|_| state.upstream.clone()),
+            target,
+            api_key_name: key.name.clone(),
+            model: model.to_string(),
+            records: Vec::new(),
+        }
+    }
+
+    fn failed(&mut self, failure: &ChannelFailure, latency_ms: u64) {
+        let record = AttemptRecord::failed(failure, latency_ms);
+        self.push(record);
+    }
+
+    fn succeeded(&mut self, channel: &Channel, status: u16, latency_ms: u64) {
+        let record = AttemptRecord::succeeded(channel, status, latency_ms);
+        self.push(record);
+    }
+
+    fn push(&mut self, record: AttemptRecord) {
+        self.emit(&record);
+        if usage_webhook_target().is_some() {
+            self.records.push(record);
+        }
+    }
+
+    /// Report this attempt on its own, as soon as it finished.
+    fn emit(&self, record: &AttemptRecord) {
+        let (Some(upstream), Some(target)) = (self.upstream.clone(), self.target) else {
+            return;
+        };
+        let payload = json!({
+            "event": "attempt",
+            "request_id": self.request_id,
+            "model": self.model,
+            "api_key_name": self.api_key_name,
+            "attempt": record,
+        });
+        let Ok(body) = serde_json::to_vec(&payload).map(Bytes::from) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _ = upstream
+                .post_json_h1(&target.url, target.auth.as_ref(), body)
+                .await;
+        });
+    }
+
+    /// Consume the trail for the batch usage report: `(request_id, attempts)`.
+    fn take(&mut self) -> (String, Vec<AttemptRecord>) {
+        (self.request_id.clone(), std::mem::take(&mut self.records))
+    }
+}
+
+struct AttemptEventTarget {
+    url: String,
+    auth: Option<(axum::http::HeaderName, axum::http::HeaderValue)>,
+}
+
+fn attempt_event_target() -> Option<&'static AttemptEventTarget> {
+    static TARGET: std::sync::OnceLock<Option<AttemptEventTarget>> = std::sync::OnceLock::new();
+    TARGET
+        .get_or_init(|| {
+            let url = std::env::var("XLITE_ATTEMPT_WEBHOOK_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())?;
+            let token = std::env::var("XLITE_ATTEMPT_WEBHOOK_TOKEN")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
+            let auth = crate::upstream::build_auth("bearer", "authorization", &token)
+                .ok()
+                .flatten();
+            Some(AttemptEventTarget { url, auth })
+        })
+        .as_ref()
+}
+
 impl ChannelFailure {
     fn channel_id(&self) -> i64 {
         match self {
@@ -1619,7 +1663,8 @@ impl UsageReportContext {
         model: &str,
         started_at: std::time::Instant,
         status: u16,
-        attempts: Vec<AttemptRecord>,
+        // (request_id, ordered attempts) for the batch report.
+        attempts: (String, Vec<AttemptRecord>),
     ) -> Option<Self> {
         let target = usage_webhook_target()?.clone();
         if !(200..300).contains(&status) {
@@ -1638,7 +1683,8 @@ impl UsageReportContext {
             provider_name,
             started_at,
             status,
-            attempts,
+            request_id: attempts.0,
+            attempts: attempts.1,
         })
     }
 
@@ -1655,6 +1701,7 @@ impl UsageReportContext {
             "tokens": stats.total_tokens,
             "latency": latency_ms,
             "status": self.status,
+            "request_id": self.request_id,
             "attempts": self.attempts,
         });
         let Ok(body) = serde_json::to_vec(&payload).map(Bytes::from) else {
