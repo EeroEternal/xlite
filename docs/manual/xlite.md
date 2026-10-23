@@ -137,6 +137,35 @@ Events are posted asynchronously, so their relative arrival order with respect t
 the batch report is not guaranteed — use `request_id` to join them. Both webhooks
 are opt-in: with neither configured, no attempt records are materialised at all.
 
+## Request Priority (`x-xlite-priority`)
+
+Callers can mark a request as bulk traffic:
+
+```http
+x-xlite-priority: bulk
+```
+
+* **`bulk`** — if that channel's upstream pool would have to park (another request is
+  already waiting, or every allowed connection is dialed and every stream slot is
+  taken), the request is **shed immediately** instead of queueing: xlite fails over
+  to the next channel, and when none is available returns `503` with
+  `Retry-After: 1` and `{"error":{"type":"overloaded_error"}}`. A shed channel is
+  not cooled down (it was never contacted), and the attempt is reported with
+  `status: 503`, `cooled_down: false`.
+* **absent / anything else** — latency-sensitive default: wait for a slot as before.
+
+This is admission priority, not reordering: served-in-flight requests are never
+preempted, but bulk traffic stops consuming the wait queue that priority traffic
+depends on. Combined with `GET /api/channels` (`pool.waiting`, `wait_ms_p99`) it
+gives an explicit answer to "who gets the slot when everything is full".
+
+## Cooldown Length Follows `Retry-After`
+
+When a failover-eligible response carries `Retry-After: <seconds>`, the cooldown
+uses it (clamped to `1..=300s`, never shorter than the status default `401–404` →
+30s, otherwise 5s). A provider that says "retry in 20s" is therefore parked for
+20s instead of the fixed 5s, and one that says 1h is capped at 5 minutes.
+
 ## Channel Cooldown Metrics & Control
 
 Cooldowns are per process and previously invisible. Both endpoints require the usual `Authorization: Bearer <ADMIN_PASSWORD>`:

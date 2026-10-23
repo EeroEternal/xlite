@@ -323,6 +323,7 @@ pub async fn chat_completions(
     };
 
     let started_at = std::time::Instant::now();
+    let bulk = is_bulk_request(&headers);
     let effective_body = if usage_webhook_target().is_some()
         && model_ref.stream == Some(true)
         && model_ref.stream_options.is_none()
@@ -349,6 +350,7 @@ pub async fn chat_completions(
             &mut plan,
             started_at,
             &mut attempts,
+            bulk,
         )
         .await
         {
@@ -395,6 +397,7 @@ pub async fn anthropic_messages(
     };
 
     let started_at = std::time::Instant::now();
+    let bulk = is_bulk_request(&headers);
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -404,6 +407,17 @@ pub async fn anthropic_messages(
     let mut attempts = AttemptLog::new(&state, &key, &request.model);
     for channel in channels {
         let attempt_started = std::time::Instant::now();
+        if bulk && would_park(&state, &channel.authority) {
+            let failure = ChannelFailure::Shed {
+                message: "bulk request shed: upstream pool saturated".to_string(),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            };
+            attempts.failed(&failure, 0);
+            last_failure = failure;
+            continue;
+        }
         let out_body = match build_openai_chat_body_from_anthropic(&channel, &request) {
             Ok(b) => b,
             Err(e) => return anthropic_bad_request(&e),
@@ -436,11 +450,7 @@ pub async fn anthropic_messages(
         };
         if should_failover(upstream.status, false) {
             let status = upstream.status;
-            let cooldown = if matches!(status, 401..=404) {
-                COOLDOWN_QUOTA_OR_AUTH
-            } else {
-                COOLDOWN_TRANSIENT
-            };
+            let cooldown = cooldown_for(status, upstream.retry_after);
             channel.mark_cooldown(cooldown);
             let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
             let failure = ChannelFailure::UpstreamStatus {
@@ -594,6 +604,7 @@ pub async fn responses(
     };
 
     let started_at = std::time::Instant::now();
+    let bulk = is_bulk_request(&headers);
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -603,6 +614,17 @@ pub async fn responses(
     let mut attempts = AttemptLog::new(&state, &key, &request.model);
     for channel in channels {
         let attempt_started = std::time::Instant::now();
+        if bulk && would_park(&state, &channel.authority) {
+            let failure = ChannelFailure::Shed {
+                message: "bulk request shed: upstream pool saturated".to_string(),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            };
+            attempts.failed(&failure, 0);
+            last_failure = failure;
+            continue;
+        }
         let out_body = match build_openai_responses_body(&channel, &request) {
             Ok(b) => b,
             Err(e) => {
@@ -652,6 +674,7 @@ pub async fn responses(
                 &request,
                 started_at,
                 &mut attempts,
+                bulk,
             )
             .await
             {
@@ -665,11 +688,7 @@ pub async fn responses(
 
         if should_failover(upstream.status, false) {
             let status = upstream.status;
-            let cooldown = if matches!(status, 401..=404) {
-                COOLDOWN_QUOTA_OR_AUTH
-            } else {
-                COOLDOWN_TRANSIENT
-            };
+            let cooldown = cooldown_for(status, upstream.retry_after);
             channel.mark_cooldown(cooldown);
             let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
             let failure = ChannelFailure::UpstreamStatus {
@@ -717,8 +736,19 @@ async fn try_responses_via_chat(
     request: &ParsedResponsesRequest,
     started_at: std::time::Instant,
     attempts: &mut AttemptLog,
+    bulk: bool,
 ) -> Result<Response, ChannelFailure> {
     let attempt_started = std::time::Instant::now();
+    if bulk && would_park(state, &channel.authority) {
+        let failure = ChannelFailure::Shed {
+            message: "bulk request shed: upstream pool saturated".to_string(),
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        };
+        attempts.failed(&failure, 0);
+        return Err(failure);
+    }
     let chat_body = build_openai_chat_body_from_responses(channel, request).map_err(|e| {
         ChannelFailure::Transport {
             message: e,
@@ -754,11 +784,7 @@ async fn try_responses_via_chat(
     };
     if should_failover(upstream.status, false) {
         let status = upstream.status;
-        let cooldown = if matches!(status, 401..=404) {
-            COOLDOWN_QUOTA_OR_AUTH
-        } else {
-            COOLDOWN_TRANSIENT
-        };
+        let cooldown = cooldown_for(status, upstream.retry_after);
         channel.mark_cooldown(cooldown);
         let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
         let failure = ChannelFailure::UpstreamStatus {
@@ -906,6 +932,7 @@ pub async fn embeddings(
     };
 
     let started_at = std::time::Instant::now();
+    let bulk = is_bulk_request(&headers);
     let mut last_failure = ChannelFailure::Transport {
         message: "no channel available".to_string(),
         channel_id: 0,
@@ -916,6 +943,17 @@ pub async fn embeddings(
     let mut attempts = AttemptLog::new(&state, &key, model);
     for channel in channels {
         let attempt_started = std::time::Instant::now();
+        if bulk && would_park(&state, &channel.authority) {
+            let failure = ChannelFailure::Shed {
+                message: "bulk request shed: upstream pool saturated".to_string(),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            };
+            attempts.failed(&failure, 0);
+            last_failure = failure;
+            continue;
+        }
         let out_body = match outbound_body(model, &channel.upstream_model, &body, &mut plan) {
             Ok(b) => b,
             Err(e) => {
@@ -957,11 +995,7 @@ pub async fn embeddings(
         };
         if should_failover(upstream.status, false) {
             let status = upstream.status;
-            let cooldown = if matches!(status, 401..=404) {
-                COOLDOWN_QUOTA_OR_AUTH
-            } else {
-                COOLDOWN_TRANSIENT
-            };
+            let cooldown = cooldown_for(status, upstream.retry_after);
             channel.mark_cooldown(cooldown);
             let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
             let failure = ChannelFailure::UpstreamStatus {
@@ -1025,6 +1059,48 @@ const COOLDOWN_QUOTA_OR_AUTH: Duration = Duration::from_secs(30);
 /// (`429`), server error (`5xx`), or transport/header timeout error.
 const COOLDOWN_TRANSIENT: Duration = Duration::from_secs(5);
 
+/// Longest cooldown a provider's `Retry-After` hint may impose.
+const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+
+/// Cooldown length for a failed channel: the provider's `Retry-After` when it
+/// sent a usable one, otherwise the status-based default.
+fn cooldown_for(status: u16, retry_after: Option<u64>) -> Duration {
+    let default = if matches!(status, 401..=404) {
+        COOLDOWN_QUOTA_OR_AUTH
+    } else {
+        COOLDOWN_TRANSIENT
+    };
+    match retry_after {
+        Some(secs) if secs > 0 => Duration::from_secs(secs).min(COOLDOWN_MAX).max(default),
+        _ => default,
+    }
+}
+
+/// Priority class carried by the caller: `x-xlite-priority: bulk` marks traffic
+/// that may be shed under saturation instead of occupying a queue slot.
+fn is_bulk_request(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-xlite-priority")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("bulk"))
+}
+
+/// True when our own pool would have to park this request: someone is already
+/// waiting, or every allowed connection is dialed and every stream slot taken.
+fn would_park(state: &AppState, authority: &str) -> bool {
+    let Some(stats) = state.upstream.pool_pressure(authority) else {
+        return false;
+    };
+    if stats.waiting > 0 {
+        return true;
+    }
+    let Some(cap) = stats.effective_streams_per_conn() else {
+        return false;
+    };
+    stats.connections >= state.config.max_conns_per_host
+        && stats.in_flight >= cap.saturating_mul(stats.connections)
+}
+
 enum ChannelFailure {
     Transport {
         message: String,
@@ -1039,6 +1115,14 @@ enum ChannelFailure {
         provider_id: i64,
         upstream_model: String,
         base_url: String,
+    },
+    /// Bulk-class request skipped because the upstream pool is saturated: shed it
+    /// instead of queueing, so latency-sensitive traffic keeps the slots.
+    Shed {
+        message: String,
+        channel_id: i64,
+        provider_id: i64,
+        upstream_model: String,
     },
 }
 
@@ -1114,6 +1198,12 @@ impl ChannelFailure {
                 .body(Body::from(out_body))
                 .unwrap_or_else(|_| http_status.into_response())
             }
+            Self::Shed {
+                message,
+                channel_id,
+                provider_id,
+                upstream_model,
+            } => shed_response(channel_id, provider_id, &upstream_model, &message),
         }
     }
 
@@ -1159,8 +1249,53 @@ impl ChannelFailure {
                 .body(Body::from(out_body))
                 .unwrap_or_else(|_| http_status.into_response())
             }
+            Self::Shed {
+                message,
+                channel_id,
+                provider_id,
+                upstream_model,
+            } => {
+                let body = format_anthropic_error_body(503, b"", &message);
+                attach_failure_headers(
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header(axum::http::header::RETRY_AFTER, "1"),
+                    channel_id,
+                    provider_id,
+                    &upstream_model,
+                )
+                .body(Body::from(body))
+                .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
+            }
         }
     }
+}
+
+/// 503 + `Retry-After` for a shed bulk request: the channel was never contacted,
+/// so this is backpressure, not an upstream failure.
+fn shed_response(
+    channel_id: i64,
+    provider_id: i64,
+    upstream_model: &str,
+    message: &str,
+) -> Response {
+    attach_failure_headers(
+        Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::RETRY_AFTER, "1"),
+        channel_id,
+        provider_id,
+        upstream_model,
+    )
+    .body(Body::from(
+        serde_json::to_vec(&json!({
+            "error": { "message": message, "type": "overloaded_error" }
+        }))
+        .unwrap_or_default(),
+    ))
+    .unwrap_or_else(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())
 }
 
 fn attach_channel_headers(
@@ -1203,8 +1338,19 @@ async fn try_channel(
     plan: &mut Option<RewritePlan>,
     started_at: std::time::Instant,
     attempts: &mut AttemptLog,
+    bulk: bool,
 ) -> Result<Response, ChannelFailure> {
     let attempt_started = std::time::Instant::now();
+    if bulk && would_park(state, &channel.authority) {
+        let failure = ChannelFailure::Shed {
+            message: "bulk request shed: upstream pool saturated".to_string(),
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        };
+        attempts.failed(&failure, 0);
+        return Err(failure);
+    }
     let body = outbound_body(model, &channel.upstream_model, original, plan).map_err(|e| {
         ChannelFailure::Transport {
             message: e,
@@ -1241,11 +1387,7 @@ async fn try_channel(
     if should_failover(upstream.status, false) {
         // Read the status before draining: `read_error_body` consumes `upstream`.
         let status = upstream.status;
-        let cooldown = if matches!(status, 401..=404) {
-            COOLDOWN_QUOTA_OR_AUTH
-        } else {
-            COOLDOWN_TRANSIENT
-        };
+        let cooldown = cooldown_for(status, upstream.retry_after);
         channel.mark_cooldown(cooldown);
         let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
         let failure = ChannelFailure::UpstreamStatus {
@@ -1515,6 +1657,7 @@ impl AttemptRecord {
                     .take(512)
                     .collect::<String>(),
             ),
+            ChannelFailure::Shed { message, .. } => (Some(503), message.clone()),
         };
         Self {
             channel_id: failure.channel_id(),
@@ -1630,6 +1773,7 @@ impl ChannelFailure {
         match self {
             ChannelFailure::Transport { channel_id, .. } => *channel_id,
             ChannelFailure::UpstreamStatus { channel_id, .. } => *channel_id,
+            ChannelFailure::Shed { channel_id, .. } => *channel_id,
         }
     }
 
@@ -1637,6 +1781,7 @@ impl ChannelFailure {
         match self {
             ChannelFailure::Transport { provider_id, .. } => *provider_id,
             ChannelFailure::UpstreamStatus { provider_id, .. } => *provider_id,
+            ChannelFailure::Shed { provider_id, .. } => *provider_id,
         }
     }
 
@@ -1644,6 +1789,7 @@ impl ChannelFailure {
         match self {
             ChannelFailure::Transport { upstream_model, .. } => upstream_model,
             ChannelFailure::UpstreamStatus { upstream_model, .. } => upstream_model,
+            ChannelFailure::Shed { upstream_model, .. } => upstream_model,
         }
     }
 
@@ -1651,6 +1797,8 @@ impl ChannelFailure {
         match self {
             ChannelFailure::Transport { .. } => true,
             ChannelFailure::UpstreamStatus { status, .. } => should_failover(*status, false),
+            // Shed does not blame the channel: it was never contacted.
+            ChannelFailure::Shed { .. } => false,
         }
     }
 }
@@ -2232,6 +2380,73 @@ mod tests {
             .expect_err("must be TimedOut");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert_eq!(t0.elapsed(), Duration::from_secs(35));
+    }
+
+    #[test]
+    fn cooldown_honours_retry_after_within_bounds() {
+        assert_eq!(
+            cooldown_for(429, Some(7)),
+            Duration::from_secs(7),
+            "provider Retry-After wins"
+        );
+        assert_eq!(
+            cooldown_for(429, Some(1)),
+            COOLDOWN_TRANSIENT,
+            "never shorter than the status default"
+        );
+        assert_eq!(
+            cooldown_for(429, Some(86_400)),
+            COOLDOWN_MAX,
+            "absurd Retry-After is capped"
+        );
+        assert_eq!(
+            cooldown_for(402, None),
+            COOLDOWN_QUOTA_OR_AUTH,
+            "no hint => status default"
+        );
+        assert_eq!(
+            cooldown_for(500, Some(0)),
+            COOLDOWN_TRANSIENT,
+            "zero hint is ignored"
+        );
+    }
+
+    #[test]
+    fn bulk_priority_header_is_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-xlite-priority", "BULK".parse().expect("header"));
+        assert!(is_bulk_request(&headers));
+
+        let mut normal = HeaderMap::new();
+        normal.insert("x-xlite-priority", "normal".parse().expect("header"));
+        assert!(!is_bulk_request(&normal));
+        assert!(!is_bulk_request(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn shed_failure_is_a_retryable_overload_not_an_upstream_error() {
+        let response = ChannelFailure::Shed {
+            message: "bulk request shed: upstream pool saturated".to_string(),
+            channel_id: 4,
+            provider_id: 2,
+            upstream_model: "m".to_string(),
+        }
+        .into_openai_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-xlite-channel-id")
+                .and_then(|v| v.to_str().ok()),
+            Some("4")
+        );
     }
 
     #[test]

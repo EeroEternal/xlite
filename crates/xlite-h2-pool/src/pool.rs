@@ -248,7 +248,7 @@ impl HostState {
 }
 
 /// Point-in-time snapshot of one pool's state (for `/metrics` / diagnostics).
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PoolStats {
     /// Live connections.
     pub connections: usize,
@@ -723,6 +723,15 @@ impl Pool {
             // independent, which is fine for a rate/percentile view.
             wait_buckets: std::array::from_fn(|i| state.wait_buckets[i].load(Ordering::Relaxed)),
         }
+    }
+
+    /// Point-in-time stats for one host, without cloning the whole host map.
+    ///
+    /// `None` when this pool never dialed the host. Used by admission control to
+    /// read saturation on the request hot path.
+    pub fn stats_for(&self, host: &str) -> Option<PoolStats> {
+        let map = self.hosts.load();
+        map.get(host).map(|_| self.stats(host))
     }
 
     /// Point-in-time stats for **every** host this pool has dialed, sorted by host.

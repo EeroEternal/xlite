@@ -431,6 +431,9 @@ enum BodyKind {
 pub struct UpstreamResponse {
     pub status: u16,
     pub content_type: Option<String>,
+    /// Upstream `Retry-After` in seconds, when the provider sent one. Feeds the
+    /// cooldown length so a rate-limited key is parked for as long as it asked.
+    pub retry_after: Option<u64>,
     pub body: UpstreamBody,
 }
 
@@ -565,6 +568,16 @@ impl Upstream {
         }
     }
 
+    /// Pool stats for the authority this channel targets, if that pool exists.
+    ///
+    /// Allocation-free apart from the returned copy; used on the request path to
+    /// decide whether a bulk request should shed instead of queueing.
+    pub fn pool_pressure(&self, authority: &str) -> Option<xlite_h2_pool::PoolStats> {
+        self.pool
+            .stats_for(authority)
+            .or_else(|| self.tls_pool.stats_for(authority))
+    }
+
     /// Read-only pool snapshot for the control plane (`GET /api/pool`).
     pub fn pool_stats(&self) -> Vec<(String, xlite_h2_pool::PoolStats)> {
         let mut out = self.pool.all_stats();
@@ -654,9 +667,10 @@ impl Upstream {
             .send_h2_request(&mut lease, request, body.clone())
             .await
         {
-            Ok((status, content_type, inner)) => Ok(Some(UpstreamResponse {
+            Ok((status, content_type, retry_after, inner)) => Ok(Some(UpstreamResponse {
                 status,
                 content_type,
+                retry_after,
                 body: UpstreamBody {
                     inner,
                     _lease: Some(lease),
@@ -676,13 +690,14 @@ impl Upstream {
                     Err(err) => return Err(err).context("h2 pool acquire"),
                 };
                 let retry_req = build_req()?;
-                let (status, content_type, inner) = self
+                let (status, content_type, retry_after, inner) = self
                     .send_h2_request(&mut fresh, retry_req, body)
                     .await
                     .map_err(H2SendError::into_anyhow)?;
                 Ok(Some(UpstreamResponse {
                     status,
                     content_type,
+                    retry_after,
                     body: UpstreamBody {
                         inner,
                         _lease: Some(fresh),
@@ -729,9 +744,10 @@ impl Upstream {
             .send_h2_request(&mut lease, request, body.clone())
             .await
         {
-            Ok((status, content_type, inner)) => Ok(UpstreamResponse {
+            Ok((status, content_type, retry_after, inner)) => Ok(UpstreamResponse {
                 status,
                 content_type,
+                retry_after,
                 body: UpstreamBody {
                     inner,
                     _lease: Some(lease),
@@ -746,13 +762,14 @@ impl Upstream {
                     .await
                     .context("h2 pool acquire")?;
                 let retry_req = build_req()?;
-                let (status, content_type, inner) = self
+                let (status, content_type, retry_after, inner) = self
                     .send_h2_request(&mut fresh, retry_req, body)
                     .await
                     .map_err(H2SendError::into_anyhow)?;
                 Ok(UpstreamResponse {
                     status,
                     content_type,
+                    retry_after,
                     body: UpstreamBody {
                         inner,
                         _lease: Some(fresh),
@@ -768,7 +785,7 @@ impl Upstream {
         lease: &mut Lease,
         request: Request<()>,
         body: Bytes,
-    ) -> std::result::Result<(u16, Option<String>, BodyKind), H2SendError> {
+    ) -> std::result::Result<(u16, Option<String>, Option<u64>, BodyKind), H2SendError> {
         let eos = body.is_empty();
         let (response_future, mut send_stream) = lease
             .send_request(request, eos)
@@ -803,13 +820,18 @@ impl Upstream {
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let retry_after = response
+            .headers()
+            .get(http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let recv = response.into_body();
         let inner = if lease.pinned_poll() {
             BodyKind::Pump(lease.register(recv).await)
         } else {
             BodyKind::H2(recv, 0)
         };
-        Ok((status, content_type, inner))
+        Ok((status, content_type, retry_after, inner))
     }
 
     async fn post_h1(
@@ -885,6 +907,7 @@ impl Upstream {
         Ok(UpstreamResponse {
             status: head.status,
             content_type: head.content_type,
+            retry_after: head.retry_after,
             body: UpstreamBody {
                 inner: BodyKind::H1(h1_body),
                 _lease: None,
@@ -996,6 +1019,7 @@ fn build_h1_request_head(
 struct ParsedResponseHead {
     status: u16,
     content_type: Option<String>,
+    retry_after: Option<u64>,
     framing: BodyFraming,
     connection_close: bool,
 }
@@ -1129,6 +1153,7 @@ fn parse_h1_response_head(buf: &mut BytesMut) -> io::Result<ParsedResponseHead> 
     let version = resp.version.unwrap_or(1);
 
     let mut content_type = None;
+    let mut retry_after: Option<u64> = None;
     let mut content_length: Option<u64> = None;
     let mut chunked = false;
     let mut conn_close = false;
@@ -1139,6 +1164,10 @@ fn parse_h1_response_head(buf: &mut BytesMut) -> io::Result<ParsedResponseHead> 
             if let Ok(v) = std::str::from_utf8(h.value) {
                 content_type = Some(v.trim().to_string());
             }
+        } else if h.name.eq_ignore_ascii_case("retry-after") {
+            retry_after = std::str::from_utf8(h.value)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok());
         } else if h.name.eq_ignore_ascii_case("content-length") {
             let s = std::str::from_utf8(h.value).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length header")
@@ -1187,6 +1216,7 @@ fn parse_h1_response_head(buf: &mut BytesMut) -> io::Result<ParsedResponseHead> 
     Ok(ParsedResponseHead {
         status,
         content_type,
+        retry_after,
         framing,
         connection_close,
     })
