@@ -83,8 +83,37 @@ When `XLITE_USAGE_WEBHOOK_URL` is set (for example `http://my-app:3000/webhooks/
   "cache_hit_tokens": 64,
   "tokens": 460,
   "latency": 1420,
-  "status": 200
+  "status": 200,
+  "attempts": [
+    {
+      "channel_id": 7,
+      "provider_id": 3,
+      "upstream_model": "gpt-5.4",
+      "status": 402,
+      "error": "{\"error\":\"quota exhausted\"}",
+      "latency_ms": 83,
+      "cooled_down": true
+    },
+    {
+      "channel_id": 9,
+      "provider_id": 3,
+      "upstream_model": "gpt-5.4",
+      "status": 200,
+      "error": null,
+      "latency_ms": 1420,
+      "cooled_down": false
+    }
+  ]
 }
 ```
+
+`attempts` lists **every** upstream attempt of the request in order, so a control plane can attribute failures, retries and cooldowns per channel instead of only seeing the final result. `error` is the upstream body (truncated to 512 chars) or the transport error; `cooled_down` is `true` when that failure started a cooldown window.
+
+## Channel Cooldown Metrics & Control
+
+Cooldowns are per process and previously invisible. Both endpoints require the usual `Authorization: Bearer <ADMIN_PASSWORD>`:
+
+- `GET /api/channels` — every row now also carries `cooling_down` (bool) and `cooldown_remaining_ms` (0 = healthy).
+- `POST /api/channels/{id}/cooldown` with `{"millis": 5000}` — deprioritize that channel for 5s; `{"millis": 0}` clears the cooldown immediately (useful after fixing a quota/auth problem). Unknown ids return `404`; the response echoes `cooling_down` and `cooldown_remaining_ms`.
 
 Docker Compose (`xlite` + Redis): [`deploy/README.md`](../../deploy/README.md).

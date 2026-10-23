@@ -29,6 +29,16 @@ use crate::upstream::{
     UpstreamResponse, embeddings_url, h2c_parts, responses_url, should_failover,
 };
 
+/// Append an attempt record only when a usage webhook is configured: without it
+/// the trail is never sent, so the hot path stays allocation-free.
+macro_rules! record_attempt {
+    ($attempts:expr, $record:expr) => {
+        if usage_webhook_target().is_some() {
+            $attempts.push($record);
+        }
+    };
+}
+
 /// SSE comment frame emitted during silent upstream prefill or reasoning pauses.
 /// Per the WHATWG `EventSource` specification, lines starting with `:` are
 /// comments and are ignored by OpenAI SDKs and SSE parsers while keeping
@@ -338,6 +348,7 @@ pub async fn chat_completions(
         upstream_model: String::new(),
     };
     let mut plan: Option<RewritePlan> = None;
+    let mut attempts: Vec<AttemptRecord> = Vec::new();
     for channel in channels {
         match try_channel(
             &state,
@@ -347,6 +358,7 @@ pub async fn chat_completions(
             &effective_body,
             &mut plan,
             started_at,
+            &mut attempts,
         )
         .await
         {
@@ -399,7 +411,9 @@ pub async fn anthropic_messages(
         provider_id: 0,
         upstream_model: String::new(),
     };
+    let mut attempts: Vec<AttemptRecord> = Vec::new();
     for channel in channels {
+        let attempt_started = std::time::Instant::now();
         let out_body = match build_openai_chat_body_from_anthropic(&channel, &request) {
             Ok(b) => b,
             Err(e) => return anthropic_bad_request(&e),
@@ -419,12 +433,17 @@ pub async fn anthropic_messages(
             Ok(u) => u,
             Err(e) => {
                 channel.mark_cooldown(COOLDOWN_TRANSIENT);
-                last_failure = ChannelFailure::Transport {
+                let failure = ChannelFailure::Transport {
                     message: err_chain(&e),
                     channel_id: channel.id,
                     provider_id: channel.provider_id,
                     upstream_model: channel.upstream_model.clone(),
                 };
+                record_attempt!(
+                    attempts,
+                    AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+                );
+                last_failure = failure;
                 continue;
             }
         };
@@ -437,7 +456,7 @@ pub async fn anthropic_messages(
             };
             channel.mark_cooldown(cooldown);
             let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-            last_failure = ChannelFailure::UpstreamStatus {
+            let failure = ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
                 channel_id: channel.id,
@@ -445,6 +464,11 @@ pub async fn anthropic_messages(
                 upstream_model: channel.upstream_model.clone(),
                 base_url: channel.base_url.clone(),
             };
+            record_attempt!(
+                attempts,
+                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+            );
+            last_failure = failure;
             continue;
         }
         if !(200..300).contains(&upstream.status) {
@@ -461,6 +485,14 @@ pub async fn anthropic_messages(
             .into_anthropic_response();
         }
         channel.clear_cooldown();
+        record_attempt!(
+            attempts,
+            AttemptRecord::succeeded(
+                &channel,
+                upstream.status,
+                attempt_started.elapsed().as_millis() as u64,
+            )
+        );
         let usage_ctx = UsageReportContext::from_state(
             &state,
             &key,
@@ -468,6 +500,7 @@ pub async fn anthropic_messages(
             &request.model,
             started_at,
             upstream.status,
+            std::mem::take(&mut attempts),
         );
         if request.stream {
             let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
@@ -586,7 +619,9 @@ pub async fn responses(
         provider_id: 0,
         upstream_model: String::new(),
     };
+    let mut attempts: Vec<AttemptRecord> = Vec::new();
     for channel in channels {
+        let attempt_started = std::time::Instant::now();
         let out_body = match build_openai_responses_body(&channel, &request) {
             Ok(b) => b,
             Err(e) => {
@@ -615,19 +650,33 @@ pub async fn responses(
             Ok(u) => u,
             Err(e) => {
                 channel.mark_cooldown(COOLDOWN_TRANSIENT);
-                last_failure = ChannelFailure::Transport {
+                let failure = ChannelFailure::Transport {
                     message: err_chain(&e),
                     channel_id: channel.id,
                     provider_id: channel.provider_id,
                     upstream_model: channel.upstream_model.clone(),
                 };
+                record_attempt!(
+                    attempts,
+                    AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+                );
+                last_failure = failure;
                 continue;
             }
         };
 
         if matches!(upstream.status, 404 | 405) {
             let _ = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-            match try_responses_via_chat(&state, &key, &channel, &request, started_at).await {
+            match try_responses_via_chat(
+                &state,
+                &key,
+                &channel,
+                &request,
+                started_at,
+                &mut attempts,
+            )
+            .await
+            {
                 Ok(resp) => return resp,
                 Err(failure) => {
                     last_failure = failure;
@@ -645,7 +694,7 @@ pub async fn responses(
             };
             channel.mark_cooldown(cooldown);
             let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-            last_failure = ChannelFailure::UpstreamStatus {
+            let failure = ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
                 channel_id: channel.id,
@@ -653,9 +702,22 @@ pub async fn responses(
                 upstream_model: channel.upstream_model.clone(),
                 base_url: channel.base_url.clone(),
             };
+            record_attempt!(
+                attempts,
+                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+            );
+            last_failure = failure;
             continue;
         }
         channel.clear_cooldown();
+        record_attempt!(
+            attempts,
+            AttemptRecord::succeeded(
+                &channel,
+                upstream.status,
+                attempt_started.elapsed().as_millis() as u64,
+            )
+        );
         let usage_ctx = UsageReportContext::from_state(
             &state,
             &key,
@@ -663,6 +725,7 @@ pub async fn responses(
             &request.model,
             started_at,
             upstream.status,
+            std::mem::take(&mut attempts),
         );
         return forward_response_with_channel(
             upstream,
@@ -681,7 +744,9 @@ async fn try_responses_via_chat(
     channel: &Channel,
     request: &ParsedResponsesRequest,
     started_at: std::time::Instant,
+    attempts: &mut Vec<AttemptRecord>,
 ) -> Result<Response, ChannelFailure> {
+    let attempt_started = std::time::Instant::now();
     let chat_body = build_openai_chat_body_from_responses(channel, request).map_err(|e| {
         ChannelFailure::Transport {
             message: e,
@@ -690,7 +755,7 @@ async fn try_responses_via_chat(
             upstream_model: channel.upstream_model.clone(),
         }
     })?;
-    let upstream = state
+    let upstream = match state
         .upstream
         .post_stream(
             &channel.endpoint,
@@ -701,15 +766,23 @@ async fn try_responses_via_chat(
             chat_body,
         )
         .await
-        .map_err(|e| {
+    {
+        Ok(u) => u,
+        Err(e) => {
             channel.mark_cooldown(COOLDOWN_TRANSIENT);
-            ChannelFailure::Transport {
+            let failure = ChannelFailure::Transport {
                 message: err_chain(&e),
                 channel_id: channel.id,
                 provider_id: channel.provider_id,
                 upstream_model: channel.upstream_model.clone(),
-            }
-        })?;
+            };
+            record_attempt!(
+                attempts,
+                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+            );
+            return Err(failure);
+        }
+    };
     if should_failover(upstream.status, false) {
         let status = upstream.status;
         let cooldown = if matches!(status, 401..=404) {
@@ -719,14 +792,19 @@ async fn try_responses_via_chat(
         };
         channel.mark_cooldown(cooldown);
         let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-        return Err(ChannelFailure::UpstreamStatus {
+        let failure = ChannelFailure::UpstreamStatus {
             status,
             body: err_bytes,
             channel_id: channel.id,
             provider_id: channel.provider_id,
             upstream_model: channel.upstream_model.clone(),
             base_url: channel.base_url.clone(),
-        });
+        };
+        record_attempt!(
+            attempts,
+            AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+        );
+        return Err(failure);
     }
     if !(200..300).contains(&upstream.status) {
         let status = upstream.status;
@@ -742,6 +820,14 @@ async fn try_responses_via_chat(
         .into_openai_response());
     }
     channel.clear_cooldown();
+    record_attempt!(
+        attempts,
+        AttemptRecord::succeeded(
+            channel,
+            upstream.status,
+            attempt_started.elapsed().as_millis() as u64,
+        )
+    );
     let usage_ctx = UsageReportContext::from_state(
         state,
         key,
@@ -749,6 +835,7 @@ async fn try_responses_via_chat(
         &request.model,
         started_at,
         upstream.status,
+        std::mem::take(attempts),
     );
     if request.stream {
         let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
@@ -863,7 +950,9 @@ pub async fn embeddings(
         upstream_model: String::new(),
     };
     let mut plan: Option<RewritePlan> = None;
+    let mut attempts: Vec<AttemptRecord> = Vec::new();
     for channel in channels {
+        let attempt_started = std::time::Instant::now();
         let out_body = match outbound_body(model, &channel.upstream_model, &body, &mut plan) {
             Ok(b) => b,
             Err(e) => {
@@ -892,12 +981,17 @@ pub async fn embeddings(
             Ok(u) => u,
             Err(e) => {
                 channel.mark_cooldown(COOLDOWN_TRANSIENT);
-                last_failure = ChannelFailure::Transport {
+                let failure = ChannelFailure::Transport {
                     message: err_chain(&e),
                     channel_id: channel.id,
                     provider_id: channel.provider_id,
                     upstream_model: channel.upstream_model.clone(),
                 };
+                record_attempt!(
+                    attempts,
+                    AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+                );
+                last_failure = failure;
                 continue;
             }
         };
@@ -910,7 +1004,7 @@ pub async fn embeddings(
             };
             channel.mark_cooldown(cooldown);
             let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-            last_failure = ChannelFailure::UpstreamStatus {
+            let failure = ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
                 channel_id: channel.id,
@@ -918,9 +1012,22 @@ pub async fn embeddings(
                 upstream_model: channel.upstream_model.clone(),
                 base_url: channel.base_url.clone(),
             };
+            record_attempt!(
+                attempts,
+                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+            );
+            last_failure = failure;
             continue;
         }
         channel.clear_cooldown();
+        record_attempt!(
+            attempts,
+            AttemptRecord::succeeded(
+                &channel,
+                upstream.status,
+                attempt_started.elapsed().as_millis() as u64,
+            )
+        );
         let usage_ctx = UsageReportContext::from_state(
             &state,
             &key,
@@ -928,6 +1035,7 @@ pub async fn embeddings(
             model,
             started_at,
             upstream.status,
+            std::mem::take(&mut attempts),
         );
         return forward_response_with_channel(
             upstream,
@@ -1140,7 +1248,9 @@ async fn try_channel(
     original: &Bytes,
     plan: &mut Option<RewritePlan>,
     started_at: std::time::Instant,
+    attempts: &mut Vec<AttemptRecord>,
 ) -> Result<Response, ChannelFailure> {
+    let attempt_started = std::time::Instant::now();
     let body = outbound_body(model, &channel.upstream_model, original, plan).map_err(|e| {
         ChannelFailure::Transport {
             message: e,
@@ -1149,7 +1259,7 @@ async fn try_channel(
             upstream_model: channel.upstream_model.clone(),
         }
     })?;
-    let upstream = state
+    let upstream = match state
         .upstream
         .post_stream(
             &channel.endpoint,
@@ -1160,15 +1270,23 @@ async fn try_channel(
             body,
         )
         .await
-        .map_err(|e| {
+    {
+        Ok(u) => u,
+        Err(e) => {
             channel.mark_cooldown(COOLDOWN_TRANSIENT);
-            ChannelFailure::Transport {
+            let failure = ChannelFailure::Transport {
                 message: err_chain(&e),
                 channel_id: channel.id,
                 provider_id: channel.provider_id,
                 upstream_model: channel.upstream_model.clone(),
-            }
-        })?;
+            };
+            record_attempt!(
+                attempts,
+                AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+            );
+            return Err(failure);
+        }
+    };
     if should_failover(upstream.status, false) {
         // Read the status before draining: `read_error_body` consumes `upstream`.
         let status = upstream.status;
@@ -1179,18 +1297,38 @@ async fn try_channel(
         };
         channel.mark_cooldown(cooldown);
         let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
-        return Err(ChannelFailure::UpstreamStatus {
+        let failure = ChannelFailure::UpstreamStatus {
             status,
             body: err_bytes,
             channel_id: channel.id,
             provider_id: channel.provider_id,
             upstream_model: channel.upstream_model.clone(),
             base_url: channel.base_url.clone(),
-        });
+        };
+        record_attempt!(
+            attempts,
+            AttemptRecord::failed(&failure, attempt_started.elapsed().as_millis() as u64,)
+        );
+        return Err(failure);
     }
     channel.clear_cooldown();
-    let usage_ctx =
-        UsageReportContext::from_state(state, key, channel, model, started_at, upstream.status);
+    record_attempt!(
+        attempts,
+        AttemptRecord::succeeded(
+            channel,
+            upstream.status,
+            attempt_started.elapsed().as_millis() as u64,
+        )
+    );
+    let usage_ctx = UsageReportContext::from_state(
+        state,
+        key,
+        channel,
+        model,
+        started_at,
+        upstream.status,
+        std::mem::take(attempts),
+    );
     Ok(forward_response_with_channel(
         upstream,
         channel,
@@ -1388,6 +1526,89 @@ struct UsageReportContext {
     provider_name: String,
     started_at: std::time::Instant,
     status: u16,
+    /// Every upstream attempt of this request, in order, so callers can attribute
+    /// failures and cooldowns per channel instead of only seeing the final result.
+    attempts: Vec<AttemptRecord>,
+}
+
+/// One upstream attempt of a single inbound request.
+#[derive(Clone, Debug, serde::Serialize)]
+struct AttemptRecord {
+    channel_id: i64,
+    provider_id: i64,
+    upstream_model: String,
+    status: Option<u16>,
+    /// Upstream status text or transport error; `None` when the attempt succeeded.
+    error: Option<String>,
+    latency_ms: u64,
+    /// `true` when this failure put the channel into a cooldown window.
+    cooled_down: bool,
+}
+
+impl AttemptRecord {
+    fn succeeded(channel: &Channel, status: u16, latency_ms: u64) -> Self {
+        Self {
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+            status: Some(status),
+            error: None,
+            latency_ms,
+            cooled_down: false,
+        }
+    }
+
+    fn failed(failure: &ChannelFailure, latency_ms: u64) -> Self {
+        let (status, error) = match failure {
+            ChannelFailure::Transport { message, .. } => (None, message.clone()),
+            ChannelFailure::UpstreamStatus { status, body, .. } => (
+                Some(*status),
+                String::from_utf8_lossy(body)
+                    .chars()
+                    .take(512)
+                    .collect::<String>(),
+            ),
+        };
+        Self {
+            channel_id: failure.channel_id(),
+            provider_id: failure.provider_id(),
+            upstream_model: failure.upstream_model().to_string(),
+            status,
+            error: Some(error),
+            latency_ms,
+            cooled_down: failure.cools_down(),
+        }
+    }
+}
+
+impl ChannelFailure {
+    fn channel_id(&self) -> i64 {
+        match self {
+            ChannelFailure::Transport { channel_id, .. } => *channel_id,
+            ChannelFailure::UpstreamStatus { channel_id, .. } => *channel_id,
+        }
+    }
+
+    fn provider_id(&self) -> i64 {
+        match self {
+            ChannelFailure::Transport { provider_id, .. } => *provider_id,
+            ChannelFailure::UpstreamStatus { provider_id, .. } => *provider_id,
+        }
+    }
+
+    fn upstream_model(&self) -> &str {
+        match self {
+            ChannelFailure::Transport { upstream_model, .. } => upstream_model,
+            ChannelFailure::UpstreamStatus { upstream_model, .. } => upstream_model,
+        }
+    }
+
+    fn cools_down(&self) -> bool {
+        match self {
+            ChannelFailure::Transport { .. } => true,
+            ChannelFailure::UpstreamStatus { status, .. } => should_failover(*status, false),
+        }
+    }
 }
 
 impl UsageReportContext {
@@ -1398,6 +1619,7 @@ impl UsageReportContext {
         model: &str,
         started_at: std::time::Instant,
         status: u16,
+        attempts: Vec<AttemptRecord>,
     ) -> Option<Self> {
         let target = usage_webhook_target()?.clone();
         if !(200..300).contains(&status) {
@@ -1416,6 +1638,7 @@ impl UsageReportContext {
             provider_name,
             started_at,
             status,
+            attempts,
         })
     }
 
@@ -1432,6 +1655,7 @@ impl UsageReportContext {
             "tokens": stats.total_tokens,
             "latency": latency_ms,
             "status": self.status,
+            "attempts": self.attempts,
         });
         let Ok(body) = serde_json::to_vec(&payload).map(Bytes::from) else {
             return;

@@ -111,6 +111,14 @@ impl Channel {
         self.cooldown_until_ms.store(until, Ordering::Relaxed);
     }
 
+    /// Milliseconds left before this channel leaves its cooldown window (`0` =
+    /// healthy), so callers can report the exact remaining backoff.
+    #[inline]
+    pub fn cooldown_remaining_ms(&self) -> u64 {
+        let until = self.cooldown_until_ms.load(Ordering::Relaxed);
+        until.saturating_sub(monotonic_ms())
+    }
+
     /// Clear any active cooldown once a channel serves a request successfully.
     #[inline]
     pub fn clear_cooldown(&self) {
@@ -229,6 +237,17 @@ impl Store {
 
     pub fn provider_name(&self, provider_id: i64) -> Option<String> {
         self.inner.load().provider_names.get(&provider_id).cloned()
+    }
+
+    /// Look up a live routing channel (with its in-process cooldown state) by id.
+    pub fn channel_by_id(&self, id: i64) -> Option<Arc<Channel>> {
+        self.inner
+            .load()
+            .models
+            .values()
+            .flat_map(|route| route.channels.iter())
+            .find(|channel| channel.id == id)
+            .cloned()
     }
 }
 
@@ -568,6 +587,33 @@ api_keys:
         let record = store.authenticate(&key).expect("key");
         let channel = store.channels_for(&record, "gpt").expect("route")[0].clone();
         (store, channel, key)
+    }
+
+    /// Runtime cooldowns are visible to callers and can be set/cleared by channel id.
+    #[tokio::test]
+    async fn cooldown_is_visible_and_settable_through_the_snapshot() {
+        let (store, channel, _) = store_with_provider(&UpstreamShape::default()).await;
+
+        assert!(!channel.is_cooling_down());
+        assert_eq!(channel.cooldown_remaining_ms(), 0, "healthy => no backoff");
+
+        channel.mark_cooldown(Duration::from_secs(30));
+        let live = store.channel_by_id(channel.id).expect("channel by id");
+        assert!(live.is_cooling_down());
+        let remaining = live.cooldown_remaining_ms();
+        assert!(
+            (1..=30_000).contains(&remaining),
+            "remaining must stay inside the window, got {remaining}"
+        );
+
+        live.clear_cooldown();
+        let cleared = store.channel_by_id(channel.id).expect("channel by id");
+        assert!(!cleared.is_cooling_down());
+        assert_eq!(cleared.cooldown_remaining_ms(), 0);
+        assert!(
+            store.channel_by_id(-1).is_none(),
+            "unknown channel id => none"
+        );
     }
 
     /// The default shape must reproduce xlite's pre-feature request exactly.

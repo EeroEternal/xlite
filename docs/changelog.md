@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Per-attempt telemetry & caller-side cooldown control (`src/proxy.rs`, `src/store.rs`, `src/admin.rs`, `docs/manual/xlite.md`)**: the usage webhook payload now carries an ordered `attempts[]` trail (`channel_id`, `provider_id`, `upstream_model`, `status`, `error`, `latency_ms`, `cooled_down`) so a control plane can attribute failures, retries and cooldowns per channel instead of only seeing the final result; `GET /api/channels` reports each channel's live `cooling_down` / `cooldown_remaining_ms`, and `POST /api/channels/{id}/cooldown` sets or clears that cooldown (`0` clears, unknown ids return `404`).
+
 ## [0.7.3] - 2026-10-23
 
 - **JSON catalog import (`src/admin.rs`, `src/catalog/yaml.rs`, `docs/manual/xlite.md`)**: `POST /api/catalog/import` now accepts the catalog document itself (`providers`/`models`/`api_keys` arrays plus optional `replace`) in addition to the `{"yaml": "..."}` wrapper, so JSON-speaking control planes no longer have to stringify their payload; a body with neither form is rejected instead of silently wiping the catalog.

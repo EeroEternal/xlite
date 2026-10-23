@@ -45,6 +45,7 @@ pub fn router() -> Router<AppState> {
             "/api/channels/{id}",
             put(update_channel).delete(delete_channel),
         )
+        .route("/api/channels/{id}/cooldown", post(update_channel_cooldown))
         .route("/api/api-keys", get(list_api_keys).post(create_api_key))
         .route(
             "/api/api-keys/{id}",
@@ -530,7 +531,27 @@ async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Res
         return resp.into_response();
     }
     match state.store.catalog().list_channels().await {
-        Ok(rows) => ok(rows).into_response(),
+        Ok(rows) => {
+            // Catalog rows carry the persistent config; cooldowns live in this
+            // process, so report them alongside instead of hiding them.
+            let rows: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let mut value = serde_json::to_value(&row).unwrap_or(Value::Null);
+                    if let Some(channel) = state.store.channel_by_id(row.id)
+                        && let Some(obj) = value.as_object_mut()
+                    {
+                        obj.insert("cooling_down".into(), json!(channel.is_cooling_down()));
+                        obj.insert(
+                            "cooldown_remaining_ms".into(),
+                            json!(channel.cooldown_remaining_ms()),
+                        );
+                    }
+                    value
+                })
+                .collect();
+            ok(rows).into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response(),
     }
 }
@@ -611,6 +632,38 @@ async fn delete_channel(
         }
         Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct CooldownBody {
+    /// Milliseconds to deprioritize the channel for; `0` clears an active cooldown.
+    millis: u64,
+}
+
+/// Caller-side control over the runtime cooldown that failover applies to a channel.
+async fn update_channel_cooldown(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<CooldownBody>,
+) -> Response {
+    if let Some(resp) = require_session(&state, &headers) {
+        return resp.into_response();
+    }
+    let Some(channel) = state.store.channel_by_id(id) else {
+        return err(StatusCode::NOT_FOUND, "channel not found").into_response();
+    };
+    if body.millis == 0 {
+        channel.clear_cooldown();
+    } else {
+        channel.mark_cooldown(std::time::Duration::from_millis(body.millis));
+    }
+    ok(json!({
+        "channel_id": id,
+        "cooling_down": channel.is_cooling_down(),
+        "cooldown_remaining_ms": channel.cooldown_remaining_ms(),
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
