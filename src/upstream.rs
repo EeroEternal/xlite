@@ -173,6 +173,10 @@ fn build_tls_connector(
         .with_root_certificates(root_store)
         .with_no_client_auth();
     cfg.alpn_protocols = alpn_protocols;
+    // Opt-in only: with the default no-op key log, rustls skips the key derivation logging entirely.
+    if let Some(key_log) = crate::keylog::FileKeyLog::from_env() {
+        cfg.key_log = Arc::new(key_log);
+    }
     tokio_rustls::TlsConnector::from(Arc::new(cfg))
 }
 
