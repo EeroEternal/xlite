@@ -21,8 +21,8 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and minimum idle pool size for the native HTTP/1.1 pool (`H1Pool`) |
 | `XLITE_UPSTREAM_STREAM_CAP` | peer's `SETTINGS` | Client-side cap on concurrent streams per upstream HTTP/2 connection |
 | `XLITE_CATALOG_RELOAD_SECS` | `5` | Snapshot reload period; `0` freezes the snapshot (load test) |
-| `XLITE_UPSTREAM_STALL_TIMEOUT_SECS` | `0` (disabled) | End a response body with `TimedOut` after this many seconds of silence between chunks |
-| `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` | `0` (disabled) | Timeout waiting for upstream response headers after sending the request |
+| `XLITE_UPSTREAM_STALL_TIMEOUT_SECS` | `300` | End a response body with `TimedOut` after this many seconds of silence between chunks; `0` disables the watchdog. This is also the **longest a wedged body can hold its pool slot** — leaving it at `0` gives a stuck connection no self-healing path (issue #90) |
+| `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` | `120` | Timeout waiting for upstream response headers after sending the request; `0` disables it. Generous on purpose: long-reasoning models legitimately think for a minute before the first byte |
 | `XLITE_SSE_KEEPALIVE_SECS` | `15` | Emit `: keep-alive\n\n` SSE comment heartbeats during silent upstream pauses on `text/event-stream` responses (`0` disables) |
 | `XLITE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Maximum request body size for `/v1/chat/completions` (for long-context and multimodal prompts) |
 
@@ -193,8 +193,9 @@ requests" from "upstream never answered".
 
 ## Per-Provider Timeouts (`header_timeout_secs` / `stall_timeout_secs`)
 
-The global `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` / `XLITE_UPSTREAM_STALL_TIMEOUT_SECS`
-apply to every upstream. A provider may override them on its own:
+The global `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` (`120s`) /
+`XLITE_UPSTREAM_STALL_TIMEOUT_SECS` (`300s`) apply to every upstream and can be
+turned off with `0`. A provider may override them on its own:
 
 ```yaml
 providers:

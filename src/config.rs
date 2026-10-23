@@ -68,15 +68,29 @@ pub struct Config {
 
 /// Parse a `*_SECS` duration env value: a positive integer number of seconds, or
 /// [`Duration::ZERO`] (disabled) for unset / invalid / `0`.
-fn timeout_secs_or_zero(raw: Option<&str>) -> Duration {
-    raw.and_then(|v| v.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::ZERO)
+/// Parse a timeout that has a non-zero default: unset or unparsable keeps
+/// `default_secs`, an explicit `0` disables the timer.
+fn timeout_secs_or(default_secs: u64, raw: Option<&str>) -> Duration {
+    match raw.map(str::trim) {
+        Some(v) if !v.is_empty() => v
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .unwrap_or_else(|_| Duration::from_secs(default_secs)),
+        _ => Duration::from_secs(default_secs),
+    }
 }
 
 /// Parse `XLITE_SSE_KEEPALIVE_SECS`: `0` disables SSE keep-alive comments; a
 /// positive integer sets the heartbeat period in seconds; unset or invalid falls
 /// back to [`DEFAULT_SSE_KEEPALIVE_SECS`].
+/// Silent-body watchdog: a stream that produces nothing for this long is treated
+/// as dead. Non-zero by default because a wedged connection with both timers off
+/// has no self-healing path (issue #90).
+pub const DEFAULT_UPSTREAM_STALL_TIMEOUT_SECS: u64 = 300;
+/// Request → response-headers wait. Generous on purpose: long-reasoning models
+/// legitimately think for a minute before the first byte.
+pub const DEFAULT_UPSTREAM_HEADER_TIMEOUT_SECS: u64 = 120;
+
 fn sse_keepalive_secs(raw: Option<&str>) -> Duration {
     match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
         Some(0) => Duration::ZERO,
@@ -118,12 +132,14 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
-        let upstream_stall_timeout = timeout_secs_or_zero(
+        let upstream_stall_timeout = timeout_secs_or(
+            DEFAULT_UPSTREAM_STALL_TIMEOUT_SECS,
             std::env::var("XLITE_UPSTREAM_STALL_TIMEOUT_SECS")
                 .ok()
                 .as_deref(),
         );
-        let upstream_header_timeout = timeout_secs_or_zero(
+        let upstream_header_timeout = timeout_secs_or(
+            DEFAULT_UPSTREAM_HEADER_TIMEOUT_SECS,
             std::env::var("XLITE_UPSTREAM_HEADER_TIMEOUT_SECS")
                 .ok()
                 .as_deref(),
@@ -330,13 +346,21 @@ mod tests {
     }
 
     #[test]
-    fn timeout_secs_or_zero_is_off_unless_explicitly_set() {
-        assert_eq!(timeout_secs_or_zero(None), Duration::ZERO);
-        assert_eq!(timeout_secs_or_zero(Some("0")), Duration::ZERO);
-        assert_eq!(timeout_secs_or_zero(Some("abc")), Duration::ZERO);
-        assert_eq!(timeout_secs_or_zero(Some("-5")), Duration::ZERO);
-        assert_eq!(timeout_secs_or_zero(Some("120")), Duration::from_secs(120));
-        assert_eq!(timeout_secs_or_zero(Some(" 90 ")), Duration::from_secs(90));
+    fn timeout_secs_defaults_are_on_and_zero_disables() {
+        assert_eq!(timeout_secs_or(300, None), Duration::from_secs(300));
+        assert_eq!(timeout_secs_or(300, Some("")), Duration::from_secs(300));
+        assert_eq!(
+            timeout_secs_or(300, Some("abc")),
+            Duration::from_secs(300),
+            "unparsable keeps the safe default"
+        );
+        assert_eq!(
+            timeout_secs_or(300, Some("0")),
+            Duration::ZERO,
+            "explicit 0 still disables"
+        );
+        assert_eq!(timeout_secs_or(300, Some("120")), Duration::from_secs(120));
+        assert_eq!(timeout_secs_or(300, Some(" 90 ")), Duration::from_secs(90));
     }
 
     #[test]
