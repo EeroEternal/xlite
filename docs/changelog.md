@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-23
+
 - **JSON catalog import (`src/admin.rs`, `src/catalog/yaml.rs`, `docs/manual/xlite.md`)**: `POST /api/catalog/import` now accepts the catalog document itself (`providers`/`models`/`api_keys` arrays plus optional `replace`) in addition to the `{"yaml": "..."}` wrapper, so JSON-speaking control planes no longer have to stringify their payload; a body with neither form is rejected instead of silently wiping the catalog.
 
 ## [0.7.2] - 2026-10-21
