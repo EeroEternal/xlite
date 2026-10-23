@@ -834,6 +834,15 @@ impl Upstream {
                     return Err(H2SendError::Transport(anyhow::anyhow!("h2 response: {e}")));
                 }
                 Err(_) => {
+                    // The connection just proved it cannot deliver headers. Keep it out of
+                    // the pool so the next acquire dials a fresh one instead of inheriting
+                    // the stall; in-flight streams on it keep their own lease and finish.
+                    lease.evict();
+                    tracing::debug!(
+                        target: "xlite.timing",
+                        timeout_secs = self.header_timeout.as_secs(),
+                        "evicted upstream connection after header timeout"
+                    );
                     return Err(H2SendError::HeaderTimeout(anyhow::anyhow!(
                         "upstream returned no response headers within {}s",
                         self.header_timeout.as_secs()
@@ -1792,6 +1801,97 @@ mod tests {
         assert_eq!(
             upstream_url("http://h:1", "api/v1/chat"),
             "http://h:1/api/v1/chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn header_timeout_evicts_the_connection_so_the_next_request_redials() {
+        // h2c upstream that accepts every stream and never answers: the request can only
+        // end by header timeout.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_bg = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                accepts_bg.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let Ok(mut conn) = h2::server::handshake(socket).await else {
+                        return;
+                    };
+                    let mut parked = Vec::new();
+                    while let Some(Ok((_req, respond))) = conn.accept().await {
+                        parked.push(respond);
+                    }
+                });
+            }
+        });
+
+        let cfg = Config {
+            database_url: "memory".into(),
+            redis_url: None,
+            listen: "127.0.0.1:0".into(),
+            h2c: true,
+            admin_password: "x".into(),
+            session_secret: None,
+            max_conns_per_host: 3,
+            upstream_stream_cap: 250,
+            catalog_reload_secs: 0,
+            upstream_stall_timeout: Duration::ZERO,
+            upstream_header_timeout: Duration::from_secs(1),
+            sse_keepalive_interval: Duration::ZERO,
+            max_body_bytes: crate::config::DEFAULT_MAX_BODY_BYTES,
+        };
+        let up = Upstream::new(&cfg);
+        let authority = format!("127.0.0.1:{}", addr.port());
+        let endpoint = format!("http://{authority}/v1/chat/completions");
+        let body = Bytes::from_static(b"{\"model\":\"m\"}");
+
+        let err = up
+            .post_stream(
+                &endpoint,
+                &authority,
+                "/v1/chat/completions",
+                None,
+                &[],
+                body.clone(),
+            )
+            .await
+            .err()
+            .expect("silent upstream must end in a header timeout");
+        assert!(
+            err.to_string()
+                .contains("upstream returned no response headers within 1s"),
+            "{err}"
+        );
+        let conns = up
+            .pool_stats()
+            .into_iter()
+            .find(|(host, _)| host == &authority)
+            .map(|(_, stats)| stats.connections)
+            .unwrap_or(0);
+        assert_eq!(conns, 0, "timed-out connection must leave the pool");
+
+        // The point of the eviction: the next attempt dials instead of reusing the corpse.
+        let _ = up
+            .post_stream(
+                &endpoint,
+                &authority,
+                "/v1/chat/completions",
+                None,
+                &[],
+                body,
+            )
+            .await
+            .err()
+            .expect("second attempt times out too");
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            2,
+            "second request must dial again"
         );
     }
 
