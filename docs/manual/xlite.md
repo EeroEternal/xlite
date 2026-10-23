@@ -38,7 +38,7 @@ There is no strategy field. For a public model, xlite picks a channel in the low
 
 See `examples/catalog.yaml`. Commands: `xlite import <file.yaml>` (optional `--replace`) and `xlite export [file.yaml]`. Export omits user API key plaintext.
 
-Any external application (Node.js, Python, Go, Java, etc.) can manage `xlite` over standard HTTP using `Authorization: Bearer <ADMIN_PASSWORD>`:
+Any external application (Node.js, Python, Go, Java, etc.) can manage `xlite` over standard HTTP using `Authorization: Bearer <ADMIN_PASSWORD>`. Both bodies below are equivalent — a `yaml` string wrapper, or the catalog document itself as JSON:
 
 ```http
 POST /api/catalog/import HTTP/1.1
@@ -48,9 +48,19 @@ Content-Type: application/json
 
 {
   "replace": true,
-  "yaml": "version: 1\nproviders:\n  - name: openai:primary\n    base_url: https://api.openai.com/v1\n    api_key: sk-upstream-...\n    enabled: true\nmodels:\n  - name: gpt-5.4\n    enabled: true\n    channels:\n      - provider: openai:primary\n        upstream_model: gpt-5.4\n        weight: 100\n        priority: 0\n        enabled: true\napi_keys:\n  - name: user-key:u_12345\n    key: sk-client-...\n    enabled: true\n    models:\n      - gpt-5.4\n"
+  "providers": [{"name": "openai:primary", "base_url": "https://api.openai.com/v1", "api_key": "sk-upstream-...", "enabled": true}],
+  "models": [
+    {
+      "name": "gpt-5.4",
+      "enabled": true,
+      "channels": [{"provider": "openai:primary", "upstream_model": "gpt-5.4", "weight": 100, "priority": 0, "enabled": true}]
+    }
+  ],
+  "api_keys": [{"name": "user-key:u_12345", "key": "sk-client-...", "enabled": true, "models": ["gpt-5.4"]}]
 }
 ```
+
+(The same document with `"yaml": "<catalog text>"` instead of the three arrays is accepted for YAML/YAML-flow callers.)
 
 ## Async Usage & Billing Webhook (`XLITE_USAGE_WEBHOOK_URL`)
 

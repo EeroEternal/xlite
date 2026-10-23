@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::{self, Sessions};
-use crate::catalog::yaml::{self, ImportMode};
+use crate::catalog::yaml::{self, CatalogYaml, ImportMode};
 use crate::catalog::{HeaderPair, UpstreamShape};
 use crate::config::Config;
 use crate::hash::{generate_api_key, hash_api_key, key_prefix, mask_api_key};
@@ -122,13 +122,6 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     ok(json!({ "username": "admin", "role_id": 1 })).into_response()
 }
 
-#[derive(Deserialize)]
-struct ImportBody {
-    yaml: String,
-    #[serde(default)]
-    replace: bool,
-}
-
 async fn export_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
@@ -142,17 +135,35 @@ async fn export_catalog(State(state): State<AppState>, headers: HeaderMap) -> Re
 async fn import_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<ImportBody>,
+    Json(body): Json<Value>,
 ) -> Response {
     if let Some(resp) = require_session(&state, &headers) {
         return resp.into_response();
     }
-    let mode = if body.replace {
+    let mode = if body.get("replace").and_then(Value::as_bool) == Some(true) {
         ImportMode::Replace
     } else {
         ImportMode::Merge
     };
-    match yaml::import_yaml(state.store.catalog(), &body.yaml, mode).await {
+    // Accept either `{"yaml": "<catalog text>"}` or the catalog document itself as JSON.
+    let has_doc = ["providers", "models", "api_keys"]
+        .iter()
+        .any(|key| body.get(key).is_some());
+    let result = match body.get("yaml").and_then(Value::as_str) {
+        Some(text) => yaml::import_yaml(state.store.catalog(), text, mode).await,
+        None if has_doc => match serde_json::from_value::<CatalogYaml>(body) {
+            Ok(doc) => yaml::import_doc(state.store.catalog(), doc, mode).await,
+            Err(e) => return err(StatusCode::BAD_REQUEST, &e.to_string()).into_response(),
+        },
+        None => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "expected {\"yaml\": \"...\"} or {\"providers\": [...], \"models\": [...], \"api_keys\": [...]}",
+            )
+            .into_response();
+        }
+    };
+    match result {
         Ok(report) => {
             let _ = state.store.reload().await;
             ok(report).into_response()

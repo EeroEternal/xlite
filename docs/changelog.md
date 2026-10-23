@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **JSON catalog import (`src/admin.rs`, `src/catalog/yaml.rs`, `docs/manual/xlite.md`)**: `POST /api/catalog/import` now accepts the catalog document itself (`providers`/`models`/`api_keys` arrays plus optional `replace`) in addition to the `{"yaml": "..."}` wrapper, so JSON-speaking control planes no longer have to stringify their payload; a body with neither form is rejected instead of silently wiping the catalog.
+
 ## [0.7.2] - 2026-10-21
 
 - **Automatic `stream_options.include_usage` injection & developer documentation (`src/proxy.rs`, `src/protocol.rs`, `README.md`, `docs/`)**: Automatically inject `"stream_options": {"include_usage": true}` on streaming `/v1/chat/completions` (via zero-DOM flat buffer splicing when `XLITE_USAGE_WEBHOOK_URL` is configured) and translated streaming `/v1/messages` / `/v1/responses` requests so upstream providers emit final SSE token usage chunks even when clients omit `stream_options`; updated `README.md`, architecture docs, operator manual, and `deploy/env.example` with the complete `v0.7.x` headless gateway & usage webhook contract.

@@ -483,4 +483,24 @@ api_keys: []
             .expect_err("reserved header must be rejected");
         assert!(err.to_string().contains("reserved"), "{err}");
     }
+
+    /// The same catalog may arrive as a plain JSON document over HTTP, with a
+    /// sibling `replace` flag that is not part of the document itself.
+    #[tokio::test]
+    async fn json_catalog_document_imports_with_sibling_replace_flag() {
+        let catalog = memory_catalog().await;
+        let doc: CatalogYaml = serde_json::from_value(serde_json::json!({
+            "replace": true,
+            "providers": [{"name": "p", "base_url": "http://h", "api_key": "sk-1"}],
+            "models": [{"name": "m", "channels": [{"provider": "p", "upstream_model": "u"}]}],
+            "api_keys": [{"name": "k", "key": "sk-client-1", "models": ["m"]}]
+        }))
+        .expect("json catalog document");
+        import_doc(&catalog, doc, ImportMode::Replace)
+            .await
+            .expect("import");
+        assert_eq!(catalog.list_providers().await.expect("p").len(), 1);
+        assert_eq!(catalog.list_models().await.expect("m").len(), 1);
+        assert_eq!(catalog.list_api_keys().await.expect("k").len(), 1);
+    }
 }
