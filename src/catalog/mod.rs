@@ -181,6 +181,7 @@ impl Catalog {
         weight: i32,
         priority: i32,
         enabled: bool,
+        max_concurrency: Option<i64>,
     ) -> Result<Channel> {
         match &self.inner {
             Inner::Sqlite(c) => {
@@ -191,6 +192,7 @@ impl Catalog {
                     weight,
                     priority,
                     enabled,
+                    max_concurrency,
                 )
                 .await
             }
@@ -202,6 +204,7 @@ impl Catalog {
                     weight,
                     priority,
                     enabled,
+                    max_concurrency,
                 )
                 .await
             }
@@ -217,6 +220,7 @@ impl Catalog {
         weight: i32,
         priority: i32,
         enabled: bool,
+        max_concurrency: Option<i64>,
     ) -> Result<Option<Channel>> {
         match &self.inner {
             Inner::Sqlite(c) => {
@@ -228,6 +232,7 @@ impl Catalog {
                     weight,
                     priority,
                     enabled,
+                    max_concurrency,
                 )
                 .await
             }
@@ -240,6 +245,7 @@ impl Catalog {
                     weight,
                     priority,
                     enabled,
+                    max_concurrency,
                 )
                 .await
             }
@@ -353,7 +359,7 @@ mod tests {
             .expect("provider");
         let model = catalog.create_model("gpt", true).await.expect("model");
         let channel = catalog
-            .create_channel(model.id, provider.id, "gpt", 2, 0, true)
+            .create_channel(model.id, provider.id, "gpt", 2, 0, true, None)
             .await
             .expect("channel");
         assert_eq!(channel.weight, 2);

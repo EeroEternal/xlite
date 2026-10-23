@@ -418,6 +418,20 @@ pub async fn anthropic_messages(
             last_failure = failure;
             continue;
         }
+        let Some(slot) = channel.try_slot() else {
+            let failure = ChannelFailure::Shed {
+                message: format!(
+                    "channel max_concurrency ({}) reached",
+                    channel.max_concurrency.unwrap_or(0)
+                ),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            };
+            attempts.failed(&failure, 0);
+            last_failure = failure;
+            continue;
+        };
         let out_body = match build_openai_chat_body_from_anthropic(&channel, &request) {
             Ok(b) => b,
             Err(e) => return anthropic_bad_request(&e),
@@ -494,7 +508,10 @@ pub async fn anthropic_messages(
             attempts.take(),
         );
         if request.stream {
-            let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+            let guarded = StallGuard::new(
+                SlotStream::new(upstream.body, slot),
+                state.config.upstream_stall_timeout,
+            );
             let observed = UsageStream::new(guarded, true, usage_ctx);
             let anthropic_sse =
                 translate_openai_sse_to_anthropic_stream(observed, request.model.clone());
@@ -514,7 +531,10 @@ pub async fn anthropic_messages(
             .body(Body::from_stream(with_ka))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
-        let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+        let guarded = StallGuard::new(
+            SlotStream::new(upstream.body, slot),
+            state.config.upstream_stall_timeout,
+        );
         let raw_bytes = match collect_upstream_body(guarded, state.config.max_body_bytes).await {
             Ok(b) => b,
             Err(e) => {
@@ -625,6 +645,20 @@ pub async fn responses(
             last_failure = failure;
             continue;
         }
+        let Some(slot) = channel.try_slot() else {
+            let failure = ChannelFailure::Shed {
+                message: format!(
+                    "channel max_concurrency ({}) reached",
+                    channel.max_concurrency.unwrap_or(0)
+                ),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            };
+            attempts.failed(&failure, 0);
+            last_failure = failure;
+            continue;
+        };
         let out_body = match build_openai_responses_body(&channel, &request) {
             Ok(b) => b,
             Err(e) => {
@@ -724,6 +758,7 @@ pub async fn responses(
             state.config.upstream_stall_timeout,
             state.config.sse_keepalive_interval,
             usage_ctx,
+            slot,
         );
     }
     last_failure.into_openai_response()
@@ -732,7 +767,7 @@ pub async fn responses(
 async fn try_responses_via_chat(
     state: &AppState,
     key: &crate::store::KeyRecord,
-    channel: &Channel,
+    channel: &std::sync::Arc<Channel>,
     request: &ParsedResponsesRequest,
     started_at: std::time::Instant,
     attempts: &mut AttemptLog,
@@ -749,6 +784,19 @@ async fn try_responses_via_chat(
         attempts.failed(&failure, 0);
         return Err(failure);
     }
+    let Some(slot) = channel.try_slot() else {
+        let failure = ChannelFailure::Shed {
+            message: format!(
+                "channel max_concurrency ({}) reached",
+                channel.max_concurrency.unwrap_or(0)
+            ),
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        };
+        attempts.failed(&failure, 0);
+        return Err(failure);
+    };
     let chat_body = build_openai_chat_body_from_responses(channel, request).map_err(|e| {
         ChannelFailure::Transport {
             message: e,
@@ -827,7 +875,10 @@ async fn try_responses_via_chat(
         attempts.take(),
     );
     if request.stream {
-        let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+        let guarded = StallGuard::new(
+            SlotStream::new(upstream.body, slot),
+            state.config.upstream_stall_timeout,
+        );
         let observed = UsageStream::new(guarded, true, usage_ctx);
         let resp_sse = translate_openai_sse_to_responses_stream(observed, request.model.clone());
         let with_ka = StallGuard::with_keepalive(
@@ -846,7 +897,10 @@ async fn try_responses_via_chat(
         .body(Body::from_stream(with_ka))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()));
     }
-    let guarded = StallGuard::new(upstream.body, state.config.upstream_stall_timeout);
+    let guarded = StallGuard::new(
+        SlotStream::new(upstream.body, slot),
+        state.config.upstream_stall_timeout,
+    );
     let raw_bytes = collect_upstream_body(guarded, state.config.max_body_bytes)
         .await
         .map_err(|e| ChannelFailure::Transport {
@@ -954,6 +1008,20 @@ pub async fn embeddings(
             last_failure = failure;
             continue;
         }
+        let Some(slot) = channel.try_slot() else {
+            let failure = ChannelFailure::Shed {
+                message: format!(
+                    "channel max_concurrency ({}) reached",
+                    channel.max_concurrency.unwrap_or(0)
+                ),
+                channel_id: channel.id,
+                provider_id: channel.provider_id,
+                upstream_model: channel.upstream_model.clone(),
+            };
+            attempts.failed(&failure, 0);
+            last_failure = failure;
+            continue;
+        };
         let out_body = match outbound_body(model, &channel.upstream_model, &body, &mut plan) {
             Ok(b) => b,
             Err(e) => {
@@ -1031,6 +1099,7 @@ pub async fn embeddings(
             state.config.upstream_stall_timeout,
             state.config.sse_keepalive_interval,
             usage_ctx,
+            slot,
         );
     }
     last_failure.into_openai_response()
@@ -1332,7 +1401,7 @@ fn attach_failure_headers(
 async fn try_channel(
     state: &AppState,
     key: &crate::store::KeyRecord,
-    channel: &Channel,
+    channel: &std::sync::Arc<Channel>,
     model: &str,
     original: &Bytes,
     plan: &mut Option<RewritePlan>,
@@ -1351,6 +1420,19 @@ async fn try_channel(
         attempts.failed(&failure, 0);
         return Err(failure);
     }
+    let Some(slot) = channel.try_slot() else {
+        let failure = ChannelFailure::Shed {
+            message: format!(
+                "channel max_concurrency ({}) reached",
+                channel.max_concurrency.unwrap_or(0)
+            ),
+            channel_id: channel.id,
+            provider_id: channel.provider_id,
+            upstream_model: channel.upstream_model.clone(),
+        };
+        attempts.failed(&failure, 0);
+        return Err(failure);
+    };
     let body = outbound_body(model, &channel.upstream_model, original, plan).map_err(|e| {
         ChannelFailure::Transport {
             message: e,
@@ -1422,6 +1504,7 @@ async fn try_channel(
         state.config.upstream_stall_timeout,
         state.config.sse_keepalive_interval,
         usage_ctx,
+        slot,
     ))
 }
 
@@ -1438,6 +1521,7 @@ fn forward_response_with_channel(
     stall_timeout: Duration,
     sse_keepalive_interval: Duration,
     usage_ctx: Option<UsageReportContext>,
+    slot: crate::store::ChannelSlot,
 ) -> Response {
     let builder = attach_channel_headers(
         Response::builder()
@@ -1450,6 +1534,7 @@ fn forward_response_with_channel(
         stall_timeout,
         sse_keepalive_interval,
         usage_ctx,
+        slot,
     )
 }
 
@@ -1459,6 +1544,7 @@ fn finish_forward_response(
     stall_timeout: Duration,
     sse_keepalive_interval: Duration,
     usage_ctx: Option<UsageReportContext>,
+    slot: crate::store::ChannelSlot,
 ) -> Response {
     let content_type = upstream
         .content_type
@@ -1478,7 +1564,7 @@ fn finish_forward_response(
     } else {
         Duration::ZERO
     };
-    let observed = UsageStream::new(upstream.body, sse, usage_ctx);
+    let observed = UsageStream::new(SlotStream::new(upstream.body, slot), sse, usage_ctx);
     let body = StallGuard::with_keepalive(observed, stall_timeout, keepalive);
     builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
         (
@@ -1867,6 +1953,30 @@ impl UsageReportContext {
         let mut stats = UsageStats::default();
         stats.inspect_json_bytes(raw_bytes);
         self.emit(stats);
+    }
+}
+
+/// Holds a channel concurrency slot for exactly as long as its body lives, so a
+/// streaming response keeps the slot and a dropped client releases it immediately.
+struct SlotStream<S> {
+    inner: S,
+    _slot: crate::store::ChannelSlot,
+}
+
+impl<S> SlotStream<S> {
+    fn new(inner: S, slot: crate::store::ChannelSlot) -> Self {
+        Self { inner, _slot: slot }
+    }
+}
+
+impl<S> Stream for SlotStream<S>
+where
+    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
+{
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().inner).poll_next(cx)
     }
 }
 

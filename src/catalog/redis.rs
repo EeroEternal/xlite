@@ -173,6 +173,7 @@ impl RedisCatalog {
                     upstream_model: ch.upstream_model.clone(),
                     weight: ch.weight,
                     priority: ch.priority,
+                    max_concurrency: ch.max_concurrency,
                     upstream: provider.upstream.clone(),
                 });
         }
@@ -343,6 +344,7 @@ impl RedisCatalog {
         weight: i32,
         priority: i32,
         enabled: bool,
+        max_concurrency: Option<i64>,
     ) -> Result<Channel> {
         self.mutate(|dump| {
             if !dump.models.iter().any(|m| m.id == model_id) {
@@ -359,6 +361,7 @@ impl RedisCatalog {
                 weight: weight.max(1),
                 priority,
                 enabled,
+                max_concurrency,
             };
             dump.channels.push(row.clone());
             Ok(row)
@@ -375,6 +378,7 @@ impl RedisCatalog {
         weight: i32,
         priority: i32,
         enabled: bool,
+        max_concurrency: Option<i64>,
     ) -> Result<Option<Channel>> {
         self.mutate(|dump| {
             if !dump.models.iter().any(|m| m.id == model_id) {
@@ -392,6 +396,7 @@ impl RedisCatalog {
             row.weight = weight.max(1);
             row.priority = priority;
             row.enabled = enabled;
+            row.max_concurrency = max_concurrency;
             Ok(Some(row.clone()))
         })
         .await

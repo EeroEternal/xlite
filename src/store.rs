@@ -5,7 +5,7 @@
 use anyhow::Result;
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,10 @@ pub struct Channel {
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
+    /// In-flight cap for this channel; `None` = bounded only by the upstream pool.
+    pub max_concurrency: Option<usize>,
+    /// Requests currently holding this channel (only maintained when a cap is set).
+    in_flight: AtomicUsize,
     /// Lock-free monotonic deadline (`monotonic_ms()`) until which this channel
     /// is deprioritized after a pre-first-byte upstream failure (`402`, `429`,
     /// `5xx`, or dial/header timeout). `0` means healthy.
@@ -66,6 +70,8 @@ impl Clone for Channel {
             upstream_model: self.upstream_model.clone(),
             weight: self.weight,
             priority: self.priority,
+            max_concurrency: self.max_concurrency,
+            in_flight: AtomicUsize::new(self.in_flight.load(Ordering::Relaxed)),
             cooldown_until_ms: AtomicU64::new(self.cooldown_until_ms.load(Ordering::Relaxed)),
         }
     }
@@ -85,6 +91,7 @@ impl PartialEq for Channel {
             && self.upstream_model == other.upstream_model
             && self.weight == other.weight
             && self.priority == other.priority
+            && self.max_concurrency == other.max_concurrency
     }
 }
 
@@ -124,6 +131,47 @@ impl Channel {
     pub fn clear_cooldown(&self) {
         if self.cooldown_until_ms.load(Ordering::Relaxed) != 0 {
             self.cooldown_until_ms.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// In-flight requests on this channel (load, not history).
+    #[inline]
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Reserve one of this channel's concurrency slots.
+    ///
+    /// `None` when the channel is at `max_concurrency`; the slot is returned to
+    /// the channel when the guard drops, i.e. when the response body is done or
+    /// the attempt was dropped. Channels without a cap pay no atomic RMW at all.
+    pub fn try_slot(self: &Arc<Self>) -> Option<ChannelSlot> {
+        let Some(cap) = self.max_concurrency else {
+            return Some(ChannelSlot(None));
+        };
+        loop {
+            let current = self.in_flight.load(Ordering::Relaxed);
+            if current >= cap {
+                return None;
+            }
+            if self
+                .in_flight
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(ChannelSlot(Some(Arc::clone(self))));
+            }
+        }
+    }
+}
+
+/// RAII holder of a channel concurrency slot.
+pub struct ChannelSlot(Option<Arc<Channel>>);
+
+impl Drop for ChannelSlot {
+    fn drop(&mut self) {
+        if let Some(channel) = &self.0 {
+            channel.in_flight.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -386,6 +434,11 @@ fn to_channel(c: RoutingChannel) -> Result<Channel> {
         upstream_model: c.upstream_model,
         weight: c.weight,
         priority: c.priority,
+        max_concurrency: c
+            .max_concurrency
+            .and_then(|cap| usize::try_from(cap).ok())
+            .filter(|cap| *cap > 0),
+        in_flight: AtomicUsize::new(0),
         cooldown_until_ms: AtomicU64::new(0),
     })
 }
@@ -478,6 +531,8 @@ mod tests {
             upstream_model: "m".into(),
             weight: w,
             priority: p,
+            max_concurrency: None,
+            in_flight: AtomicUsize::new(0),
             cooldown_until_ms: AtomicU64::new(0),
         })
     }
@@ -620,7 +675,7 @@ api_keys:
             .expect("provider");
         let model = catalog.create_model("gpt", true).await.expect("model");
         catalog
-            .create_channel(model.id, provider.id, "gpt", 1, 0, true)
+            .create_channel(model.id, provider.id, "gpt", 1, 0, true, None)
             .await
             .expect("channel");
         let key = generate_api_key();
@@ -660,6 +715,52 @@ api_keys:
             store.channel_by_id(-1).is_none(),
             "unknown channel id => none"
         );
+    }
+
+    /// A channel cap admits exactly `max_concurrency` live slots and the guard
+    /// returns them on drop, without ever counting uncapped channels.
+    #[tokio::test]
+    async fn channel_concurrency_cap_counts_live_slots() {
+        let (store, _, _) = store_with_provider(&UpstreamShape::default()).await;
+        let mut rows = store.catalog().list_channels().await.expect("channels");
+        let row = rows.remove(0);
+        store
+            .catalog()
+            .update_channel(
+                row.id,
+                row.model_id,
+                row.provider_id,
+                &row.upstream_model,
+                row.weight,
+                row.priority,
+                row.enabled,
+                Some(2),
+            )
+            .await
+            .expect("update")
+            .expect("channel");
+        store.reload().await.expect("reload");
+
+        let live = store.channel_by_id(row.id).expect("channel");
+        assert_eq!(live.max_concurrency, Some(2));
+
+        let first = live.try_slot().expect("first slot");
+        let second = live.try_slot().expect("second slot");
+        assert!(live.try_slot().is_none(), "cap reached");
+        assert_eq!(live.in_flight(), 2);
+
+        drop(first);
+        assert_eq!(live.in_flight(), 1);
+        assert!(live.try_slot().is_some(), "a dropped body frees the slot");
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn channel_without_a_cap_admits_everything_and_counts_nothing() {
+        let (_, channel, _) = store_with_provider(&UpstreamShape::default()).await;
+        let slots: Vec<_> = (0..64).filter_map(|_| channel.try_slot()).collect();
+        assert_eq!(slots.len(), 64);
+        assert_eq!(channel.in_flight(), 0, "uncapped channels are not counted");
     }
 
     /// An operator cooldown must outlive a reload that changes the channel's
@@ -767,7 +868,7 @@ api_keys:
         let model = store.catalog().list_models().await.expect("models");
         store
             .catalog()
-            .create_channel(model[0].id, bad_provider.id, "gpt", 1, 0, true)
+            .create_channel(model[0].id, bad_provider.id, "gpt", 1, 0, true, None)
             .await
             .expect("channel");
 
@@ -840,7 +941,7 @@ api_keys:
         let models = store.catalog().list_models().await.expect("models");
         store
             .catalog()
-            .create_channel(models[0].id, p2.id, "gpt", 1, 1, true)
+            .create_channel(models[0].id, p2.id, "gpt", 1, 1, true, None)
             .await
             .expect("create backup channel");
         store.reload().await.expect("reload after adding backup");

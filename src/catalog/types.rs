@@ -85,6 +85,10 @@ pub struct Channel {
     pub weight: i32,
     pub priority: i32,
     pub enabled: bool,
+    /// In-flight cap for this channel; `None` means "only the upstream pool
+    /// bounds it". Enforced at request admission, not by queueing.
+    #[serde(default)]
+    pub max_concurrency: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +120,8 @@ pub struct RoutingChannel {
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
+    /// In-flight cap carried into the snapshot; `None` = unbounded.
+    pub max_concurrency: Option<i64>,
     /// Provider upstream shape, carried through unparsed: the snapshot build is
     /// the single place that validates and precomputes it.
     pub upstream: UpstreamShape,

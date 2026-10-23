@@ -78,6 +78,9 @@ pub struct ChannelYaml {
     pub priority: i32,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// In-flight cap for this channel; omitted means "pool-bounded only".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +167,7 @@ pub async fn export_doc(catalog: &Catalog) -> Result<CatalogYaml> {
                     weight: c.weight,
                     priority: c.priority,
                     enabled: c.enabled,
+                    max_concurrency: c.max_concurrency,
                 })
             })
             .collect();
@@ -309,6 +313,7 @@ pub async fn import_doc(
                         ch.weight,
                         ch.priority,
                         ch.enabled,
+                        ch.max_concurrency,
                     )
                     .await?;
                 report.channels.updated += 1;
@@ -321,6 +326,7 @@ pub async fn import_doc(
                         ch.weight,
                         ch.priority,
                         ch.enabled,
+                        ch.max_concurrency,
                     )
                     .await?;
                 report.channels.created += 1;

@@ -167,6 +167,7 @@ impl SqliteCatalog {
         let channels = sqlx::query(
             r#"
             SELECT c.id, c.model_id, c.provider_id, c.upstream_model, c.weight, c.priority,
+                   c.max_concurrency,
                    p.name AS provider_name, p.base_url, p.api_key, p.auth_scheme, p.auth_header, p.extra_headers, p.chat_path
             FROM channels c
             JOIN providers p ON p.id = c.provider_id
@@ -194,6 +195,7 @@ impl SqliteCatalog {
                 upstream_model: row.get("upstream_model"),
                 weight: row.get("weight"),
                 priority: row.get("priority"),
+                max_concurrency: row.get("max_concurrency"),
                 upstream: UpstreamShape {
                     auth_scheme: row.get("auth_scheme"),
                     auth_header: row.get("auth_header"),
@@ -368,7 +370,8 @@ impl SqliteCatalog {
 
     pub async fn list_channels(&self) -> Result<Vec<Channel>> {
         Ok(sqlx::query_as::<_, Channel>(
-            "SELECT id, model_id, provider_id, upstream_model, weight, priority, enabled
+            "SELECT id, model_id, provider_id, upstream_model, weight, priority, enabled,
+                    max_concurrency
              FROM channels ORDER BY priority ASC, id ASC",
         )
         .fetch_all(&self.pool)
@@ -383,11 +386,14 @@ impl SqliteCatalog {
         weight: i32,
         priority: i32,
         enabled: bool,
+        max_concurrency: Option<i64>,
     ) -> Result<Channel> {
         Ok(sqlx::query_as::<_, Channel>(
-            "INSERT INTO channels (model_id, provider_id, upstream_model, weight, priority, enabled)
-             VALUES (?, ?, ?, ?, ?, ?)
-             RETURNING id, model_id, provider_id, upstream_model, weight, priority, enabled",
+            "INSERT INTO channels
+                (model_id, provider_id, upstream_model, weight, priority, enabled, max_concurrency)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             RETURNING id, model_id, provider_id, upstream_model, weight, priority, enabled,
+                       max_concurrency",
         )
         .bind(model_id)
         .bind(provider_id)
@@ -395,6 +401,7 @@ impl SqliteCatalog {
         .bind(weight.max(1))
         .bind(priority)
         .bind(enabled)
+        .bind(max_concurrency)
         .fetch_one(&self.pool)
         .await?)
     }
@@ -408,12 +415,14 @@ impl SqliteCatalog {
         weight: i32,
         priority: i32,
         enabled: bool,
+        max_concurrency: Option<i64>,
     ) -> Result<Option<Channel>> {
         Ok(sqlx::query_as::<_, Channel>(
             "UPDATE channels SET model_id = ?, provider_id = ?, upstream_model = ?,
-                weight = ?, priority = ?, enabled = ?
+                weight = ?, priority = ?, enabled = ?, max_concurrency = ?
              WHERE id = ?
-             RETURNING id, model_id, provider_id, upstream_model, weight, priority, enabled",
+             RETURNING id, model_id, provider_id, upstream_model, weight, priority, enabled,
+                       max_concurrency",
         )
         .bind(model_id)
         .bind(provider_id)
@@ -421,6 +430,7 @@ impl SqliteCatalog {
         .bind(weight.max(1))
         .bind(priority)
         .bind(enabled)
+        .bind(max_concurrency)
         .bind(id)
         .fetch_optional(&self.pool)
         .await?)

@@ -536,6 +536,9 @@ struct ChannelBody {
     priority: i32,
     #[serde(default = "default_true")]
     enabled: bool,
+    /// In-flight cap; omitted or `null` leaves the channel pool-bounded.
+    #[serde(default)]
+    max_concurrency: Option<i64>,
 }
 
 fn default_weight() -> i32 {
@@ -568,6 +571,7 @@ async fn list_channels(State(state): State<AppState>, headers: HeaderMap) -> Res
                             "cooldown_remaining_ms".into(),
                             json!(channel.cooldown_remaining_ms()),
                         );
+                        obj.insert("in_flight".into(), json!(channel.in_flight()));
                         if let Some(stats) = pools.get(&channel.authority) {
                             obj.insert("pool".into(), channel_pool_view(stats, max_conns));
                         }
@@ -599,6 +603,7 @@ async fn create_channel(
             body.weight,
             body.priority,
             body.enabled,
+            body.max_concurrency,
         )
         .await
     {
@@ -630,6 +635,7 @@ async fn update_channel(
             body.weight,
             body.priority,
             body.enabled,
+            body.max_concurrency,
         )
         .await
     {

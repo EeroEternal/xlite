@@ -55,7 +55,7 @@ Content-Type: application/json
     {
       "name": "gpt-5.4",
       "enabled": true,
-      "channels": [{"provider": "openai:primary", "upstream_model": "gpt-5.4", "weight": 100, "priority": 0, "enabled": true}]
+      "channels": [{"provider": "openai:primary", "upstream_model": "gpt-5.4", "weight": 100, "priority": 0, "enabled": true, "max_concurrency": 64}]
     }
   ],
   "api_keys": [{"name": "user-key:u_12345", "key": "sk-client-...", "enabled": true, "models": ["gpt-5.4"]}]
@@ -158,6 +158,33 @@ This is admission priority, not reordering: served-in-flight requests are never
 preempted, but bulk traffic stops consuming the wait queue that priority traffic
 depends on. Combined with `GET /api/channels` (`pool.waiting`, `wait_ms_p99`) it
 gives an explicit answer to "who gets the slot when everything is full".
+
+## Per-Channel Concurrency Cap (`max_concurrency`)
+
+Each channel may declare an in-flight cap; omitted/`null` keeps it bounded only by
+the upstream pool:
+
+```yaml
+models:
+  - name: gpt-5.4
+    channels:
+      - provider: openai:primary
+        upstream_model: gpt-5.4
+        max_concurrency: 64
+```
+
+* The cap is enforced at admission, **not** by queueing: a request that arrives
+  while the channel is full fails over to the next channel, and if every channel
+  is full returns `503` + `Retry-After: 1` with `{"error":{"type":"overloaded_error"}}`.
+* The slot is held for the lifetime of the response body (a streaming response
+  keeps it until the last chunk or until the client disconnects), so the number is
+  real in-flight load, not request rate.
+* A full channel is **not** cooled down — it is healthy, just busy — and the
+  attempt is reported with `status: 503`, `cooled_down: false`.
+* Uncapped channels pay nothing: no atomic counter is touched.
+* Observability: `GET /api/channels` reports live `in_flight` and the configured
+  `max_concurrency` next to the pool view, so the cap can be tuned against the
+  queue (`pool.waiting`) instead of guesswork.
 
 ## Cooldown Length Follows `Retry-After`
 
