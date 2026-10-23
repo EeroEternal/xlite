@@ -28,6 +28,14 @@ pub struct UpstreamShape {
     /// Override for the chat/completions path; empty keeps the derived default.
     #[serde(default)]
     pub chat_path: String,
+    /// Per-provider request→headers timeout in seconds; `None` inherits the
+    /// global setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_timeout_secs: Option<u64>,
+    /// Per-provider mid-stream stall timeout in seconds; `None` inherits the
+    /// global setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_timeout_secs: Option<u64>,
 }
 
 fn default_auth_scheme() -> String {
@@ -41,6 +49,8 @@ impl Default for UpstreamShape {
             auth_header: String::new(),
             extra_headers: Vec::new(),
             chat_path: String::new(),
+            header_timeout_secs: None,
+            stall_timeout_secs: None,
         }
     }
 }

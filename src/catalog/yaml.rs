@@ -38,6 +38,12 @@ pub struct ProviderYaml {
     pub headers: Vec<HeaderPair>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub chat_path: String,
+    /// Per-provider header timeout in seconds; omitted inherits the global value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_timeout_secs: Option<u64>,
+    /// Per-provider mid-stream stall timeout in seconds; omitted inherits global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_timeout_secs: Option<u64>,
 }
 
 fn default_auth_scheme() -> String {
@@ -55,6 +61,8 @@ impl ProviderYaml {
             auth_header: self.auth_header.clone(),
             extra_headers: self.headers.clone(),
             chat_path: self.chat_path.clone(),
+            header_timeout_secs: self.header_timeout_secs,
+            stall_timeout_secs: self.stall_timeout_secs,
         }
     }
 }
@@ -194,6 +202,8 @@ pub async fn export_doc(catalog: &Catalog) -> Result<CatalogYaml> {
             auth_header: p.upstream.auth_header,
             headers: p.upstream.extra_headers,
             chat_path: p.upstream.chat_path,
+            header_timeout_secs: p.upstream.header_timeout_secs,
+            stall_timeout_secs: p.upstream.stall_timeout_secs,
         })
         .collect();
     provider_docs.sort_by(|a, b| a.name.cmp(&b.name));

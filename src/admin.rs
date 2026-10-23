@@ -325,6 +325,12 @@ struct ProviderBody {
     /// Chat/completions path override; empty keeps the derived default.
     #[serde(default)]
     chat_path: String,
+    /// Per-provider header timeout in seconds; omitted inherits the global value.
+    #[serde(default)]
+    header_timeout_secs: Option<u64>,
+    /// Per-provider stall timeout in seconds; omitted inherits the global value.
+    #[serde(default)]
+    stall_timeout_secs: Option<u64>,
 }
 
 fn default_auth_scheme() -> String {
@@ -341,6 +347,8 @@ impl ProviderBody {
             auth_header: self.auth_header.clone(),
             extra_headers: self.extra_headers.clone(),
             chat_path: self.chat_path.clone(),
+            header_timeout_secs: self.header_timeout_secs,
+            stall_timeout_secs: self.stall_timeout_secs,
         };
         upstream::validate_upstream(&shape, &self.api_key)?;
         Ok(shape)

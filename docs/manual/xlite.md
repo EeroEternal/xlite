@@ -159,6 +159,28 @@ preempted, but bulk traffic stops consuming the wait queue that priority traffic
 depends on. Combined with `GET /api/channels` (`pool.waiting`, `wait_ms_p99`) it
 gives an explicit answer to "who gets the slot when everything is full".
 
+## Per-Provider Timeouts (`header_timeout_secs` / `stall_timeout_secs`)
+
+The global `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` / `XLITE_UPSTREAM_STALL_TIMEOUT_SECS`
+apply to every upstream. A provider may override them on its own:
+
+```yaml
+providers:
+  - name: flaky-provider
+    base_url: https://api.example.com/v1
+    api_key: sk-...
+    header_timeout_secs: 5
+    stall_timeout_secs: 20
+```
+
+* `header_timeout_secs` bounds the request → response-headers wait **for that
+  provider only**; on expiry the attempt fails over exactly like a transport error
+  (the attempt is recorded, and the channel cools down).
+* `stall_timeout_secs` bounds the silence between response chunks for that
+  provider; a hung stream is terminated cleanly and the lease is released.
+* Omitted fields inherit the global value, and `0` means "disabled" exactly as the
+  global setting does — so existing catalogs are unchanged.
+
 ## Per-Channel Concurrency Cap (`max_concurrency`)
 
 Each channel may declare an in-flight cap; omitted/`null` keeps it bounded only by

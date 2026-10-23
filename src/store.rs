@@ -45,6 +45,10 @@ pub struct Channel {
     pub upstream_model: String,
     pub weight: i32,
     pub priority: i32,
+    /// Per-provider request→headers timeout; `None` inherits the global value.
+    pub header_timeout: Option<Duration>,
+    /// Per-provider mid-stream stall timeout; `None` inherits the global value.
+    pub stall_timeout: Option<Duration>,
     /// In-flight cap for this channel; `None` = bounded only by the upstream pool.
     pub max_concurrency: Option<usize>,
     /// Requests currently holding this channel (only maintained when a cap is set).
@@ -70,6 +74,8 @@ impl Clone for Channel {
             upstream_model: self.upstream_model.clone(),
             weight: self.weight,
             priority: self.priority,
+            header_timeout: self.header_timeout,
+            stall_timeout: self.stall_timeout,
             max_concurrency: self.max_concurrency,
             in_flight: AtomicUsize::new(self.in_flight.load(Ordering::Relaxed)),
             cooldown_until_ms: AtomicU64::new(self.cooldown_until_ms.load(Ordering::Relaxed)),
@@ -91,6 +97,8 @@ impl PartialEq for Channel {
             && self.upstream_model == other.upstream_model
             && self.weight == other.weight
             && self.priority == other.priority
+            && self.header_timeout == other.header_timeout
+            && self.stall_timeout == other.stall_timeout
             && self.max_concurrency == other.max_concurrency
     }
 }
@@ -132,6 +140,18 @@ impl Channel {
         if self.cooldown_until_ms.load(Ordering::Relaxed) != 0 {
             self.cooldown_until_ms.store(0, Ordering::Relaxed);
         }
+    }
+
+    /// Effective request→headers timeout for this channel.
+    #[inline]
+    pub fn header_timeout_or(&self, default: Duration) -> Duration {
+        self.header_timeout.unwrap_or(default)
+    }
+
+    /// Effective mid-stream stall timeout for this channel.
+    #[inline]
+    pub fn stall_timeout_or(&self, default: Duration) -> Duration {
+        self.stall_timeout.unwrap_or(default)
     }
 
     /// In-flight requests on this channel (load, not history).
@@ -434,6 +454,8 @@ fn to_channel(c: RoutingChannel) -> Result<Channel> {
         upstream_model: c.upstream_model,
         weight: c.weight,
         priority: c.priority,
+        header_timeout: c.upstream.header_timeout_secs.map(Duration::from_secs),
+        stall_timeout: c.upstream.stall_timeout_secs.map(Duration::from_secs),
         max_concurrency: c
             .max_concurrency
             .and_then(|cap| usize::try_from(cap).ok())
@@ -531,6 +553,8 @@ mod tests {
             upstream_model: "m".into(),
             weight: w,
             priority: p,
+            header_timeout: None,
+            stall_timeout: None,
             max_concurrency: None,
             in_flight: AtomicUsize::new(0),
             cooldown_until_ms: AtomicU64::new(0),
@@ -827,6 +851,25 @@ api_keys:
         assert_eq!(channel.path, "/v1/chat/completions");
     }
 
+    /// Provider-level timeout overrides land on the channel and fall back to the
+    /// caller's global value when unset.
+    #[tokio::test]
+    async fn provider_timeout_overrides_reach_the_channel() {
+        let shape = UpstreamShape {
+            header_timeout_secs: Some(3),
+            stall_timeout_secs: Some(9),
+            ..UpstreamShape::default()
+        };
+        let (_, channel, _) = store_with_provider(&shape).await;
+        let global = Duration::from_secs(42);
+        assert_eq!(channel.header_timeout_or(global), Duration::from_secs(3));
+        assert_eq!(channel.stall_timeout_or(global), Duration::from_secs(9));
+
+        let (_, plain, _) = store_with_provider(&UpstreamShape::default()).await;
+        assert_eq!(plain.header_timeout_or(global), global);
+        assert_eq!(plain.stall_timeout_or(global), global);
+    }
+
     #[tokio::test]
     async fn provider_shape_is_precomputed_into_the_channel() {
         let shape = UpstreamShape {
@@ -837,6 +880,7 @@ api_keys:
                 value: "xlite".into(),
             }],
             chat_path: "/api/chat".into(),
+            ..UpstreamShape::default()
         };
         let (_, channel, _) = store_with_provider(&shape).await;
         let (name, value) = channel.auth.as_ref().expect("credential header");

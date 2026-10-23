@@ -436,17 +436,15 @@ pub async fn anthropic_messages(
             Ok(b) => b,
             Err(e) => return anthropic_bad_request(&e),
         };
-        let upstream = match state
-            .upstream
-            .post_stream(
-                &channel.endpoint,
-                &channel.authority,
-                &channel.path,
-                channel.auth.as_ref(),
-                &channel.extra_headers,
-                out_body,
-            )
-            .await
+        let upstream = match post_with_channel_timeout(
+            &state,
+            &channel,
+            &channel.endpoint,
+            &channel.authority,
+            &channel.path,
+            out_body,
+        )
+        .await
         {
             Ok(u) => u,
             Err(e) => {
@@ -466,7 +464,11 @@ pub async fn anthropic_messages(
             let status = upstream.status;
             let cooldown = cooldown_for(status, upstream.retry_after);
             channel.mark_cooldown(cooldown);
-            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            let err_bytes = read_error_body(
+                upstream,
+                channel.stall_timeout_or(state.config.upstream_stall_timeout),
+            )
+            .await;
             let failure = ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
@@ -481,7 +483,11 @@ pub async fn anthropic_messages(
         }
         if !(200..300).contains(&upstream.status) {
             let status = upstream.status;
-            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            let err_bytes = read_error_body(
+                upstream,
+                channel.stall_timeout_or(state.config.upstream_stall_timeout),
+            )
+            .await;
             return ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
@@ -510,7 +516,7 @@ pub async fn anthropic_messages(
         if request.stream {
             let guarded = StallGuard::new(
                 SlotStream::new(upstream.body, slot),
-                state.config.upstream_stall_timeout,
+                channel.stall_timeout_or(state.config.upstream_stall_timeout),
             );
             let observed = UsageStream::new(guarded, true, usage_ctx);
             let anthropic_sse =
@@ -533,7 +539,7 @@ pub async fn anthropic_messages(
         }
         let guarded = StallGuard::new(
             SlotStream::new(upstream.body, slot),
-            state.config.upstream_stall_timeout,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
         );
         let raw_bytes = match collect_upstream_body(guarded, state.config.max_body_bytes).await {
             Ok(b) => b,
@@ -672,17 +678,10 @@ pub async fn responses(
         let resp_ep = responses_url(&channel.base_url);
         let (resp_auth, resp_path) = h2c_parts(&resp_ep)
             .unwrap_or_else(|| (channel.authority.clone(), "/v1/responses".into()));
-        let upstream = match state
-            .upstream
-            .post_stream(
-                &resp_ep,
-                &resp_auth,
-                &resp_path,
-                channel.auth.as_ref(),
-                &channel.extra_headers,
-                out_body,
-            )
-            .await
+        let upstream = match post_with_channel_timeout(
+            &state, &channel, &resp_ep, &resp_auth, &resp_path, out_body,
+        )
+        .await
         {
             Ok(u) => u,
             Err(e) => {
@@ -700,7 +699,11 @@ pub async fn responses(
         };
 
         if matches!(upstream.status, 404 | 405) {
-            let _ = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            let _ = read_error_body(
+                upstream,
+                channel.stall_timeout_or(state.config.upstream_stall_timeout),
+            )
+            .await;
             match try_responses_via_chat(
                 &state,
                 &key,
@@ -724,7 +727,11 @@ pub async fn responses(
             let status = upstream.status;
             let cooldown = cooldown_for(status, upstream.retry_after);
             channel.mark_cooldown(cooldown);
-            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            let err_bytes = read_error_body(
+                upstream,
+                channel.stall_timeout_or(state.config.upstream_stall_timeout),
+            )
+            .await;
             let failure = ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
@@ -755,7 +762,7 @@ pub async fn responses(
         return forward_response_with_channel(
             upstream,
             &channel,
-            state.config.upstream_stall_timeout,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
             state.config.sse_keepalive_interval,
             usage_ctx,
             slot,
@@ -805,17 +812,15 @@ async fn try_responses_via_chat(
             upstream_model: channel.upstream_model.clone(),
         }
     })?;
-    let upstream = match state
-        .upstream
-        .post_stream(
-            &channel.endpoint,
-            &channel.authority,
-            &channel.path,
-            channel.auth.as_ref(),
-            &channel.extra_headers,
-            chat_body,
-        )
-        .await
+    let upstream = match post_with_channel_timeout(
+        state,
+        channel,
+        &channel.endpoint,
+        &channel.authority,
+        &channel.path,
+        chat_body,
+    )
+    .await
     {
         Ok(u) => u,
         Err(e) => {
@@ -834,7 +839,11 @@ async fn try_responses_via_chat(
         let status = upstream.status;
         let cooldown = cooldown_for(status, upstream.retry_after);
         channel.mark_cooldown(cooldown);
-        let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+        let err_bytes = read_error_body(
+            upstream,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
+        )
+        .await;
         let failure = ChannelFailure::UpstreamStatus {
             status,
             body: err_bytes,
@@ -848,7 +857,11 @@ async fn try_responses_via_chat(
     }
     if !(200..300).contains(&upstream.status) {
         let status = upstream.status;
-        let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+        let err_bytes = read_error_body(
+            upstream,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
+        )
+        .await;
         return Ok(ChannelFailure::UpstreamStatus {
             status,
             body: err_bytes,
@@ -877,7 +890,7 @@ async fn try_responses_via_chat(
     if request.stream {
         let guarded = StallGuard::new(
             SlotStream::new(upstream.body, slot),
-            state.config.upstream_stall_timeout,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
         );
         let observed = UsageStream::new(guarded, true, usage_ctx);
         let resp_sse = translate_openai_sse_to_responses_stream(observed, request.model.clone());
@@ -899,7 +912,7 @@ async fn try_responses_via_chat(
     }
     let guarded = StallGuard::new(
         SlotStream::new(upstream.body, slot),
-        state.config.upstream_stall_timeout,
+        channel.stall_timeout_or(state.config.upstream_stall_timeout),
     );
     let raw_bytes = collect_upstream_body(guarded, state.config.max_body_bytes)
         .await
@@ -1035,17 +1048,10 @@ pub async fn embeddings(
         let emb_ep = embeddings_url(&channel.base_url);
         let (emb_auth, emb_path) = h2c_parts(&emb_ep)
             .unwrap_or_else(|| (channel.authority.clone(), "/v1/embeddings".into()));
-        let upstream = match state
-            .upstream
-            .post_stream(
-                &emb_ep,
-                &emb_auth,
-                &emb_path,
-                channel.auth.as_ref(),
-                &channel.extra_headers,
-                out_body,
-            )
-            .await
+        let upstream = match post_with_channel_timeout(
+            &state, &channel, &emb_ep, &emb_auth, &emb_path, out_body,
+        )
+        .await
         {
             Ok(u) => u,
             Err(e) => {
@@ -1065,7 +1071,11 @@ pub async fn embeddings(
             let status = upstream.status;
             let cooldown = cooldown_for(status, upstream.retry_after);
             channel.mark_cooldown(cooldown);
-            let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+            let err_bytes = read_error_body(
+                upstream,
+                channel.stall_timeout_or(state.config.upstream_stall_timeout),
+            )
+            .await;
             let failure = ChannelFailure::UpstreamStatus {
                 status,
                 body: err_bytes,
@@ -1096,7 +1106,7 @@ pub async fn embeddings(
         return forward_response_with_channel(
             upstream,
             &channel,
-            state.config.upstream_stall_timeout,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
             state.config.sse_keepalive_interval,
             usage_ctx,
             slot,
@@ -1168,6 +1178,35 @@ fn would_park(state: &AppState, authority: &str) -> bool {
     };
     stats.connections >= state.config.max_conns_per_host
         && stats.in_flight >= cap.saturating_mul(stats.connections)
+}
+
+/// POST the upstream request with the channel's own header timeout when it
+/// declares one; otherwise the pool's global header timeout applies as before.
+async fn post_with_channel_timeout(
+    state: &AppState,
+    channel: &Channel,
+    endpoint: &str,
+    authority: &str,
+    path: &str,
+    body: Bytes,
+) -> anyhow::Result<crate::upstream::UpstreamResponse> {
+    let fut = state.upstream.post_stream(
+        endpoint,
+        authority,
+        path,
+        channel.auth.as_ref(),
+        &channel.extra_headers,
+        body,
+    );
+    match channel.header_timeout {
+        Some(limit) => tokio::time::timeout(limit, fut).await.map_err(|_| {
+            anyhow::anyhow!(
+                "upstream returned no response headers within {}ms (provider override)",
+                limit.as_millis()
+            )
+        })?,
+        None => fut.await,
+    }
 }
 
 enum ChannelFailure {
@@ -1441,17 +1480,15 @@ async fn try_channel(
             upstream_model: channel.upstream_model.clone(),
         }
     })?;
-    let upstream = match state
-        .upstream
-        .post_stream(
-            &channel.endpoint,
-            &channel.authority,
-            &channel.path,
-            channel.auth.as_ref(),
-            &channel.extra_headers,
-            body,
-        )
-        .await
+    let upstream = match post_with_channel_timeout(
+        state,
+        channel,
+        &channel.endpoint,
+        &channel.authority,
+        &channel.path,
+        body,
+    )
+    .await
     {
         Ok(u) => u,
         Err(e) => {
@@ -1471,7 +1508,11 @@ async fn try_channel(
         let status = upstream.status;
         let cooldown = cooldown_for(status, upstream.retry_after);
         channel.mark_cooldown(cooldown);
-        let err_bytes = read_error_body(upstream, state.config.upstream_stall_timeout).await;
+        let err_bytes = read_error_body(
+            upstream,
+            channel.stall_timeout_or(state.config.upstream_stall_timeout),
+        )
+        .await;
         let failure = ChannelFailure::UpstreamStatus {
             status,
             body: err_bytes,
@@ -1501,7 +1542,7 @@ async fn try_channel(
     Ok(forward_response_with_channel(
         upstream,
         channel,
-        state.config.upstream_stall_timeout,
+        channel.stall_timeout_or(state.config.upstream_stall_timeout),
         state.config.sse_keepalive_interval,
         usage_ctx,
         slot,

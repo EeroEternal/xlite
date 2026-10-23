@@ -22,10 +22,13 @@ struct ProviderRow {
     auth_header: String,
     extra_headers: String,
     chat_path: String,
+    header_timeout_secs: Option<i64>,
+    stall_timeout_secs: Option<i64>,
 }
 
 const PROVIDER_COLUMNS: &str = "id, name, base_url, api_key, enabled, created_at, \
-                                auth_scheme, auth_header, extra_headers, chat_path";
+                                auth_scheme, auth_header, extra_headers, chat_path, \
+                                header_timeout_secs, stall_timeout_secs";
 
 impl ProviderRow {
     fn upstream(&self) -> Result<UpstreamShape> {
@@ -34,6 +37,8 @@ impl ProviderRow {
             auth_header: self.auth_header.clone(),
             extra_headers: decode_headers(&self.extra_headers)?,
             chat_path: self.chat_path.clone(),
+            header_timeout_secs: self.header_timeout_secs.and_then(|v| u64::try_from(v).ok()),
+            stall_timeout_secs: self.stall_timeout_secs.and_then(|v| u64::try_from(v).ok()),
         })
     }
 
@@ -168,7 +173,8 @@ impl SqliteCatalog {
             r#"
             SELECT c.id, c.model_id, c.provider_id, c.upstream_model, c.weight, c.priority,
                    c.max_concurrency,
-                   p.name AS provider_name, p.base_url, p.api_key, p.auth_scheme, p.auth_header, p.extra_headers, p.chat_path
+                   p.name AS provider_name, p.base_url, p.api_key, p.auth_scheme, p.auth_header,
+                   p.extra_headers, p.chat_path, p.header_timeout_secs, p.stall_timeout_secs
             FROM channels c
             JOIN providers p ON p.id = c.provider_id
             WHERE c.enabled = 1 AND p.enabled = 1
@@ -201,6 +207,12 @@ impl SqliteCatalog {
                     auth_header: row.get("auth_header"),
                     extra_headers: decode_headers(&extra_headers)?,
                     chat_path: row.get("chat_path"),
+                    header_timeout_secs: row
+                        .get::<Option<i64>, _>("header_timeout_secs")
+                        .and_then(|v| u64::try_from(v).ok()),
+                    stall_timeout_secs: row
+                        .get::<Option<i64>, _>("stall_timeout_secs")
+                        .and_then(|v| u64::try_from(v).ok()),
                 },
             });
         }
@@ -267,8 +279,9 @@ impl SqliteCatalog {
         let created = now();
         let sql = format!(
             "INSERT INTO providers (name, base_url, api_key, enabled, created_at,
-                auth_scheme, auth_header, extra_headers, chat_path)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                auth_scheme, auth_header, extra_headers, chat_path,
+                header_timeout_secs, stall_timeout_secs)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING {PROVIDER_COLUMNS}"
         );
         let row = sqlx::query_as::<_, ProviderRow>(&sql)
@@ -281,6 +294,8 @@ impl SqliteCatalog {
             .bind(&upstream.auth_header)
             .bind(encode_headers(&upstream.extra_headers)?)
             .bind(&upstream.chat_path)
+            .bind(upstream.header_timeout_secs.map(|v| v as i64))
+            .bind(upstream.stall_timeout_secs.map(|v| v as i64))
             .fetch_one(&self.pool)
             .await?;
         row.into_provider()
@@ -299,7 +314,8 @@ impl SqliteCatalog {
             "UPDATE providers SET name = ?, base_url = ?,
                 api_key = CASE WHEN ? = '' THEN api_key ELSE ? END,
                 enabled = ?,
-                auth_scheme = ?, auth_header = ?, extra_headers = ?, chat_path = ?
+                auth_scheme = ?, auth_header = ?, extra_headers = ?, chat_path = ?,
+                header_timeout_secs = ?, stall_timeout_secs = ?
              WHERE id = ?
              RETURNING {PROVIDER_COLUMNS}"
         );
@@ -313,6 +329,8 @@ impl SqliteCatalog {
             .bind(&upstream.auth_header)
             .bind(encode_headers(&upstream.extra_headers)?)
             .bind(&upstream.chat_path)
+            .bind(upstream.header_timeout_secs.map(|v| v as i64))
+            .bind(upstream.stall_timeout_secs.map(|v| v as i64))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
