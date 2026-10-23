@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Hang diagnostics (`xlite.timing`, `XLITE_SLOW_WARN_MS`; `src/upstream.rs`, `src/proxy.rs`, `docs/manual/xlite.md`)**: an opt-in tracing target prints one line per upstream phase (`acquired`, `headers`, `attempt-done`, `body-first-chunk`, `body-end`) with elapsed milliseconds and channel id, so a stuck request reveals the last phase it reached instead of leaving only `/api/pool` counters to guess from; `XLITE_SLOW_WARN_MS` (default off) emits a single `xlite.slow` warning when an attempt waits too long. This is the diagnostic hook for issue #90.
+
 - **Per-provider timeout overrides (`providers.header_timeout_secs` / `stall_timeout_secs`, migration `004`, `src/store.rs`, `src/proxy.rs`)**: a provider can bound its own request→headers wait and mid-stream stall window instead of inheriting the global values — a flaky upstream is now isolated without tightening timeouts for everyone else; the header-timeout path fails over like a transport error (attempt recorded, channel cooled down), and omitted fields keep the previous behaviour.
 
 - **Per-channel concurrency cap (`channels.max_concurrency`, migration `003`, `src/store.rs`, `src/proxy.rs`, `src/admin.rs`)**: a channel can declare an in-flight limit that is enforced at admission instead of by queueing — overflow fails over and then sheds with `503` + `Retry-After: 1` (`overloaded_error`), the slot is held for the response body's lifetime (so a long stream keeps it, a client disconnect frees it), the channel is never cooled down for being busy, uncapped channels touch no atomic, and `GET /api/channels` reports `in_flight` next to `max_concurrency`.

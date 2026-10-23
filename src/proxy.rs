@@ -515,7 +515,7 @@ pub async fn anthropic_messages(
         );
         if request.stream {
             let guarded = StallGuard::new(
-                SlotStream::new(upstream.body, slot),
+                SlotStream::new(upstream.body, slot, channel.id),
                 channel.stall_timeout_or(state.config.upstream_stall_timeout),
             );
             let observed = UsageStream::new(guarded, true, usage_ctx);
@@ -538,7 +538,7 @@ pub async fn anthropic_messages(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
         let guarded = StallGuard::new(
-            SlotStream::new(upstream.body, slot),
+            SlotStream::new(upstream.body, slot, channel.id),
             channel.stall_timeout_or(state.config.upstream_stall_timeout),
         );
         let raw_bytes = match collect_upstream_body(guarded, state.config.max_body_bytes).await {
@@ -889,7 +889,7 @@ async fn try_responses_via_chat(
     );
     if request.stream {
         let guarded = StallGuard::new(
-            SlotStream::new(upstream.body, slot),
+            SlotStream::new(upstream.body, slot, channel.id),
             channel.stall_timeout_or(state.config.upstream_stall_timeout),
         );
         let observed = UsageStream::new(guarded, true, usage_ctx);
@@ -911,7 +911,7 @@ async fn try_responses_via_chat(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()));
     }
     let guarded = StallGuard::new(
-        SlotStream::new(upstream.body, slot),
+        SlotStream::new(upstream.body, slot, channel.id),
         channel.stall_timeout_or(state.config.upstream_stall_timeout),
     );
     let raw_bytes = collect_upstream_body(guarded, state.config.max_body_bytes)
@@ -1198,7 +1198,8 @@ async fn post_with_channel_timeout(
         &channel.extra_headers,
         body,
     );
-    match channel.header_timeout {
+    let started = std::time::Instant::now();
+    let result = match channel.header_timeout {
         Some(limit) => tokio::time::timeout(limit, fut).await.map_err(|_| {
             anyhow::anyhow!(
                 "upstream returned no response headers within {}ms (provider override)",
@@ -1206,7 +1207,40 @@ async fn post_with_channel_timeout(
             )
         })?,
         None => fut.await,
+    };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    tracing::debug!(
+        target: "xlite.timing",
+        channel_id = channel.id,
+        host = %authority,
+        phase = "attempt-done",
+        elapsed_ms,
+        ok = result.is_ok(),
+        "upstream phase"
+    );
+    // One line that turns "the gateway hangs" into "this channel waited Ns here".
+    if slow_warn_ms() > 0 && elapsed_ms >= slow_warn_ms() {
+        tracing::warn!(
+            target: "xlite.slow",
+            channel_id = channel.id,
+            host = %authority,
+            elapsed_ms,
+            "upstream attempt waited longer than XLITE_SLOW_WARN_MS"
+        );
     }
+    result
+}
+
+/// Warn threshold for `xlite.slow` (`0` = off, the default: LLM header waits are
+/// legitimately long).
+fn slow_warn_ms() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("XLITE_SLOW_WARN_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    })
 }
 
 enum ChannelFailure {
@@ -1576,6 +1610,7 @@ fn forward_response_with_channel(
         sse_keepalive_interval,
         usage_ctx,
         slot,
+        channel.id,
     )
 }
 
@@ -1586,6 +1621,7 @@ fn finish_forward_response(
     sse_keepalive_interval: Duration,
     usage_ctx: Option<UsageReportContext>,
     slot: crate::store::ChannelSlot,
+    channel_id: i64,
 ) -> Response {
     let content_type = upstream
         .content_type
@@ -1605,7 +1641,11 @@ fn finish_forward_response(
     } else {
         Duration::ZERO
     };
-    let observed = UsageStream::new(SlotStream::new(upstream.body, slot), sse, usage_ctx);
+    let observed = UsageStream::new(
+        SlotStream::new(upstream.body, slot, channel_id),
+        sse,
+        usage_ctx,
+    );
     let body = StallGuard::with_keepalive(observed, stall_timeout, keepalive);
     builder.body(Body::from_stream(body)).unwrap_or_else(|_| {
         (
@@ -2002,11 +2042,22 @@ impl UsageReportContext {
 struct SlotStream<S> {
     inner: S,
     _slot: crate::store::ChannelSlot,
+    channel_id: i64,
+    started: std::time::Instant,
+    /// `false` until the first body chunk, so the log can separate "headers only"
+    /// from "the body never started".
+    saw_first_chunk: bool,
 }
 
 impl<S> SlotStream<S> {
-    fn new(inner: S, slot: crate::store::ChannelSlot) -> Self {
-        Self { inner, _slot: slot }
+    fn new(inner: S, slot: crate::store::ChannelSlot, channel_id: i64) -> Self {
+        Self {
+            inner,
+            _slot: slot,
+            channel_id,
+            started: std::time::Instant::now(),
+            saw_first_chunk: false,
+        }
     }
 }
 
@@ -2017,7 +2068,29 @@ where
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().inner).poll_next(cx)
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.inner).poll_next(cx);
+        match &poll {
+            Poll::Ready(Some(_)) if !this.saw_first_chunk => {
+                this.saw_first_chunk = true;
+                tracing::debug!(
+                    target: "xlite.timing",
+                    channel_id = this.channel_id,
+                    phase = "body-first-chunk",
+                    elapsed_ms = this.started.elapsed().as_millis() as u64,
+                    "upstream phase"
+                );
+            }
+            Poll::Ready(None) => tracing::debug!(
+                target: "xlite.timing",
+                channel_id = this.channel_id,
+                phase = "body-end",
+                elapsed_ms = this.started.elapsed().as_millis() as u64,
+                "upstream phase"
+            ),
+            _ => {}
+        }
+        poll
     }
 }
 

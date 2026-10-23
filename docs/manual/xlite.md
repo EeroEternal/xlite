@@ -159,6 +159,38 @@ preempted, but bulk traffic stops consuming the wait queue that priority traffic
 depends on. Combined with `GET /api/channels` (`pool.waiting`, `wait_ms_p99`) it
 gives an explicit answer to "who gets the slot when everything is full".
 
+## Diagnosing a Hang (`xlite.timing`)
+
+When "the gateway hangs" is reported, the fastest way to tell *where* is the
+`xlite.timing` tracing target. It is off by default (one atomic level check per
+phase) and prints one line per phase, so a stuck request shows the last phase it
+reached:
+
+```bash
+RUST_LOG=xlite.timing=debug ./xlite
+```
+
+```
+upstream phase transport="h2-tls" host="api.deepseek.com:443" phase="acquired" elapsed_ms=502
+upstream phase transport="h2-tls" host="api.deepseek.com:443" phase="headers"  elapsed_ms=5518
+upstream phase channel_id=7 host="api.deepseek.com:443" phase="attempt-done" elapsed_ms=5518 ok=true
+upstream phase channel_id=7 phase="body-first-chunk" elapsed_ms=0
+upstream phase channel_id=7 phase="body-end" elapsed_ms=0
+```
+
+* `acquired` — the request waited `elapsed_ms` in the connection pool (queueing,
+  dial, TLS handshake). Missing `acquired` ⇒ the request never got a slot.
+* `headers` — upstream accepted the request; the delta from `acquired` is TTFT.
+* `attempt-done` — the attempt finished (or failed); carries `channel_id` and `ok`.
+* `body-first-chunk` / `body-end` — the streaming phase, timed from the first
+  block onwards. Missing `body-*` on a streaming response means the body never
+  started (stall), not that admission failed.
+
+Optional: `XLITE_SLOW_WARN_MS=15000` logs a `xlite.slow` warning for any attempt
+that waited longer than that (default `0` = off, because legitimate LLM header
+waits are long). This single line is usually enough to tell "queued behind other
+requests" from "upstream never answered".
+
 ## Per-Provider Timeouts (`header_timeout_secs` / `stall_timeout_secs`)
 
 The global `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` / `XLITE_UPSTREAM_STALL_TIMEOUT_SECS`

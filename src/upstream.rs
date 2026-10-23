@@ -437,6 +437,20 @@ pub struct UpstreamResponse {
     pub body: UpstreamBody,
 }
 
+/// One line per upstream phase, for diagnosing "the gateway hangs" without a
+/// debugger. Enable with `RUST_LOG=xlite.timing=debug`; the macro is a no-op
+/// (one atomic level check) when that target is off.
+fn log_phase(transport: &str, host: &str, phase: &str, started: std::time::Instant) {
+    tracing::debug!(
+        target: "xlite.timing",
+        transport,
+        host,
+        phase,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upstream phase"
+    );
+}
+
 impl Upstream {
     pub fn new(cfg: &Config) -> Self {
         Self::with_tls_connectors(
@@ -641,6 +655,7 @@ impl Upstream {
         extra: &[(HeaderName, HeaderValue)],
         body: Bytes,
     ) -> Result<Option<UpstreamResponse>> {
+        let timing = Instant::now();
         let mut lease = match self.tls_pool.acquire(authority).await {
             Ok(lease) => lease,
             Err(PoolError::Dial(e)) if e.kind() == io::ErrorKind::Unsupported => {
@@ -648,6 +663,7 @@ impl Upstream {
             }
             Err(err) => return Err(err).context("h2 pool acquire"),
         };
+        log_phase("h2-tls", authority, "acquired", timing);
         let build_req = || -> Result<Request<()>> {
             let mut builder = Request::builder()
                 .method("POST")
@@ -667,15 +683,18 @@ impl Upstream {
             .send_h2_request(&mut lease, request, body.clone())
             .await
         {
-            Ok((status, content_type, retry_after, inner)) => Ok(Some(UpstreamResponse {
-                status,
-                content_type,
-                retry_after,
-                body: UpstreamBody {
-                    inner,
-                    _lease: Some(lease),
-                },
-            })),
+            Ok((status, content_type, retry_after, inner)) => {
+                log_phase("h2-tls", authority, "headers", timing);
+                Ok(Some(UpstreamResponse {
+                    status,
+                    content_type,
+                    retry_after,
+                    body: UpstreamBody {
+                        inner,
+                        _lease: Some(lease),
+                    },
+                }))
+            }
             Err(H2SendError::Transport(_)) if lease.is_reused() => {
                 // The pooled HTTP/2 connection was closed by the upstream or an
                 // intermediate NAT/firewall right as we sent the request. Evict
@@ -719,11 +738,13 @@ impl Upstream {
         if authority.is_empty() {
             anyhow::bail!("upstream url missing host");
         }
+        let timing = Instant::now();
         let mut lease = self
             .pool
             .acquire(authority)
             .await
             .context("h2 pool acquire")?;
+        log_phase("h2c", authority, "acquired", timing);
         let build_req = || -> Result<Request<()>> {
             let mut builder = Request::builder()
                 .method("POST")
@@ -744,15 +765,18 @@ impl Upstream {
             .send_h2_request(&mut lease, request, body.clone())
             .await
         {
-            Ok((status, content_type, retry_after, inner)) => Ok(UpstreamResponse {
-                status,
-                content_type,
-                retry_after,
-                body: UpstreamBody {
-                    inner,
-                    _lease: Some(lease),
-                },
-            }),
+            Ok((status, content_type, retry_after, inner)) => {
+                log_phase("h2c", authority, "headers", timing);
+                Ok(UpstreamResponse {
+                    status,
+                    content_type,
+                    retry_after,
+                    body: UpstreamBody {
+                        inner,
+                        _lease: Some(lease),
+                    },
+                })
+            }
             Err(H2SendError::Transport(_)) if lease.is_reused() => {
                 lease.evict();
                 drop(lease);
@@ -851,6 +875,7 @@ impl Upstream {
         // Acquire a warm idle connection if available; otherwise dial before
         // entering `await_headers` so connect time is bounded by `CONNECT_TIMEOUT`
         // while `await_headers` bounds the request->response-headers wait.
+        let timing = Instant::now();
         let (mut stream, reused) = match host_pool.take_idle() {
             Some(s) => (s, true),
             None => {
@@ -894,6 +919,7 @@ impl Upstream {
             )
             .await?;
 
+        log_phase("h1", authority, "headers", timing);
         let can_reuse = !head.connection_close && !matches!(head.framing, BodyFraming::UntilClose);
         let mut h1_body = H1Body {
             stream: Some(stream),
