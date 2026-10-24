@@ -99,7 +99,9 @@ pub(crate) async fn drive_and_pump(
         // reference, so the last `Register` sender can drop and the pump can
         // finish. `entry` is dropped at the end of this block.
         if let (Some(state), Some(entry)) = (state_weak.upgrade(), entry_weak.upgrade()) {
-            state.retain(|c| !Arc::ptr_eq(c, &entry));
+            if state.retain(|c| !Arc::ptr_eq(c, &entry)) > 0 {
+                state.note_eviction();
+            }
             bump(&state.generation_tx);
         }
     };
