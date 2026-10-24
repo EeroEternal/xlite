@@ -3,6 +3,7 @@ pub mod auth;
 pub mod catalog;
 pub mod config;
 pub mod hash;
+pub mod keylog;
 pub mod protocol;
 pub mod proxy;
 pub mod store;

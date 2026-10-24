@@ -25,6 +25,7 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS` | `120` | Timeout waiting for upstream response headers after sending the request; `0` disables it. Generous on purpose: long-reasoning models legitimately think for a minute before the first byte |
 | `XLITE_SSE_KEEPALIVE_SECS` | `15` | Emit `: keep-alive\n\n` SSE comment heartbeats during silent upstream pauses on `text/event-stream` responses (`0` disables) |
 | `XLITE_MAX_BODY_BYTES` | `67108864` (64 MiB) | Maximum request body size for `/v1/chat/completions` (for long-context and multimodal prompts) |
+| `XLITE_SSLKEYLOG` | unset | **Debug/testing only.** Path to an NSS key log, or `1` to reuse `SSLKEYLOGFILE`, so `tshark`/Wireshark can decrypt upstream TLS. Writes session secrets to disk in plaintext — never enable it on a long-running node |
 
 Listen backlog is 65535 (kernel-clamped by `net.core.somaxconn`). For 30k concurrent clients set `net.core.somaxconn = 65535` on the gateway host.
 
@@ -190,6 +191,26 @@ Optional: `XLITE_SLOW_WARN_MS=15000` logs a `xlite.slow` warning for any attempt
 that waited longer than that (default `0` = off, because legitimate LLM header
 waits are long). This single line is usually enough to tell "queued behind other
 requests" from "upstream never answered".
+
+## Decrypting Upstream TLS (`XLITE_SSLKEYLOG`)
+
+Debug and testing only. Set `XLITE_SSLKEYLOG` to a file path (or `1` to reuse
+`SSLKEYLOGFILE`) and the two upstream TLS connectors install a rustls key log, so the
+capture decrypts and HTTP/2 frames become visible — the only way to confirm on the wire
+that a client disconnect produces `RST_STREAM(CANCEL)` and not a torn-down connection:
+
+```bash
+XLITE_SSLKEYLOG=/tmp/keys.log ./xlite
+sudo tcpdump -i any -s0 -w /tmp/cap.pcap 'port 443'
+tshark -r /tmp/cap.pcap -d tls.keylog_file:/tmp/keys.log \
+  -Y 'http2.type == 3' -T fields -e tcp.srcport -e http2.streamid -e http2.flags
+```
+
+* Unset means zero cost: the client config keeps rustls' no-op key log, so no secrets
+  are derived for logging and nothing is written.
+* Enabling it logs a `xlite.security` warning at startup; the file contains session
+  secrets in plaintext, equivalent to the private keys of every captured session.
+  Rotate/delete it after the investigation.
 
 ## Per-Provider Timeouts (`header_timeout_secs` / `stall_timeout_secs`)
 
