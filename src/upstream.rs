@@ -132,13 +132,23 @@ fn valid_header_name(name: &str) -> std::result::Result<HeaderName, String> {
 /// Enable `TCP_NODELAY` and OS-level TCP keepalive on an upstream socket so NAT
 /// gateways, cloud load balancers, and firewalls do not silently drop long-context
 /// prefill or reasoning streams during prolonged application-layer silence.
+///
+/// The probe budget is deliberately short (`15s + 3 × 5s = 30s` to declare a peer
+/// dead). `TCP_KEEPCNT` must be set explicitly: without it the kernel default of 9
+/// probes made a blackholed connection take `30s + 9 × 10s = 120s` to fail, i.e. the
+/// kernel signal always lost the race against `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS`
+/// and every later request inherited the stall.
 fn configure_tcp_socket(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
     let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(30))
-        .with_interval(Duration::from_secs(10));
+        .with_time(Duration::from_secs(15))
+        .with_interval(Duration::from_secs(5))
+        .with_retries(TCP_KEEPALIVE_RETRIES);
     let _ = SockRef::from(stream).set_tcp_keepalive(&keepalive);
 }
+
+/// Failed probes before the kernel reports the peer dead (see `configure_tcp_socket`).
+const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
 async fn dial_tcp(authority: &str) -> io::Result<TcpStream> {
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(authority))

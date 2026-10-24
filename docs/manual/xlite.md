@@ -235,6 +235,20 @@ providers:
 * Omitted fields inherit the global value, and `0` means "disabled" exactly as the
   global setting does — so existing catalogs are unchanged.
 
+### Dead-Upstream Detection
+
+Both watchdog values above are *application*-level: they only fire when the request
+itself is stuck. A blackholed path is caught earlier, at the socket level — every
+upstream connection enables `TCP_NODELAY` and keepalive with `time=15s`,
+`interval=5s`, `retries=3`, so a peer that stops answering is declared dead in
+**30s** and the attempt fails over as a transport error. Probes are answered by the
+peer's kernel, so they are harmless during legitimate prefill silence.
+
+`TCP_USER_TIMEOUT` is not set, so a peer that stops ACKing data we already sent is
+still bounded only by the kernel's retransmit budget; such a connection is dropped
+from the pool on the header timeout (see the h2 pool eviction), so it cannot be
+reused while it lingers.
+
 ## Per-Channel Concurrency Cap (`max_concurrency`)
 
 Each channel may declare an in-flight cap; omitted/`null` keeps it bounded only by
