@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "xlite"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 description = "Headless multi-protocol AI traffic gateway. High-concurrency HTTP/2 pooling, channel routing, and protocol translation."
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-24
+
 - **Dead upstream detected in 30s instead of 120s (`src/upstream.rs`)**: the upstream socket keepalive never set `TCP_KEEPCNT`, so the kernel used its default of 9 probes — with `time=30s, interval=10s` a blackholed peer took `120s` to fail, exactly as long as the header timeout, which meant the kernel's own signal always arrived too late to be useful and every later request inherited the stall. The budget is now `15s + 3 × 5s = 30s` (`with_retries(3)`), so a dead path surfaces as a transport error and fails over while the header-timeout watchdog is still only a quarter spent. No new dependency, no new env var.
 
 - **Header timeout now evicts the connection (`src/upstream.rs`)**: an attempt that expires waiting for upstream headers removes its HTTP/2 connection from the pool, so the next request dials a fresh one instead of multiplexing onto a socket that just proved it cannot answer — a blackholed connection used to stay pooled (`connections=1, dials=1`) and cost every later request a full timeout window; the next acquire now redials (verified: 502 at 120s, `connections=0`, next request 200 on `dials=2`), and in-flight streams on the evicted connection keep their lease and finish. Reported via #90.
