@@ -44,7 +44,12 @@ impl Lease {
     /// failed with a transport/GOAWAY error.
     pub fn evict(&self) {
         if let Some(state) = self.state.upgrade() {
-            state.retain(|c| !Arc::ptr_eq(c, &self.entry));
+            let removed = state.retain(|c| !Arc::ptr_eq(c, &self.entry));
+            if removed > 0 {
+                // Visible in `/api/pool`: a rising count means the pool keeps finding
+                // sockets it can no longer trust, not that housekeeping is running.
+                state.note_eviction();
+            }
             bump(&state.generation_tx);
         }
     }

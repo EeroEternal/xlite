@@ -178,6 +178,8 @@ pub(crate) struct HostState {
     dials: AtomicU64,
     /// Idle connections closed by the reaper.
     reclaimed: AtomicU64,
+    /// Connections dropped by a caller that proved them bad ([`Lease::evict`]).
+    evicted: AtomicU64,
     /// Dials that could not read the peer's stream cap and used the fallback.
     settings_fallbacks: AtomicU64,
     /// Times a connection here observed the peer change its stream cap
@@ -219,6 +221,7 @@ impl HostState {
             wait_millis_max: AtomicU64::new(0),
             wait_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             reclaimed: AtomicU64::new(0),
+            evicted: AtomicU64::new(0),
             settings_fallbacks: AtomicU64::new(0),
             cap_updates: Arc::new(AtomicU64::new(0)),
         }
@@ -239,11 +242,20 @@ impl HostState {
     }
 
     /// Drop the connections for which `keep` is false. Writers only.
-    pub(crate) fn retain(&self, keep: impl Fn(&Arc<ConnEntry>) -> bool) {
+    /// Record one connection removed because a caller proved it bad.
+    pub(crate) fn note_eviction(&self) {
+        self.evicted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drop the connections `keep` rejects; returns how many were removed.
+    pub(crate) fn retain(&self, keep: impl Fn(&Arc<ConnEntry>) -> bool) -> usize {
         let _guard = self.mutate.lock().unwrap();
         let mut next = (**self.conns.load()).clone();
+        let before = next.len();
         next.retain(|c| keep(c));
+        let removed = before - next.len();
         self.conns.store(Arc::new(next));
+        removed
     }
 }
 
@@ -258,6 +270,11 @@ pub struct PoolStats {
     pub dials: u64,
     /// Idle connections closed by the reaper.
     pub reclaimed: u64,
+    /// Connections removed because a caller proved them bad — a header timeout, a
+    /// transport error, or an explicit [`Lease::evict`]. Distinct from
+    /// [`PoolStats::reclaimed`] (housekeeping): this one means "we stopped trusting
+    /// a live socket", which is the signal to watch for a degrading path.
+    pub evicted: u64,
     /// Dials that used the stream-cap fallback instead of the peer's SETTINGS.
     pub settings_fallbacks: u64,
     /// Times a connection observed the peer change
@@ -584,7 +601,9 @@ impl Pool {
                         if let (Some(state), Some(entry)) =
                             (state_weak.upgrade(), entry_weak.upgrade())
                         {
-                            state.retain(|c| !Arc::ptr_eq(c, &entry));
+                            if state.retain(|c| !Arc::ptr_eq(c, &entry)) > 0 {
+                                state.note_eviction();
+                            }
                             bump(&state.generation_tx);
                         }
                     }
@@ -681,6 +700,7 @@ impl Pool {
                 in_flight: 0,
                 dials: 0,
                 reclaimed: 0,
+                evicted: 0,
                 settings_fallbacks: 0,
                 cap_updates: 0,
                 stream_budget_per_conn: self.stream_budget_per_conn,
@@ -710,6 +730,7 @@ impl Pool {
             in_flight,
             dials: state.dials.load(Ordering::Relaxed),
             reclaimed: state.reclaimed.load(Ordering::Relaxed),
+            evicted: state.evicted.load(Ordering::Relaxed),
             settings_fallbacks: state.settings_fallbacks.load(Ordering::Relaxed),
             cap_updates: state.cap_updates.load(Ordering::Relaxed),
             stream_budget_per_conn: self.stream_budget_per_conn,
