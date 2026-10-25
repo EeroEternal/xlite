@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **`evicted` pool counter (`PoolStats`, `GET /api/pool`, `crates/xlite-h2-pool`)**: connections removed because a caller proved them bad (`Lease::evict` on a header timeout or transport error, connection-driver exit, pump exit) are now counted separately from `reclaimed` (idle housekeeping) and surfaced in `/api/pool` — a rising `evicted` says the pool keeps finding sockets it can no longer trust (the degrading-path signal behind #90), while `reclaimed` still means "the reaper tidied up"; the unknown-host snapshot and the existing `PoolStats` comparison test were updated to match.
+- **`evicted` pool counter (`PoolStats`, `GET /api/pool`, `crates/xlite-h2-pool`)**: connections the pool stopped trusting (`Lease::evict` on a header timeout or transport error, or a connection driver that ended while a stream was still in flight) are now counted separately from `reclaimed` (idle housekeeping) and surfaced in `/api/pool` — a rising `evicted` says the pool keeps finding sockets it can no longer trust (the degrading-path signal behind #90), while `reclaimed` still means "the reaper tidied up" and a routine idle close counts as neither; the unknown-host snapshot and the existing `PoolStats` comparison test were updated to match.
 
 ## [0.8.0] - 2026-10-24
 

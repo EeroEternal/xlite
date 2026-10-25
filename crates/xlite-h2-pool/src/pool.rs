@@ -178,7 +178,8 @@ pub(crate) struct HostState {
     dials: AtomicU64,
     /// Idle connections closed by the reaper.
     reclaimed: AtomicU64,
-    /// Connections dropped by a caller that proved them bad ([`Lease::evict`]).
+    /// Connections the pool stopped trusting: [`Lease::evict`] or a driver end
+    /// that interrupted an in-flight stream.
     evicted: AtomicU64,
     /// Dials that could not read the peer's stream cap and used the fallback.
     settings_fallbacks: AtomicU64,
@@ -241,13 +242,13 @@ impl HostState {
         len
     }
 
-    /// Drop the connections for which `keep` is false. Writers only.
-    /// Record one connection removed because a caller proved it bad.
+    /// Record one connection the pool stopped trusting.
     pub(crate) fn note_eviction(&self) {
         self.evicted.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Drop the connections `keep` rejects; returns how many were removed.
+    /// Drop the connections for which `keep` is false; returns how many were
+    /// removed. Writers only.
     pub(crate) fn retain(&self, keep: impl Fn(&Arc<ConnEntry>) -> bool) -> usize {
         let _guard = self.mutate.lock().unwrap();
         let mut next = (**self.conns.load()).clone();
@@ -270,10 +271,11 @@ pub struct PoolStats {
     pub dials: u64,
     /// Idle connections closed by the reaper.
     pub reclaimed: u64,
-    /// Connections removed because a caller proved them bad — a header timeout, a
-    /// transport error, or an explicit [`Lease::evict`]. Distinct from
-    /// [`PoolStats::reclaimed`] (housekeeping): this one means "we stopped trusting
-    /// a live socket", which is the signal to watch for a degrading path.
+    /// Connections the pool stopped trusting: [`Lease::evict`] after a header
+    /// timeout or transport error, or a connection that ended while a stream was
+    /// still in flight. Distinct from [`PoolStats::reclaimed`] (housekeeping):
+    /// a routine idle close counts as neither. A rising count is the signal to
+    /// watch for a degrading path.
     pub evicted: u64,
     /// Dials that used the stream-cap fallback instead of the peer's SETTINGS.
     pub settings_fallbacks: u64,
@@ -601,7 +603,11 @@ impl Pool {
                         if let (Some(state), Some(entry)) =
                             (state_weak.upgrade(), entry_weak.upgrade())
                         {
-                            if state.retain(|c| !Arc::ptr_eq(c, &entry)) > 0 {
+                            // A routine peer close finds no lease holder left;
+                            // only an end that interrupts a live stream means
+                            // the pool stopped trusting this socket.
+                            let interrupted = entry.in_flight.load(Ordering::Acquire) > 0;
+                            if state.retain(|c| !Arc::ptr_eq(c, &entry)) > 0 && interrupted {
                                 state.note_eviction();
                             }
                             bump(&state.generation_tx);
