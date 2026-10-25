@@ -2536,6 +2536,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlite-transport"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "h2",
+ "http",
+ "rustls",
+ "rustls-pki-types",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "xlite-h2-pool",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

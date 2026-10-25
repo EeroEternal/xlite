@@ -1,0 +1,32 @@
+[package]
+name = "xlite-transport"
+version = "0.1.0"
+edition = "2024"
+description = "In-process server-side transport client for AI upstreams: exactly one attempt per call, with routing, retries and deadlines owned by the caller (issue #96)."
+license = "MIT"
+
+[features]
+default = ["h1", "h2", "tls-rustls"]
+# HTTP/1.1 keep-alive pool (LIFO checkout, stale-close redial lives in the caller's helper).
+h1 = []
+# HTTP/2 pool backed by `xlite-h2-pool`.
+h2 = ["dep:h2", "dep:xlite-h2-pool"]
+# TLS via caller-supplied `rustls::ClientConfig` (the crate never reads env or disk).
+tls-rustls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pki-types"]
+
+[dependencies]
+http = "1"
+bytes = "1"
+futures-util = "0.3"
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1.43", features = ["rt", "sync", "time", "net", "io-util"] }
+h2 = { version = "0.4", features = ["stream"], optional = true }
+xlite-h2-pool = { path = "../xlite-h2-pool", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"], optional = true }
+rustls-pki-types = { version = "1", features = ["std"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+futures-util = "0.3"
