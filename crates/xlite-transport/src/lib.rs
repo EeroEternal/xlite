@@ -28,6 +28,8 @@ mod error;
 mod stats;
 mod transport;
 
+#[cfg(feature = "h1")]
+pub mod h1;
 #[cfg(feature = "h2")]
 mod h2;
 
@@ -39,6 +41,28 @@ pub use error::{StaleKind, TransportError};
 pub use h2::H2Transport;
 pub use stats::{Backend, HostStats, TransportStats};
 pub use transport::{AttemptOutcome, AttemptTelemetry, Transport};
+
+/// Enable `TCP_NODELAY` and OS-level TCP keepalive on an upstream socket so NAT
+/// gateways, cloud load balancers, and firewalls do not silently drop long-context
+/// prefill or reasoning streams during prolonged application-layer silence.
+///
+/// The probe budget is deliberately short (`15s + 3 × 5s = 30s` to declare a peer
+/// dead): without an explicit `TCP_KEEPCNT` the kernel default of 9 probes made a
+/// blackholed connection take `30s + 9 × 10s = 120s` to fail, always losing the
+/// race against the header timeout (issue #93).
+#[cfg(any(feature = "h1", feature = "h2"))]
+pub fn configure_tcp_socket(stream: &tokio::net::TcpStream) {
+    let _ = stream.set_nodelay(true);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(15))
+        .with_interval(std::time::Duration::from_secs(5))
+        .with_retries(TCP_KEEPALIVE_RETRIES);
+    let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive);
+}
+
+/// Failed probes before the kernel reports the peer dead (see [`configure_tcp_socket`]).
+#[cfg(any(feature = "h1", feature = "h2"))]
+const TCP_KEEPALIVE_RETRIES: u32 = 3;
 /// Re-exported so callers can supply their own dial ([`H2Transport::with_dial`]).
 #[cfg(feature = "h2")]
 pub use xlite_h2_pool::{BoxIo, Dial};

@@ -2494,8 +2494,6 @@ dependencies = [
  "h2",
  "hmac",
  "http",
- "httparse",
- "itoa",
  "rand 0.9.5",
  "redis",
  "rustls",
@@ -2504,7 +2502,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "socket2",
  "sqlx",
  "thiserror",
  "tikv-jemallocator",
@@ -2519,6 +2516,7 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "xlite-h2-pool",
+ "xlite-transport",
 ]
 
 [[package]]
@@ -2539,12 +2537,15 @@ dependencies = [
 name = "xlite-transport"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "futures-util",
  "h2",
  "http",
+ "httparse",
  "rustls",
  "rustls-pki-types",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-rustls",

@@ -8,10 +8,9 @@
 //!   (`H1Pool`) with non-blocking socket liveness probing and transparent 1x
 //!   redial on stale keep-alive races.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::future::Future;
 use std::io;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -21,22 +20,17 @@ use arc_swap::ArcSwap;
 use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use http::{HeaderName, HeaderValue, Request};
-use socket2::{SockRef, TcpKeepalive};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool, PoolError};
+use xlite_transport::h1::{
+    BodyFraming, H1Body, H1Pool, H1Stream, dial_h1, render_h1_head, send_and_read_h1_head,
+};
 
 use crate::catalog::{HeaderPair, UpstreamShape};
 use crate::config::Config;
 
 /// Bound on establishing a new TCP or TLS connection to an upstream.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Maximum response header block size accepted from an upstream (64 KiB).
-const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
-
-/// Maximum chunk-size line length in `Transfer-Encoding: chunked`.
-const MAX_CHUNK_LINE_BYTES: usize = 4096;
 
 /// Headers the gateway owns. Letting a catalog field set these would let operator
 /// input decide protocol correctness (`host` drives the h2 `:authority`, the
@@ -129,27 +123,6 @@ fn valid_header_name(name: &str) -> std::result::Result<HeaderName, String> {
         .map_err(|_| format!("`{name}` is not a valid header name"))
 }
 
-/// Enable `TCP_NODELAY` and OS-level TCP keepalive on an upstream socket so NAT
-/// gateways, cloud load balancers, and firewalls do not silently drop long-context
-/// prefill or reasoning streams during prolonged application-layer silence.
-///
-/// The probe budget is deliberately short (`15s + 3 × 5s = 30s` to declare a peer
-/// dead). `TCP_KEEPCNT` must be set explicitly: without it the kernel default of 9
-/// probes made a blackholed connection take `30s + 9 × 10s = 120s` to fail, i.e. the
-/// kernel signal always lost the race against `XLITE_UPSTREAM_HEADER_TIMEOUT_SECS`
-/// and every later request inherited the stall.
-fn configure_tcp_socket(stream: &TcpStream) {
-    let _ = stream.set_nodelay(true);
-    let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(15))
-        .with_interval(Duration::from_secs(5))
-        .with_retries(TCP_KEEPALIVE_RETRIES);
-    let _ = SockRef::from(stream).set_tcp_keepalive(&keepalive);
-}
-
-/// Failed probes before the kernel reports the peer dead (see `configure_tcp_socket`).
-const TCP_KEEPALIVE_RETRIES: u32 = 3;
-
 async fn dial_tcp(authority: &str) -> io::Result<TcpStream> {
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(authority))
         .await
@@ -162,7 +135,7 @@ async fn dial_tcp(authority: &str) -> io::Result<TcpStream> {
                 ),
             )
         })??;
-    configure_tcp_socket(&stream);
+    xlite_transport::configure_tcp_socket(&stream);
     Ok(stream)
 }
 
@@ -210,210 +183,6 @@ fn tls_host_from_authority(authority: &str) -> &str {
         .rsplit_once(':')
         .map(|(h, _)| h)
         .unwrap_or(authority)
-}
-
-enum H1Stream {
-    Plain(TcpStream),
-    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
-}
-
-impl H1Stream {
-    fn tcp_stream(&self) -> &TcpStream {
-        match self {
-            Self::Plain(s) => s,
-            Self::Tls(s) => s.get_ref().0,
-        }
-    }
-
-    /// Non-blocking liveness probe on an idle keep-alive socket at a clean
-    /// HTTP/1.1 message boundary. Any readable byte (FIN `Ok(0)`, TLS
-    /// `close_notify`, or stray trailing data `Ok(n)`) or socket error other
-    /// than `WouldBlock` means the connection is no longer reusable.
-    fn is_healthy_idle(&self) -> bool {
-        let mut probe = [0u8; 1];
-        match self.tcp_stream().try_read(&mut probe) {
-            Ok(0) => false,
-            Ok(_) => false,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => true,
-            Err(_) => false,
-        }
-    }
-}
-
-impl AsyncRead for H1Stream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            Self::Tls(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for H1Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
-            Self::Tls(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_flush(cx),
-            Self::Tls(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
-struct IdleH1Conn {
-    stream: H1Stream,
-    since: Instant,
-}
-
-struct HostPool {
-    max_idle: usize,
-    idle_timeout: Duration,
-    idle: Mutex<VecDeque<IdleH1Conn>>,
-}
-
-impl HostPool {
-    fn new(max_idle: usize, idle_timeout: Duration) -> Self {
-        Self {
-            max_idle,
-            idle_timeout,
-            idle: Mutex::new(VecDeque::new()),
-        }
-    }
-
-    /// Checkout the warmest healthy idle connection (LIFO), reaping expired
-    /// connections from the front first.
-    fn take_idle(&self) -> Option<H1Stream> {
-        loop {
-            let candidate = {
-                let mut guard = self.idle.lock().expect("h1 pool mutex poisoned");
-                while guard
-                    .front()
-                    .is_some_and(|c| c.since.elapsed() >= self.idle_timeout)
-                {
-                    guard.pop_front();
-                }
-                guard.pop_back()
-            }?;
-            if candidate.stream.is_healthy_idle() {
-                return Some(candidate.stream);
-            }
-        }
-    }
-
-    /// Return a connection that completed a clean HTTP/1.1 response body back
-    /// to the LIFO idle pool.
-    fn put(&self, stream: H1Stream) {
-        if self.max_idle == 0 || !stream.is_healthy_idle() {
-            return;
-        }
-        if let Ok(mut guard) = self.idle.lock() {
-            while guard
-                .front()
-                .is_some_and(|c| c.since.elapsed() >= self.idle_timeout)
-            {
-                guard.pop_front();
-            }
-            if guard.len() >= self.max_idle {
-                guard.pop_front();
-            }
-            guard.push_back(IdleH1Conn {
-                stream,
-                since: Instant::now(),
-            });
-        }
-    }
-}
-
-struct H1Pool {
-    max_idle_per_host: usize,
-    idle_timeout: Duration,
-    plain_hosts: ArcSwap<HashMap<String, Arc<HostPool>>>,
-    tls_hosts: ArcSwap<HashMap<String, Arc<HostPool>>>,
-    mutate: Mutex<()>,
-}
-
-impl H1Pool {
-    fn new(max_idle_per_host: usize, idle_timeout: Duration) -> Self {
-        Self {
-            max_idle_per_host,
-            idle_timeout,
-            plain_hosts: ArcSwap::from_pointee(HashMap::new()),
-            tls_hosts: ArcSwap::from_pointee(HashMap::new()),
-            mutate: Mutex::new(()),
-        }
-    }
-
-    fn host_pool(&self, is_tls: bool, authority: &str) -> Arc<HostPool> {
-        let map = if is_tls {
-            &self.tls_hosts
-        } else {
-            &self.plain_hosts
-        };
-        if let Some(pool) = map.load().get(authority) {
-            return Arc::clone(pool);
-        }
-        let _guard = self.mutate.lock().expect("h1 hosts mutex poisoned");
-        let current = map.load();
-        if let Some(pool) = current.get(authority) {
-            return Arc::clone(pool);
-        }
-        let pool = Arc::new(HostPool::new(self.max_idle_per_host, self.idle_timeout));
-        let mut next = (**current).clone();
-        next.insert(authority.to_string(), Arc::clone(&pool));
-        map.store(Arc::new(next));
-        pool
-    }
-}
-
-async fn dial_h1(
-    authority: &str,
-    tls_host: Option<&str>,
-    tls_connector: &tokio_rustls::TlsConnector,
-) -> io::Result<H1Stream> {
-    let tcp = dial_tcp(authority).await?;
-    let Some(host) = tls_host else {
-        return Ok(H1Stream::Plain(tcp));
-    };
-    let clean_host = host.trim_start_matches('[').trim_end_matches(']');
-    let server_name =
-        rustls_pki_types::ServerName::try_from(clean_host.to_owned()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid TLS host `{clean_host}`: {e}"),
-            )
-        })?;
-    let tls_stream = tokio::time::timeout(CONNECT_TIMEOUT, tls_connector.connect(server_name, tcp))
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "upstream TLS handshake timeout after {}s",
-                    CONNECT_TIMEOUT.as_secs()
-                ),
-            )
-        })??;
-    Ok(H1Stream::Tls(Box::new(tls_stream)))
 }
 
 #[derive(Clone)]
@@ -892,8 +661,11 @@ impl Upstream {
     ) -> Result<UpstreamResponse> {
         let target = resolve_h1_target(endpoint, authority, path)?;
         let host_pool = self.h1.host_pool(target.is_tls, &target.authority);
-        let req_head =
-            build_h1_request_head(&target.path, &target.authority, auth, extra, body.len());
+        let req_head = render_h1_head(
+            &http::Method::POST,
+            &target.path,
+            &gateway_h1_headers(&target.authority, auth, extra, body.len()),
+        );
 
         // Acquire a warm idle connection if available; otherwise dial before
         // entering `await_headers` so connect time is bounded by `CONNECT_TIMEOUT`
@@ -905,7 +677,8 @@ impl Upstream {
                 let s = dial_h1(
                     &target.authority,
                     target.tls_host.as_deref(),
-                    &self.tls_h1_connector,
+                    Some(&self.tls_h1_connector),
+                    CONNECT_TIMEOUT,
                 )
                 .await
                 .context("upstream connect")?;
@@ -926,7 +699,8 @@ impl Upstream {
                             let mut fresh = dial_h1(
                                 &target.authority,
                                 target.tls_host.as_deref(),
-                                &self.tls_h1_connector,
+                                Some(&self.tls_h1_connector),
+                                CONNECT_TIMEOUT,
                             )
                             .await?;
                             buf.clear();
@@ -990,6 +764,42 @@ struct H1Target {
     tls_host: Option<String>,
 }
 
+/// The gateway's h1 request headers: its own policy (JSON content type,
+/// keep-alive) plus the channel's auth and extra headers, rendered verbatim
+/// by [`render_h1_head`]. The gateway owns these names — see
+/// [`RESERVED_HEADERS`] — unlike the transport layer, which only synthesizes
+/// `host` / `content-length` when the caller omitted them (issue #96).
+fn gateway_h1_headers(
+    authority: &str,
+    auth: Option<&(HeaderName, HeaderValue)>,
+    extra: &[(HeaderName, HeaderValue)],
+    body_len: usize,
+) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::with_capacity(4 + extra.len() * 2);
+    if let Ok(value) = HeaderValue::from_str(authority) {
+        headers.insert(http::header::HOST, value);
+    }
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        http::header::CONTENT_LENGTH,
+        HeaderValue::from_str(&body_len.to_string()).expect("usize renders as a header value"),
+    );
+    headers.insert(
+        http::header::CONNECTION,
+        HeaderValue::from_static("keep-alive"),
+    );
+    if let Some((name, value)) = auth {
+        headers.append(name.clone(), value.clone());
+    }
+    for (name, value) in extra {
+        headers.append(name.clone(), value.clone());
+    }
+    headers
+}
+
 fn resolve_h1_target(endpoint: &str, authority: &str, path: &str) -> Result<H1Target> {
     if endpoint.starts_with("http://") && !authority.is_empty() && !path.is_empty() {
         return Ok(H1Target {
@@ -1032,63 +842,6 @@ fn resolve_h1_target(endpoint: &str, authority: &str, path: &str) -> Result<H1Ta
     })
 }
 
-fn build_h1_request_head(
-    path: &str,
-    authority: &str,
-    auth: Option<&(HeaderName, HeaderValue)>,
-    extra: &[(HeaderName, HeaderValue)],
-    content_length: usize,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(256 + extra.len() * 48);
-    out.extend_from_slice(b"POST ");
-    out.extend_from_slice(path.as_bytes());
-    out.extend_from_slice(b" HTTP/1.1\r\nHost: ");
-    out.extend_from_slice(authority.as_bytes());
-    out.extend_from_slice(b"\r\nContent-Type: application/json\r\nContent-Length: ");
-    let mut len_buf = itoa::Buffer::new();
-    out.extend_from_slice(len_buf.format(content_length).as_bytes());
-    out.extend_from_slice(b"\r\nConnection: keep-alive\r\n");
-    if let Some((name, value)) = auth {
-        out.extend_from_slice(name.as_str().as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
-    for (name, value) in extra {
-        out.extend_from_slice(name.as_str().as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
-    out.extend_from_slice(b"\r\n");
-    out
-}
-
-#[derive(Debug)]
-struct ParsedResponseHead {
-    status: u16,
-    content_type: Option<String>,
-    retry_after: Option<u64>,
-    framing: BodyFraming,
-    connection_close: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BodyFraming {
-    Empty,
-    ContentLength(u64),
-    Chunked(ChunkState),
-    UntilClose,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChunkState {
-    Size,
-    Data(u64),
-    DataCrlf,
-    Trailers,
-}
-
 enum H2SendError {
     Transport(anyhow::Error),
     HeaderTimeout(anyhow::Error),
@@ -1100,457 +853,6 @@ impl H2SendError {
             Self::Transport(e) | Self::HeaderTimeout(e) => e,
         }
     }
-}
-
-async fn write_vectored_all(stream: &mut TcpStream, mut a: &[u8], mut b: &[u8]) -> io::Result<()> {
-    while !a.is_empty() || !b.is_empty() {
-        let n = if !a.is_empty() {
-            let slices = [io::IoSlice::new(a), io::IoSlice::new(b)];
-            stream.write_vectored(&slices).await?
-        } else {
-            return stream.write_all(b).await;
-        };
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "failed to write whole request buffer",
-            ));
-        }
-        if n <= a.len() {
-            a = &a[n..];
-        } else {
-            let rem = n - a.len();
-            a = &[];
-            b = &b[rem..];
-        }
-    }
-    Ok(())
-}
-
-async fn send_and_read_h1_head(
-    stream: &mut H1Stream,
-    req_head: &[u8],
-    body: &Bytes,
-    buf: &mut BytesMut,
-) -> io::Result<ParsedResponseHead> {
-    if body.is_empty() {
-        stream.write_all(req_head).await?;
-    } else if let H1Stream::Plain(tcp) = stream {
-        write_vectored_all(tcp, req_head, body).await?;
-    } else if req_head.len() + body.len() <= 16 * 1024 {
-        let mut combined = Vec::with_capacity(req_head.len() + body.len());
-        combined.extend_from_slice(req_head);
-        combined.extend_from_slice(body);
-        stream.write_all(&combined).await?;
-    } else {
-        stream.write_all(req_head).await?;
-        stream.write_all(body).await?;
-    }
-    stream.flush().await?;
-
-    loop {
-        while find_header_end(buf).is_none() {
-            if buf.len() >= MAX_RESPONSE_HEADER_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "upstream response headers exceeded 64 KiB",
-                ));
-            }
-            let n = stream.read_buf(buf).await?;
-            if n == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "upstream closed connection before sending response headers",
-                ));
-            }
-        }
-        let head = parse_h1_response_head(buf)?;
-        // Skip 1xx informational responses (e.g. `100 Continue`) and wait for
-        // the final response header block.
-        if (100..200).contains(&head.status) && head.status != 101 {
-            continue;
-        }
-        return Ok(head);
-    }
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
-}
-
-fn parse_h1_response_head(buf: &mut BytesMut) -> io::Result<ParsedResponseHead> {
-    let mut headers = [httparse::EMPTY_HEADER; 128];
-    let mut resp = httparse::Response::new(&mut headers);
-    let head_len = match resp.parse(buf) {
-        Ok(httparse::Status::Complete(n)) => n,
-        Ok(httparse::Status::Partial) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "incomplete HTTP/1.1 response header block",
-            ));
-        }
-        Err(e) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("malformed HTTP/1.1 response headers: {e}"),
-            ));
-        }
-    };
-    let status = resp.code.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing HTTP response status")
-    })?;
-    let version = resp.version.unwrap_or(1);
-
-    let mut content_type = None;
-    let mut retry_after: Option<u64> = None;
-    let mut content_length: Option<u64> = None;
-    let mut chunked = false;
-    let mut conn_close = false;
-    let mut conn_keep_alive = false;
-
-    for h in resp.headers.iter() {
-        if h.name.eq_ignore_ascii_case("content-type") {
-            if let Ok(v) = std::str::from_utf8(h.value) {
-                content_type = Some(v.trim().to_string());
-            }
-        } else if h.name.eq_ignore_ascii_case("retry-after") {
-            retry_after = std::str::from_utf8(h.value)
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok());
-        } else if h.name.eq_ignore_ascii_case("content-length") {
-            let s = std::str::from_utf8(h.value).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length header")
-            })?;
-            let parsed = s.trim().parse::<u64>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length value")
-            })?;
-            content_length = Some(parsed);
-        } else if h.name.eq_ignore_ascii_case("transfer-encoding") {
-            if let Ok(v) = std::str::from_utf8(h.value)
-                && v.split(',')
-                    .any(|t| t.trim().eq_ignore_ascii_case("chunked"))
-            {
-                chunked = true;
-            }
-        } else if h.name.eq_ignore_ascii_case("connection")
-            && let Ok(v) = std::str::from_utf8(h.value)
-        {
-            for token in v.split(',') {
-                let t = token.trim();
-                if t.eq_ignore_ascii_case("close") {
-                    conn_close = true;
-                } else if t.eq_ignore_ascii_case("keep-alive") {
-                    conn_keep_alive = true;
-                }
-            }
-        }
-    }
-
-    let _ = buf.split_to(head_len);
-    let connection_close = conn_close || (version == 0 && !conn_keep_alive);
-    let framing = if (100..200).contains(&status) || status == 204 || status == 304 {
-        BodyFraming::Empty
-    } else if chunked {
-        BodyFraming::Chunked(ChunkState::Size)
-    } else if let Some(len) = content_length {
-        if len == 0 {
-            BodyFraming::Empty
-        } else {
-            BodyFraming::ContentLength(len)
-        }
-    } else {
-        BodyFraming::UntilClose
-    };
-
-    Ok(ParsedResponseHead {
-        status,
-        content_type,
-        retry_after,
-        framing,
-        connection_close,
-    })
-}
-
-struct H1Body {
-    stream: Option<H1Stream>,
-    buf: BytesMut,
-    framing: BodyFraming,
-    can_reuse: bool,
-    host_pool: Arc<HostPool>,
-}
-
-impl H1Body {
-    /// If the response body is already complete (e.g. `Content-Length: 0` or
-    /// `204 No Content`), return the socket to the idle pool immediately.
-    fn try_eager_recycle(&mut self) {
-        if matches!(self.framing, BodyFraming::Empty) {
-            self.finish_and_recycle();
-        }
-    }
-
-    fn finish_and_recycle(&mut self) {
-        self.framing = BodyFraming::Empty;
-        if let Some(stream) = self.stream.take()
-            && self.can_reuse
-            && self.buf.is_empty()
-        {
-            self.host_pool.put(stream);
-        }
-    }
-
-    /// Opportunistically consume the final `\r\n0\r\n\r\n` tail when it was
-    /// already buffered alongside the last chunk data, allowing the connection
-    /// to return to the pool without waiting for an extra poll cycle.
-    fn try_consume_buffered_chunked_tail(&mut self) {
-        if self.framing == BodyFraming::Chunked(ChunkState::DataCrlf)
-            && self.buf.starts_with(b"\r\n0\r\n\r\n")
-        {
-            let _ = self.buf.split_to(7);
-            self.finish_and_recycle();
-        }
-    }
-
-    fn poll_read_more(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<usize>> {
-        let Some(stream) = self.stream.as_mut() else {
-            return Poll::Ready(Ok(0));
-        };
-        let mut temp = [0u8; 16 * 1024];
-        let mut read_buf = ReadBuf::new(&mut temp);
-        match Pin::new(stream).poll_read(cx, &mut read_buf) {
-            Poll::Ready(Ok(())) => {
-                let filled = read_buf.filled();
-                if filled.is_empty() {
-                    Poll::Ready(Ok(0))
-                } else {
-                    self.buf.extend_from_slice(filled);
-                    Poll::Ready(Ok(filled.len()))
-                }
-            }
-            Poll::Ready(Err(e)) => {
-                self.stream = None;
-                Poll::Ready(Err(e))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_next_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<io::Result<Bytes>>> {
-        loop {
-            match self.framing {
-                BodyFraming::Empty => {
-                    self.finish_and_recycle();
-                    return Poll::Ready(None);
-                }
-                BodyFraming::ContentLength(remaining) => {
-                    if !self.buf.is_empty() {
-                        let take = (remaining as usize).min(self.buf.len());
-                        let chunk = self.buf.split_to(take).freeze();
-                        let next_rem = remaining - take as u64;
-                        if next_rem == 0 {
-                            self.finish_and_recycle();
-                        } else {
-                            self.framing = BodyFraming::ContentLength(next_rem);
-                        }
-                        return Poll::Ready(Some(Ok(chunk)));
-                    }
-                    match self.poll_read_more(cx) {
-                        Poll::Ready(Ok(0)) => {
-                            self.stream = None;
-                            self.framing = BodyFraming::Empty;
-                            return Poll::Ready(Some(Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "upstream closed before Content-Length completed",
-                            ))));
-                        }
-                        Poll::Ready(Ok(_)) => continue,
-                        Poll::Ready(Err(e)) => {
-                            self.framing = BodyFraming::Empty;
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
-                BodyFraming::UntilClose => {
-                    if !self.buf.is_empty() {
-                        return Poll::Ready(Some(Ok(self.buf.split().freeze())));
-                    }
-                    match self.poll_read_more(cx) {
-                        Poll::Ready(Ok(0)) => {
-                            self.stream = None;
-                            self.framing = BodyFraming::Empty;
-                            return Poll::Ready(None);
-                        }
-                        Poll::Ready(Ok(_)) => continue,
-                        Poll::Ready(Err(e)) => {
-                            self.framing = BodyFraming::Empty;
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        Poll::Pending => return Poll::Pending,
-                    }
-                }
-                BodyFraming::Chunked(state) => match state {
-                    ChunkState::Size => {
-                        if let Some(line_end) = self.buf.windows(2).position(|w| w == b"\r\n") {
-                            let size = match parse_chunk_size(&self.buf[..line_end]) {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    self.stream = None;
-                                    self.framing = BodyFraming::Empty;
-                                    return Poll::Ready(Some(Err(e)));
-                                }
-                            };
-                            let _ = self.buf.split_to(line_end + 2);
-                            if size == 0 {
-                                self.framing = BodyFraming::Chunked(ChunkState::Trailers);
-                            } else {
-                                self.framing = BodyFraming::Chunked(ChunkState::Data(size));
-                            }
-                            continue;
-                        }
-                        if self.buf.len() > MAX_CHUNK_LINE_BYTES {
-                            self.stream = None;
-                            self.framing = BodyFraming::Empty;
-                            return Poll::Ready(Some(Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "upstream chunk size line exceeded limit",
-                            ))));
-                        }
-                        match self.poll_read_more(cx) {
-                            Poll::Ready(Ok(0)) => {
-                                self.stream = None;
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(io::Error::new(
-                                    io::ErrorKind::UnexpectedEof,
-                                    "upstream closed mid-chunked stream",
-                                ))));
-                            }
-                            Poll::Ready(Ok(_)) => continue,
-                            Poll::Ready(Err(e)) => {
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(e)));
-                            }
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    }
-                    ChunkState::Data(remaining) => {
-                        if !self.buf.is_empty() {
-                            let take = (remaining as usize).min(self.buf.len());
-                            let chunk = self.buf.split_to(take).freeze();
-                            let next_rem = remaining - take as u64;
-                            if next_rem == 0 {
-                                self.framing = BodyFraming::Chunked(ChunkState::DataCrlf);
-                                self.try_consume_buffered_chunked_tail();
-                            } else {
-                                self.framing = BodyFraming::Chunked(ChunkState::Data(next_rem));
-                            }
-                            return Poll::Ready(Some(Ok(chunk)));
-                        }
-                        match self.poll_read_more(cx) {
-                            Poll::Ready(Ok(0)) => {
-                                self.stream = None;
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(io::Error::new(
-                                    io::ErrorKind::UnexpectedEof,
-                                    "upstream closed mid-chunk data",
-                                ))));
-                            }
-                            Poll::Ready(Ok(_)) => continue,
-                            Poll::Ready(Err(e)) => {
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(e)));
-                            }
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    }
-                    ChunkState::DataCrlf => {
-                        if self.buf.len() >= 2 {
-                            if &self.buf[..2] != b"\r\n" {
-                                self.stream = None;
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(io::Error::new(
-                                    io::ErrorKind::InvalidData,
-                                    "missing CRLF after chunk payload",
-                                ))));
-                            }
-                            let _ = self.buf.split_to(2);
-                            self.framing = BodyFraming::Chunked(ChunkState::Size);
-                            continue;
-                        }
-                        match self.poll_read_more(cx) {
-                            Poll::Ready(Ok(0)) => {
-                                self.stream = None;
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(io::Error::new(
-                                    io::ErrorKind::UnexpectedEof,
-                                    "upstream closed before chunk trailing CRLF",
-                                ))));
-                            }
-                            Poll::Ready(Ok(_)) => continue,
-                            Poll::Ready(Err(e)) => {
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(e)));
-                            }
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    }
-                    ChunkState::Trailers => {
-                        if self.buf.starts_with(b"\r\n") {
-                            let _ = self.buf.split_to(2);
-                            self.finish_and_recycle();
-                            return Poll::Ready(None);
-                        }
-                        if let Some(end) = find_header_end(&self.buf) {
-                            let _ = self.buf.split_to(end);
-                            self.finish_and_recycle();
-                            return Poll::Ready(None);
-                        }
-                        if self.buf.len() > MAX_RESPONSE_HEADER_BYTES {
-                            self.stream = None;
-                            self.framing = BodyFraming::Empty;
-                            return Poll::Ready(Some(Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "upstream chunk trailers exceeded limit",
-                            ))));
-                        }
-                        match self.poll_read_more(cx) {
-                            Poll::Ready(Ok(0)) => {
-                                self.stream = None;
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(io::Error::new(
-                                    io::ErrorKind::UnexpectedEof,
-                                    "upstream closed before final chunk CRLF",
-                                ))));
-                            }
-                            Poll::Ready(Ok(_)) => continue,
-                            Poll::Ready(Err(e)) => {
-                                self.framing = BodyFraming::Empty;
-                                return Poll::Ready(Some(Err(e)));
-                            }
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    }
-                },
-            }
-        }
-    }
-}
-
-fn parse_chunk_size(line: &[u8]) -> io::Result<u64> {
-    let raw = match line.iter().position(|&b| b == b';') {
-        Some(idx) => &line[..idx],
-        None => line,
-    };
-    let s = std::str::from_utf8(raw)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-ASCII chunk size"))?
-        .trim();
-    if s.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "empty chunk size",
-        ));
-    }
-    u64::from_str_radix(s, 16)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hex chunk size"))
 }
 
 impl Stream for UpstreamBody {
@@ -1663,6 +965,7 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[test]
