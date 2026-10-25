@@ -286,6 +286,8 @@ async fn pool_stats(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 "wait_ms_p50": wait_percentile(&s.wait_buckets, 50),
                 "wait_ms_p99": wait_percentile(&s.wait_buckets, 99),
                 "dials": s.dials,
+                "reused": s.reused,
+                "failed_dials": s.failed_dials,
                 "reclaimed": s.reclaimed,
                 "evicted": s.evicted,
                 "settings_fallbacks": s.settings_fallbacks,

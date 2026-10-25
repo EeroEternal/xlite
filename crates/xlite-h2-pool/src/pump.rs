@@ -23,6 +23,7 @@ use futures_util::stream::FuturesUnordered;
 use h2::RecvStream;
 use tokio::sync::{mpsc, watch};
 
+use crate::error::PumpError;
 use crate::pool::{BoxIo, ConnEntry, HostState, bump, publish_peer_cap};
 
 /// Chunks a request task may lag behind the pump before the pump applies
@@ -40,7 +41,7 @@ const RELEASE_THRESHOLD: usize = 8 * 1024;
 /// A stream handed to the connection's task, with the channel its bytes go to.
 pub(crate) struct Register {
     recv: RecvStream,
-    out: mpsc::Sender<Result<Bytes, String>>,
+    out: mpsc::Sender<Result<Bytes, PumpError>>,
 }
 
 /// The channel a connection's request tasks register their `RecvStream`s on.
@@ -49,20 +50,17 @@ pub(crate) fn register_channel() -> (mpsc::Sender<Register>, mpsc::Receiver<Regi
 }
 
 /// Hand `recv` to the connection's task; the returned receiver yields its chunks
-/// and then ends. A pump-side error arrives as `Err(message)`.
+/// and then ends. A pump-side error arrives as `Err(`[`PumpError]`)`.
 pub(crate) async fn register(
     tx: &mpsc::Sender<Register>,
     recv: RecvStream,
-) -> mpsc::Receiver<Result<Bytes, String>> {
+) -> mpsc::Receiver<Result<Bytes, PumpError>> {
     let (out, body) = mpsc::channel(BODY_CHANNEL);
     if let Err(err) = tx.send(Register { recv, out }).await {
         // The connection task is gone. Fail the stream loudly rather than
         // handing back an empty body.
         let reg = err.0;
-        let _ = reg
-            .out
-            .send(Err("native h2 connection task stopped".to_string()))
-            .await;
+        let _ = reg.out.send(Err(PumpError::Closed)).await;
     }
     body
 }
@@ -158,7 +156,7 @@ async fn pump_stream(reg: Register) {
                 }
             }
             Some(Err(err)) => {
-                let _ = out.send(Err(err.to_string())).await;
+                let _ = out.send(Err(PumpError::from_h2(err))).await;
                 break;
             }
             None => break,

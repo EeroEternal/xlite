@@ -438,7 +438,7 @@ pub struct UpstreamBody {
 
 enum BodyKind {
     H2(h2::RecvStream, usize),
-    Pump(tokio::sync::mpsc::Receiver<Result<Bytes, String>>),
+    Pump(tokio::sync::mpsc::Receiver<Result<Bytes, xlite_h2_pool::PumpError>>),
     H1(H1Body),
 }
 

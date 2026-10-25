@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use bytes::Bytes;
 use h2::SendStream;
@@ -20,16 +21,28 @@ pub struct Lease {
     state: Weak<HostState>,
     send: SendRequest<Bytes>,
     reused: bool,
+    /// Time this acquire was parked behind a full pool.
+    wait: Option<Duration>,
+    /// How long establishing this lease's connection took.
+    dial: Option<Duration>,
 }
 
 impl Lease {
-    pub(crate) fn new(entry: Arc<ConnEntry>, state: Weak<HostState>, reused: bool) -> Self {
+    pub(crate) fn new(
+        entry: Arc<ConnEntry>,
+        state: Weak<HostState>,
+        reused: bool,
+        wait: Option<Duration>,
+        dial: Option<Duration>,
+    ) -> Self {
         let send = entry.send.clone();
         Self {
             entry,
             state,
             send,
             reused,
+            wait,
+            dial,
         }
     }
 
@@ -37,6 +50,20 @@ impl Lease {
     /// connection (`true`) rather than freshly dialed for this acquire (`false`).
     pub fn is_reused(&self) -> bool {
         self.reused
+    }
+
+    /// Time this acquire was parked behind a full pool: `Some(0)` = acquired
+    /// immediately (the pool measured, there was nothing to wait for).
+    /// `None` = this backend does not measure wait.
+    pub fn wait(&self) -> Option<Duration> {
+        self.wait
+    }
+
+    /// How long establishing this lease's connection took, or `None` when a
+    /// pooled connection was reused (no dial happened — a different fact from
+    /// "a dial that took zero time").
+    pub fn dial_time(&self) -> Option<Duration> {
+        self.dial
     }
 
     /// Immediately evict this lease's connection from the host pool so no
@@ -66,14 +93,12 @@ impl Lease {
     pub async fn register(
         &self,
         recv: h2::RecvStream,
-    ) -> tokio::sync::mpsc::Receiver<Result<Bytes, String>> {
+    ) -> tokio::sync::mpsc::Receiver<Result<Bytes, crate::PumpError>> {
         match self.entry.pump.as_ref() {
             Some(tx) => crate::pump::register(tx, recv).await,
             None => {
                 let (out, rx) = tokio::sync::mpsc::channel(1);
-                let _ = out
-                    .send(Err("lease is not in pinned-poll mode".to_string()))
-                    .await;
+                let _ = out.send(Err(crate::PumpError::NotPinned)).await;
                 rx
             }
         }

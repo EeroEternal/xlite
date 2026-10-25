@@ -42,7 +42,7 @@ mod lease;
 mod pool;
 mod pump;
 
-pub use error::PoolError;
+pub use error::{PoolError, PumpError};
 pub use lease::Lease;
 pub use pool::{
     BoxIo, CONNECTION_WINDOW_SIZE, Config, DEFAULT_IDLE_TIMEOUT, DEFAULT_STREAM_BUDGET_PER_CONN,

@@ -176,6 +176,10 @@ pub(crate) struct HostState {
     ceiling_logged: AtomicBool,
     /// Connections successfully dialled.
     dials: AtomicU64,
+    /// Acquires served from an already-established connection.
+    reused: AtomicU64,
+    /// Dial attempts that failed (each bounded retry counts).
+    failed_dials: AtomicU64,
     /// Idle connections closed by the reaper.
     reclaimed: AtomicU64,
     /// Connections the pool stopped trusting: [`Lease::evict`] or a driver end
@@ -214,6 +218,8 @@ impl HostState {
             generation_tx,
             reaper_started: AtomicBool::new(false),
             dials: AtomicU64::new(0),
+            reused: AtomicU64::new(0),
+            failed_dials: AtomicU64::new(0),
             ceiling_logged: AtomicBool::new(false),
             waiting: AtomicUsize::new(0),
             waiting_max: AtomicUsize::new(0),
@@ -269,6 +275,10 @@ pub struct PoolStats {
     pub in_flight: usize,
     /// Connections dialled over this pool's lifetime.
     pub dials: u64,
+    /// Acquires served from an already-established connection.
+    pub reused: u64,
+    /// Dial attempts that failed (each bounded retry counts).
+    pub failed_dials: u64,
     /// Idle connections closed by the reaper.
     pub reclaimed: u64,
     /// Connections the pool stopped trusting: [`Lease::evict`] after a header
@@ -415,10 +425,18 @@ impl Pool {
             // and one CAS on the connection's in-flight counter. No host mutex,
             // no watch lock.
             if let Some(entry) = Self::reserve_existing(&state, self.stream_budget_per_conn) {
-                if let Some(start) = parked_since {
-                    record_wait(&state, start.elapsed());
+                let waited = parked_since.map(|s| s.elapsed()).unwrap_or_default();
+                if parked_since.is_some() {
+                    record_wait(&state, waited);
                 }
-                return Ok(Lease::new(entry, Arc::downgrade(&state), true));
+                state.reused.fetch_add(1, Ordering::Relaxed);
+                return Ok(Lease::new(
+                    entry,
+                    Arc::downgrade(&state),
+                    true,
+                    Some(waited),
+                    None,
+                ));
             }
 
             // All full: dial another connection if there is room and none is
@@ -433,19 +451,28 @@ impl Pool {
                 // this future is dropped mid-dial — so a cancelled acquire
                 // never leaks a slot.
                 let slot = DialSlot { state: &state };
+                let dial_started = Instant::now();
                 let result = self.dial_and_insert(host, &state).await;
                 match result {
                     Ok(entry) => {
+                        let dial_time = dial_started.elapsed();
+                        let waited = parked_since.map(|s| s.elapsed()).unwrap_or_default();
                         drop(slot);
 
                         // `dial_and_insert` already reserved this request's slot while
                         // the connection was still invisible to other acquirers, so a
                         // waiter woken by the insert can never take the last free slot
                         // before us (which is what produced `old == cap` here).
-                        if let Some(start) = parked_since {
-                            record_wait(&state, start.elapsed());
+                        if parked_since.is_some() {
+                            record_wait(&state, waited);
                         }
-                        return Ok(Lease::new(entry, Arc::downgrade(&state), false));
+                        return Ok(Lease::new(
+                            entry,
+                            Arc::downgrade(&state),
+                            false,
+                            Some(waited),
+                            Some(dial_time),
+                        ));
                     }
                     Err(err) => {
                         // A failed dial is what turns into the client's 502, and a
@@ -467,6 +494,7 @@ impl Pool {
                         // immediately, the CAS above would succeed again, and `acquire`
                         // would spin hot between steps 1 and 2 (`ECONNREFUSED` returns
                         // without ever yielding).
+                        state.failed_dials.fetch_add(1, Ordering::Relaxed);
                         dial_failures += 1;
                         if dial_failures > DIAL_RETRIES || !is_retryable_dial_error(&err) {
                             if let Some(start) = parked_since {
@@ -498,10 +526,18 @@ impl Pool {
             let _wait_slot = WaitSlot::new(&state);
             let mut generation = state.generation_tx.subscribe();
             if let Some(entry) = Self::reserve_existing(&state, self.stream_budget_per_conn) {
-                if let Some(start) = parked_since {
-                    record_wait(&state, start.elapsed());
+                let waited = parked_since.map(|s| s.elapsed()).unwrap_or_default();
+                if parked_since.is_some() {
+                    record_wait(&state, waited);
                 }
-                return Ok(Lease::new(entry, Arc::downgrade(&state), true));
+                state.reused.fetch_add(1, Ordering::Relaxed);
+                return Ok(Lease::new(
+                    entry,
+                    Arc::downgrade(&state),
+                    true,
+                    Some(waited),
+                    None,
+                ));
             }
             if generation.changed().await.is_err() {
                 // Sender dropped: the pool is gone.
@@ -705,6 +741,8 @@ impl Pool {
                 connections: 0,
                 in_flight: 0,
                 dials: 0,
+                reused: 0,
+                failed_dials: 0,
                 reclaimed: 0,
                 evicted: 0,
                 settings_fallbacks: 0,
@@ -735,6 +773,8 @@ impl Pool {
             connections,
             in_flight,
             dials: state.dials.load(Ordering::Relaxed),
+            reused: state.reused.load(Ordering::Relaxed),
+            failed_dials: state.failed_dials.load(Ordering::Relaxed),
             reclaimed: state.reclaimed.load(Ordering::Relaxed),
             evicted: state.evicted.load(Ordering::Relaxed),
             settings_fallbacks: state.settings_fallbacks.load(Ordering::Relaxed),

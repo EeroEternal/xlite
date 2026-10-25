@@ -250,6 +250,11 @@ async fn a_persistent_dial_failure_gives_up_after_bounded_retries() {
         "the backoff has to actually happen: it is what prevents the hot spin"
     );
     assert_eq!(pool.connection_count("upstream"), 0);
+    assert_eq!(
+        pool.stats("upstream").failed_dials,
+        3,
+        "each bounded dial attempt that failed is counted"
+    );
 }
 
 /// Resource exhaustion is persistent, not transient: `EMFILE` must not be
@@ -701,6 +706,8 @@ async fn stats_track_connections_in_flight_and_dials() {
     assert_eq!(stats.connections, 1);
     assert_eq!(stats.in_flight, 1);
     assert_eq!(stats.dials, 1);
+    assert_eq!(stats.reused, 0, "the first acquire dialed, never reused");
+    assert_eq!(stats.failed_dials, 0);
     assert_eq!(stats.reclaimed, 0);
     assert_eq!(stats.settings_fallbacks, 0);
     assert_eq!(stats.cap_updates, 0);
@@ -709,6 +716,17 @@ async fn stats_track_connections_in_flight_and_dials() {
     drop(lease);
     assert_eq!(pool.stats("upstream").in_flight, 0);
 
+    // A second acquire on the warm connection is counted as a reuse.
+    let lease = pool.acquire("upstream").await.unwrap();
+    assert!(lease.is_reused());
+    assert_eq!(lease.dial_time(), None, "a reused lease never dialled");
+    let wait = lease.wait().expect("the h2 pool always measures wait");
+    assert!(wait < Duration::from_secs(1), "immediate acquire: {wait:?}");
+    let stats = pool.stats("upstream");
+    assert_eq!(stats.dials, 1, "no new dial for a reuse");
+    assert_eq!(stats.reused, 1);
+    drop(lease);
+
     // Unknown host: zeroed snapshot, no side effects.
     assert_eq!(
         pool.stats("never-dialled"),
@@ -716,6 +734,8 @@ async fn stats_track_connections_in_flight_and_dials() {
             connections: 0,
             in_flight: 0,
             dials: 0,
+            reused: 0,
+            failed_dials: 0,
             reclaimed: 0,
             evicted: 0,
             settings_fallbacks: 0,
@@ -1131,7 +1151,7 @@ fn chat_request(path: &str) -> http::Request<()> {
 async fn open_stream(
     lease: &mut xlite_h2_pool::Lease,
     path: &str,
-) -> tokio::sync::mpsc::Receiver<Result<Bytes, String>> {
+) -> tokio::sync::mpsc::Receiver<Result<Bytes, xlite_h2_pool::PumpError>> {
     let (response, send_stream) = lease.send_request(chat_request(path), true).unwrap();
     drop(send_stream);
     let recv = response.await.unwrap().into_body();
@@ -1295,16 +1315,20 @@ async fn clean_eof_and_upstream_reset_both_terminate_the_pump() {
     // Upstream-side reset: bytes then an error, then the channel closes.
     let mut lease = pool.acquire("upstream").await.unwrap();
     let mut body = open_stream(&mut lease, "/reset").await;
-    let mut saw_error = false;
+    let mut saw_error = None;
     while let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), body.recv())
         .await
         .expect("an upstream reset must end the pump")
     {
-        if chunk.is_err() {
-            saw_error = true;
+        if let Err(err) = chunk {
+            saw_error = Some(err);
         }
     }
-    assert!(saw_error, "an upstream reset must surface as a pump error");
+    let err = saw_error.expect("an upstream reset must surface as a pump error");
+    assert!(
+        matches!(&err, xlite_h2_pool::PumpError::Reset { code: Some(0) }),
+        "RST_STREAM(NO_ERROR) must arrive as a typed Reset, got {err:?}"
+    );
     drop(lease);
 }
 
