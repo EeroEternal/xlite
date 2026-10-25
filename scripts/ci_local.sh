@@ -185,6 +185,11 @@ if [[ "$want_rust" == "1" ]]; then
   cargo test --lib
   cargo test -p xlite-h2-pool --lib
   cargo test -p xlite-transport
+  # The cargo-tree-gated configuration and the h2-only build must keep working:
+  # default-features off is what downstream pins, so it gets a full test run,
+  # not just a compile.
+  cargo test -p xlite-transport --no-default-features --features h1
+  cargo test -p xlite-transport --no-default-features --features h2
   bash scripts/check_transport_deps.sh
   if [[ "$TIER" != "t0" ]]; then
     cargo test -p xlite-h2-pool

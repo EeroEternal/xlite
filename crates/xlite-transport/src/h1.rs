@@ -370,11 +370,14 @@ pub async fn dial_h1(
     }
     #[cfg(not(feature = "tls-rustls"))]
     {
-        let _ = tls_host;
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "tls host supplied but built without tls-rustls",
-        ))
+        match tls_host {
+            // Plain HTTP/1.1 — the whole point of a `["h1"]`-only build.
+            None => Ok(H1Stream::plain(tcp)),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tls host supplied but built without tls-rustls",
+            )),
+        }
     }
 }
 
