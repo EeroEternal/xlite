@@ -148,7 +148,7 @@ For high-concurrency cleartext HTTP/1.1 upstreams (where one TCP connection carr
 3. **Immediate Downstream Cancellation Propagation**:
    - In `crates/xlite-h2-pool/src/pump.rs`, the stream pump `select!`s on `out.closed()` while waiting for upstream H2 frames. If a downstream client disconnects mid-generation, `xlite` immediately drops the upstream `RecvStream` and sends `RST_STREAM(CANCEL)`—freeing the upstream stream slot even if the LLM backend is silent during long reasoning steps.
 4. **Lock-Free Pool Telemetry (`GET /api/pool`)**:
-   - Exposes per-host connection counts, in-flight streams, effective stream ceilings, and queue wait percentiles (`wait_ms_p50` / `wait_ms_p99`) with zero contention on the data plane.
+   - Exposes per-host connection counts, in-flight streams, effective stream ceilings, and queue wait percentiles (`wait_ms_p50` / `wait_ms_p99`) with zero contention on the data plane. `reclaimed` counts idle connections the reaper closed; `evicted` counts connections the pool stopped trusting — evicted by a caller after a header timeout or transport error, or ended while a stream was still in flight — so a degrading upstream is visible before it is diagnosed; a routine idle close counts as neither.
 5. **Startup FD Budget Self-Check (`RLIMIT_NOFILE`)**:
    - On Linux startup, `src/config.rs` inspects `/proc/self/limits` and logs an explicit warning if `Max open files` soft limit is below `65,536` (preventing the silent Docker `nofile=1024` throughput cliff documented in [Benchmarks](benchmarks.md#3-operational-root-cause-ablations)).
 

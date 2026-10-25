@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`evicted` pool counter (`PoolStats`, `GET /api/pool`, `crates/xlite-h2-pool`)**: connections the pool stopped trusting (`Lease::evict` on a header timeout or transport error, or a connection driver that ended while a stream was still in flight) are now counted separately from `reclaimed` (idle housekeeping) and surfaced in `/api/pool` — a rising `evicted` says the pool keeps finding sockets it can no longer trust (the degrading-path signal behind #90), while `reclaimed` still means "the reaper tidied up" and a routine idle close counts as neither; the unknown-host snapshot and the existing `PoolStats` comparison test were updated to match.
+
 ## [0.8.0] - 2026-10-24
 
 - **Dead upstream detected in 30s instead of 120s (`src/upstream.rs`)**: the upstream socket keepalive never set `TCP_KEEPCNT`, so the kernel used its default of 9 probes — with `time=30s, interval=10s` a blackholed peer took `120s` to fail, exactly as long as the header timeout, which meant the kernel's own signal always arrived too late to be useful and every later request inherited the stall. The budget is now `15s + 3 × 5s = 30s` (`with_retries(3)`), so a dead path surfaces as a transport error and fails over while the header-timeout watchdog is still only a quarter spent. No new dependency, no new env var.

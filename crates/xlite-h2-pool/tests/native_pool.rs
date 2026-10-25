@@ -717,6 +717,7 @@ async fn stats_track_connections_in_flight_and_dials() {
             in_flight: 0,
             dials: 0,
             reclaimed: 0,
+            evicted: 0,
             settings_fallbacks: 0,
             cap_updates: 0,
             stream_budget_per_conn: xlite_h2_pool::DEFAULT_STREAM_BUDGET_PER_CONN,
@@ -1408,4 +1409,11 @@ async fn lease_tracks_reused_state_and_evict_removes_connection_across_multiple_
         "acquire after evict must dial a fresh connection"
     );
     assert_eq!(dials.load(Ordering::SeqCst), 3);
+
+    // The eviction must be observable and must not be confused with idle reaping:
+    // one counter says "stopped trusting a socket", the other says "housekeeping".
+    let stats_a = pool.stats("host-a:443");
+    assert_eq!(stats_a.evicted, 1, "evict() must be counted");
+    assert_eq!(stats_a.reclaimed, 0, "evict() is not idle reclamation");
+    assert_eq!(pool.stats("host-b:443").evicted, 0, "host-b was untouched");
 }
