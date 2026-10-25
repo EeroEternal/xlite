@@ -1,5 +1,6 @@
 //! Transport construction: everything passed in, nothing read from env or disk.
 
+#[cfg(feature = "tls-rustls")]
 use std::sync::Arc;
 use std::time::Duration;
 

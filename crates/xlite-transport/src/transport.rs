@@ -27,8 +27,9 @@ pub struct AttemptTelemetry {
     pub redial_reason: Option<StaleKind>,
     /// Headers the transport added, removed or synthesized on the way out
     /// (e.g. `content-length`, `host`, RFC 9113 connection-specific strips on
-    /// h2). Everything not listed here went out byte-for-byte.
-    pub headers_rewritten: &'static [&'static str],
+    /// h2). Everything not listed here went out byte-for-byte. Empty when the
+    /// attempt went out untouched (no allocation).
+    pub headers_rewritten: Vec<&'static str>,
 }
 
 /// The successful half of one attempt.

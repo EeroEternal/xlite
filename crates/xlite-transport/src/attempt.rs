@@ -69,16 +69,6 @@ impl Attempt {
         }
         Ok(())
     }
-
-    /// `path?query` as sent on the wire (absolute-form is stripped for h1;
-    /// h2 derives `:path` from it).
-    #[allow(dead_code)] // used by the feature-gated backends
-    pub(crate) fn path_and_query(&self) -> &str {
-        match self.uri.path_and_query() {
-            Some(pq) => pq.as_str(),
-            None => "/",
-        }
-    }
 }
 
 /// `Box::leak` is unacceptable here; keep the message static by mapping the

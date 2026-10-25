@@ -171,17 +171,21 @@ fi
 # ---- rust ------------------------------------------------------------------
 if [[ "$want_rust" == "1" ]]; then
   say "rust fmt"
-  cargo fmt -p xlite -p xlite-h2-pool --check
+  cargo fmt -p xlite -p xlite-h2-pool -p xlite-transport --check
   ok "fmt"
 
   say "rust clippy"
   cargo clippy -p xlite --lib --tests -- -D warnings
   cargo clippy -p xlite-h2-pool --lib --tests -- -D warnings
+  cargo clippy -p xlite-transport --lib --tests --all-features -- -D warnings
+  cargo clippy -p xlite-transport --lib --tests --no-default-features -- -D warnings
   ok "clippy"
 
   say "rust tests"
   cargo test --lib
   cargo test -p xlite-h2-pool --lib
+  cargo test -p xlite-transport
+  bash scripts/check_transport_deps.sh
   if [[ "$TIER" != "t0" ]]; then
     cargo test -p xlite-h2-pool
   fi

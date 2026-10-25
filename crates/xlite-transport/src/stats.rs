@@ -39,10 +39,16 @@ pub struct HostStats {
     pub reaped_idle: Option<u64>,
     /// Acquirers parked on a full pool right now.
     pub waiting: u64,
-    /// Per-acquire wait percentiles. `None` = the backend does not measure
-    /// per-acquire wait — not zero.
+    /// Percentiles of the time acquires actually spent parked (a fresh,
+    /// immediate acquire is measured as `Some(0)` on the lease but is not a
+    /// queue-wait sample). `None` = nothing has parked yet, or the backend
+    /// does not measure wait — `wait_samples` on the same row is what tells
+    /// those apart for h2; h1 reports `None` in Phase 1 (not measured).
     pub wait_ms_p50: Option<u64>,
     pub wait_ms_p99: Option<u64>,
+    /// Acquires that were sampled for the percentiles (had to park at least
+    /// once). `0` with `wait_ms_p50: None` = measured, nothing to report.
+    pub wait_samples: u64,
 }
 
 /// A point-in-time snapshot across every host this transport has touched.

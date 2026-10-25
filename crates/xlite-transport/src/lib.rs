@@ -28,9 +28,17 @@ mod error;
 mod stats;
 mod transport;
 
+#[cfg(feature = "h2")]
+mod h2;
+
 pub use attempt::Attempt;
 pub use body::BodyStream;
 pub use config::TransportConfig;
 pub use error::{StaleKind, TransportError};
+#[cfg(feature = "h2")]
+pub use h2::H2Transport;
 pub use stats::{Backend, HostStats, TransportStats};
 pub use transport::{AttemptOutcome, AttemptTelemetry, Transport};
+/// Re-exported so callers can supply their own dial ([`H2Transport::with_dial`]).
+#[cfg(feature = "h2")]
+pub use xlite_h2_pool::{BoxIo, Dial};
