@@ -18,7 +18,9 @@ pub struct AttemptTelemetry {
     /// Time this acquire was parked behind a full pool. `Some(0)` = acquired
     /// immediately. `None` = the backend does not measure wait.
     pub pool_wait: Option<std::time::Duration>,
-    /// Streams reserved on the connection at acquire time.
+    /// Streams reserved on the connection at acquire time. The h1 backend
+    /// reports `0`: HTTP/1.1 serves one exchange per connection, there is
+    /// nothing multiplexed to count.
     pub in_flight_at_acquire: usize,
     /// How many times the caller's helper redialled before this outcome (0
     /// for a bare [`Transport::execute`]).

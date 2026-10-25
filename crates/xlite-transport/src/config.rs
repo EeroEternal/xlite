@@ -40,6 +40,11 @@ pub struct TransportConfig {
     pub tls: Option<Arc<rustls::ClientConfig>>,
 }
 
+/// How long a `None` [`TransportConfig::pool_idle_reclaim`] keeps idle
+/// connections: practically never, without overflowing the pool's ms counters.
+#[cfg(any(feature = "h1", feature = "h2"))]
+pub(crate) const NEVER_RECLAIM: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
+
 impl TransportConfig {
     /// A sane default for cleartext-only, in-process upstreams (vLLM /
     /// SGLang on a private network): no internal watchdogs, caller owns all

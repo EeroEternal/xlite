@@ -13,17 +13,27 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::{Bytes, BytesMut};
-use http::{HeaderMap, Method};
+use futures_util::Stream;
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
+use crate::attempt::Attempt;
+use crate::body::BodyStream;
+use crate::config::{NEVER_RECLAIM, TransportConfig};
 use crate::configure_tcp_socket;
+use crate::error::{StaleKind, TransportError};
+use crate::stats::{Backend, HostStats, TransportStats};
+#[cfg(feature = "tls-rustls")]
+use crate::tls_host_from_authority;
+use crate::transport::{AttemptOutcome, AttemptTelemetry, Transport};
 
 /// Maximum response header block size accepted from an upstream (64 KiB).
 const MAX_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
@@ -52,18 +62,59 @@ pub fn render_h1_head(method: &Method, path: &str, headers: &HeaderMap) -> Vec<u
     out
 }
 
-pub enum H1Stream {
+pub struct H1Stream {
+    kind: H1Kind,
+    /// Gauge handle: incremented when attached, decremented when this stream
+    /// is dropped — one mechanism covers every death path (idle reaping,
+    /// liveness-probe rejection, mid-body close, caller discard).
+    live: Option<Arc<AtomicUsize>>,
+}
+
+enum H1Kind {
     Plain(TcpStream),
     #[cfg(feature = "tls-rustls")]
     Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
 }
 
 impl H1Stream {
+    /// A cleartext connection, not yet accounted against any pool gauge.
+    pub fn plain(tcp: TcpStream) -> Self {
+        Self {
+            kind: H1Kind::Plain(tcp),
+            live: None,
+        }
+    }
+
+    /// A TLS connection, not yet accounted against any pool gauge.
+    #[cfg(feature = "tls-rustls")]
+    pub fn tls(stream: Box<tokio_rustls::client::TlsStream<TcpStream>>) -> Self {
+        Self {
+            kind: H1Kind::Tls(stream),
+            live: None,
+        }
+    }
+
+    /// Count this connection as live on `gauge` for the rest of its life.
+    pub(crate) fn attach_live(&mut self, gauge: &Arc<AtomicUsize>) {
+        gauge.fetch_add(1, Ordering::AcqRel);
+        self.live = Some(Arc::clone(gauge));
+    }
+
     fn tcp_stream(&self) -> &TcpStream {
-        match self {
-            Self::Plain(s) => s,
+        match &self.kind {
+            H1Kind::Plain(s) => s,
             #[cfg(feature = "tls-rustls")]
-            Self::Tls(s) => s.get_ref().0,
+            H1Kind::Tls(s) => s.get_ref().0,
+        }
+    }
+
+    /// The cleartext TCP stream, when this connection is not TLS — used to
+    /// write head+body with a vectored write.
+    fn plain_mut(&mut self) -> Option<&mut TcpStream> {
+        match &mut self.kind {
+            H1Kind::Plain(tcp) => Some(tcp),
+            #[cfg(feature = "tls-rustls")]
+            H1Kind::Tls(_) => None,
         }
     }
 
@@ -82,16 +133,24 @@ impl H1Stream {
     }
 }
 
+impl Drop for H1Stream {
+    fn drop(&mut self) {
+        if let Some(gauge) = &self.live {
+            gauge.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 impl AsyncRead for H1Stream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
+        match &mut self.get_mut().kind {
+            H1Kind::Plain(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "tls-rustls")]
-            Self::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            H1Kind::Tls(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -102,26 +161,26 @@ impl AsyncWrite for H1Stream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_write(cx, buf),
+        match &mut self.get_mut().kind {
+            H1Kind::Plain(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "tls-rustls")]
-            Self::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            H1Kind::Tls(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_flush(cx),
+        match &mut self.get_mut().kind {
+            H1Kind::Plain(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "tls-rustls")]
-            Self::Tls(s) => Pin::new(s).poll_flush(cx),
+            H1Kind::Tls(s) => Pin::new(s).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
+        match &mut self.get_mut().kind {
+            H1Kind::Plain(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "tls-rustls")]
-            Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            H1Kind::Tls(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -135,6 +194,12 @@ pub struct HostPool {
     max_idle: usize,
     idle_timeout: Duration,
     idle: Mutex<VecDeque<IdleH1Conn>>,
+    /// Live connections (idle + checked out): +1 when a dial attaches, -1 on
+    /// every `H1Stream` drop — see `H1Stream::attach_live`.
+    live: Arc<AtomicUsize>,
+    /// Idle connections dropped because they expired (issue #96: h1 does
+    /// count reclamation, so `reaped_idle` is `Some`).
+    reaped: AtomicU64,
 }
 
 impl HostPool {
@@ -143,6 +208,8 @@ impl HostPool {
             max_idle,
             idle_timeout,
             idle: Mutex::new(VecDeque::new()),
+            live: Arc::new(AtomicUsize::new(0)),
+            reaped: AtomicU64::new(0),
         }
     }
 
@@ -152,11 +219,16 @@ impl HostPool {
         loop {
             let candidate = {
                 let mut guard = self.idle.lock().expect("h1 pool mutex poisoned");
+                let mut expired = 0usize;
                 while guard
                     .front()
                     .is_some_and(|c| c.since.elapsed() >= self.idle_timeout)
                 {
                     guard.pop_front();
+                    expired += 1;
+                }
+                if expired > 0 {
+                    self.reaped.fetch_add(expired as u64, Ordering::Relaxed);
                 }
                 guard.pop_back()
             }?;
@@ -173,11 +245,16 @@ impl HostPool {
             return;
         }
         if let Ok(mut guard) = self.idle.lock() {
+            let mut expired = 0usize;
             while guard
                 .front()
                 .is_some_and(|c| c.since.elapsed() >= self.idle_timeout)
             {
                 guard.pop_front();
+                expired += 1;
+            }
+            if expired > 0 {
+                self.reaped.fetch_add(expired as u64, Ordering::Relaxed);
             }
             if guard.len() >= self.max_idle {
                 guard.pop_front();
@@ -257,7 +334,7 @@ pub async fn dial_h1(
 
     #[cfg(feature = "tls-rustls")]
     let Some(host) = tls_host else {
-        return Ok(H1Stream::Plain(tcp));
+        return Ok(H1Stream::plain(tcp));
     };
     #[cfg(feature = "tls-rustls")]
     {
@@ -289,7 +366,7 @@ pub async fn dial_h1(
                 })?
                 // Tagged InvalidData so callers report `Tls`.
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("tls: {e}")))?;
-        Ok(H1Stream::Tls(Box::new(tls_stream)))
+        Ok(H1Stream::tls(Box::new(tls_stream)))
     }
     #[cfg(not(feature = "tls-rustls"))]
     {
@@ -304,6 +381,11 @@ pub async fn dial_h1(
 #[derive(Debug)]
 pub struct ParsedResponseHead {
     pub status: u16,
+    /// `0` = HTTP/1.0, `1` = HTTP/1.1 (what the status line declared).
+    pub http_version: u8,
+    /// Response headers verbatim, duplicates preserved (append order within a
+    /// name matches the wire; `HeaderMap` iteration order is internal).
+    pub headers: HeaderMap,
     pub content_type: Option<String>,
     pub retry_after: Option<u64>,
     pub framing: BodyFraming,
@@ -339,7 +421,7 @@ pub async fn send_and_read_h1_head(
 ) -> io::Result<ParsedResponseHead> {
     if body.is_empty() {
         stream.write_all(req_head).await?;
-    } else if let H1Stream::Plain(tcp) = stream {
+    } else if let Some(tcp) = stream.plain_mut() {
         write_vectored_all(tcp, req_head, body).await?;
     } else if req_head.len() + body.len() <= 16 * 1024 {
         let mut combined = Vec::with_capacity(req_head.len() + body.len());
@@ -436,8 +518,14 @@ fn parse_h1_response_head(buf: &mut BytesMut) -> io::Result<ParsedResponseHead> 
     let mut chunked = false;
     let mut conn_close = false;
     let mut conn_keep_alive = false;
+    let mut response_headers = HeaderMap::with_capacity(resp.headers.len());
 
     for h in resp.headers.iter() {
+        if let Ok(name) = HeaderName::from_bytes(h.name.as_bytes())
+            && let Ok(value) = HeaderValue::from_bytes(h.value)
+        {
+            response_headers.append(name, value);
+        }
         if h.name.eq_ignore_ascii_case("content-type") {
             if let Ok(v) = std::str::from_utf8(h.value) {
                 content_type = Some(v.trim().to_string());
@@ -493,6 +581,8 @@ fn parse_h1_response_head(buf: &mut BytesMut) -> io::Result<ParsedResponseHead> 
 
     Ok(ParsedResponseHead {
         status,
+        http_version: version,
+        headers: response_headers,
         content_type,
         retry_after,
         framing,
@@ -785,4 +875,344 @@ fn parse_chunk_size(line: &[u8]) -> io::Result<u64> {
     }
     u64::from_str_radix(s, 16)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hex chunk size"))
+}
+
+// ---------------------------------------------------------------------------
+// H1Transport: the `Transport` contract over the pool above.
+// ---------------------------------------------------------------------------
+
+/// Per-authority counters (cold map insert; the read path is an `ArcSwap`
+/// load, like the pool's own host maps).
+#[derive(Default)]
+struct HostCounters {
+    /// Successful dials (attempts that failed count as `failed_dials`).
+    dials: AtomicU64,
+    failed_dials: AtomicU64,
+    /// Checkouts served from a warm idle connection.
+    reused: AtomicU64,
+    /// Sockets discarded because the pool stopped trusting them.
+    evicted: AtomicU64,
+    /// Subset: a **reused** socket failed before the first response byte —
+    /// the class `execute_redial_once` may redial.
+    evicted_stale: AtomicU64,
+}
+
+/// HTTP/1.1 upstream transport, pooled per `scheme://authority`.
+///
+/// Exactly one request→response exchange per `execute()`: no redial, no
+/// retry. The stale-keep-alive race is surfaced as
+/// [`TransportError::StaleConnection`] for the caller's helper to decide on.
+pub struct H1Transport {
+    pool: H1Pool,
+    counters: ArcSwap<HashMap<String, Arc<HostCounters>>>,
+    mutate: Mutex<()>,
+    header_timeout: Option<Duration>,
+    stall_timeout: Option<Duration>,
+    connect_timeout: Duration,
+    #[cfg(feature = "tls-rustls")]
+    tls: Option<tokio_rustls::TlsConnector>,
+}
+
+impl H1Transport {
+    /// Build a transport over TCP (and, for `https`, TLS with the caller's
+    /// [`rustls::ClientConfig`]).
+    pub fn new(cfg: TransportConfig) -> Self {
+        let pool = H1Pool::new(
+            cfg.h1_max_conns_per_host.max(1),
+            cfg.pool_idle_reclaim.unwrap_or(NEVER_RECLAIM),
+        );
+        #[cfg(feature = "tls-rustls")]
+        let tls = cfg
+            .tls
+            .as_ref()
+            .map(|c| tokio_rustls::TlsConnector::from(Arc::clone(c)));
+        Self {
+            pool,
+            counters: ArcSwap::from_pointee(HashMap::new()),
+            mutate: Mutex::new(()),
+            header_timeout: cfg.header_timeout,
+            stall_timeout: cfg.stall_timeout,
+            connect_timeout: cfg.connect_timeout,
+            #[cfg(feature = "tls-rustls")]
+            tls,
+        }
+    }
+
+    fn counters_for(&self, key: &str) -> Arc<HostCounters> {
+        if let Some(found) = self.counters.load().get(key) {
+            return Arc::clone(found);
+        }
+        let _guard = self.mutate.lock().expect("h1 counters mutex poisoned");
+        let current = self.counters.load();
+        if let Some(found) = current.get(key) {
+            return Arc::clone(found);
+        }
+        let fresh = Arc::new(HostCounters::default());
+        let mut next = (**current).clone();
+        next.insert(key.to_string(), Arc::clone(&fresh));
+        self.counters.store(Arc::new(next));
+        fresh
+    }
+}
+
+impl Transport for H1Transport {
+    async fn execute(&self, attempt: Attempt) -> Result<AttemptOutcome, TransportError> {
+        // 1. Everything checkable without a socket, checked before any I/O.
+        attempt.validate()?;
+        let scheme = attempt
+            .uri
+            .scheme_str()
+            .ok_or(TransportError::InvalidRequest("uri has no scheme"))?;
+        if scheme != "http" && scheme != "https" {
+            return Err(TransportError::InvalidRequest(
+                "only http/https authorities are served by the h1 backend",
+            ));
+        }
+        #[cfg(not(feature = "tls-rustls"))]
+        if scheme == "https" {
+            return Err(TransportError::InvalidRequest(
+                "https authority but the transport was built without tls-rustls",
+            ));
+        }
+        if attempt
+            .headers
+            .contains_key(http::header::TRANSFER_ENCODING)
+        {
+            return Err(TransportError::InvalidRequest(
+                "the h1 backend sends `Bytes` with content-length; transfer-encoding is caller-encoded or unsupported",
+            ));
+        }
+        let authority = attempt
+            .uri
+            .authority()
+            .map(|a| a.as_str().to_string())
+            .ok_or(TransportError::InvalidRequest("uri has no authority"))?;
+        let is_tls = scheme == "https";
+        let key = format!("{scheme}://{authority}");
+        let counters = self.counters_for(&key);
+        let host_pool = self.pool.host_pool(is_tls, &authority);
+
+        // 2. Warm checkout or dial.
+        let dial_started = std::time::Instant::now();
+        let (mut stream, reused) = match host_pool.take_idle() {
+            Some(stream) => {
+                counters.reused.fetch_add(1, Ordering::Relaxed);
+                (stream, true)
+            }
+            None => {
+                #[cfg(feature = "tls-rustls")]
+                let tls_host = if is_tls {
+                    Some(tls_host_from_authority(&authority))
+                } else {
+                    None
+                };
+                #[cfg(not(feature = "tls-rustls"))]
+                let tls_host: Option<&str> = None;
+                match dial_h1(
+                    &authority,
+                    tls_host,
+                    #[cfg(feature = "tls-rustls")]
+                    self.tls.as_ref(),
+                    self.connect_timeout,
+                )
+                .await
+                {
+                    Ok(mut stream) => {
+                        stream.attach_live(&host_pool.live);
+                        counters.dials.fetch_add(1, Ordering::Relaxed);
+                        (stream, false)
+                    }
+                    Err(err) => {
+                        counters.failed_dials.fetch_add(1, Ordering::Relaxed);
+                        return Err(map_dial_error(err));
+                    }
+                }
+            }
+        };
+        let dial_time = if reused {
+            None
+        } else {
+            Some(dial_started.elapsed())
+        };
+
+        // 3. One exchange: caller headers verbatim plus the two mechanical
+        // rewrites reported in the telemetry.
+        let (req_head, rewritten) = render_attempt_head(&attempt);
+        let mut buf = BytesMut::new();
+        let head = match self.header_timeout {
+            Some(budget) => {
+                match tokio::time::timeout(
+                    budget,
+                    send_and_read_h1_head(&mut stream, &req_head, &attempt.body, &mut buf),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // The socket proved it cannot answer within the
+                        // caller's budget: drop it (live gauge follows) and
+                        // say so once — never a second clock.
+                        drop(stream);
+                        counters.evicted.fetch_add(1, Ordering::Relaxed);
+                        return Err(TransportError::HeaderTimeout { waited: budget });
+                    }
+                }
+            }
+            None => send_and_read_h1_head(&mut stream, &req_head, &attempt.body, &mut buf).await,
+        };
+        let head = match head {
+            Ok(head) => head,
+            Err(err) => {
+                drop(stream);
+                if reused {
+                    // Pre-headers failure on a warm socket: the classic
+                    // stale-keep-alive race. Count it, type it, let the
+                    // caller's helper decide about one redial.
+                    counters.evicted.fetch_add(1, Ordering::Relaxed);
+                    counters.evicted_stale.fetch_add(1, Ordering::Relaxed);
+                    return Err(TransportError::StaleConnection {
+                        kind: stale_kind_of(&err),
+                    });
+                }
+                // A fresh connection dying before the first byte is a
+                // connect-level failure: never redial-eligible.
+                return Err(TransportError::Io(err));
+            }
+        };
+
+        // 4. Hand the body over; dropping it closes the socket (no recycle),
+        // which is exactly the upstream-visible cancellation.
+        let status = StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY);
+        let version = if head.http_version == 0 {
+            Version::HTTP_10
+        } else {
+            Version::HTTP_11
+        };
+        let headers = head.headers;
+        let can_reuse = !head.connection_close && !matches!(head.framing, BodyFraming::UntilClose);
+        let mut body = H1Body {
+            stream: Some(stream),
+            buf,
+            framing: head.framing,
+            can_reuse,
+            host_pool,
+        };
+        body.try_eager_recycle();
+
+        Ok(AttemptOutcome {
+            status,
+            headers,
+            version,
+            body: BodyStream::new(H1BodyStream { inner: body }, self.stall_timeout),
+            telemetry: AttemptTelemetry {
+                dial: dial_time,
+                reused,
+                // HTTP/1.1 has no admission queue: there is nothing to park
+                // behind, so wait is "not measured" by construction.
+                pool_wait: None,
+                // One exchange per connection; nothing is multiplexed.
+                in_flight_at_acquire: 0,
+                redials: 0,
+                redial_reason: None,
+                headers_rewritten: rewritten,
+            },
+        })
+    }
+
+    fn stats(&self) -> TransportStats {
+        let counters = self.counters.load();
+        let mut hosts: Vec<HostStats> = counters
+            .iter()
+            .map(|(key, c)| {
+                let (scheme, authority) = key.split_once("://").unwrap_or(("http", key.as_str()));
+                let host_pool = self.pool.host_pool(scheme == "https", authority);
+                HostStats {
+                    authority: authority.to_string(),
+                    backend: Backend::H1,
+                    connections: host_pool.live.load(Ordering::Acquire) as u64,
+                    in_flight: 0,
+                    dials: c.dials.load(Ordering::Relaxed),
+                    failed_dials: c.failed_dials.load(Ordering::Relaxed),
+                    reused: c.reused.load(Ordering::Relaxed),
+                    evicted: c.evicted.load(Ordering::Relaxed),
+                    evicted_stale: c.evicted_stale.load(Ordering::Relaxed),
+                    reaped_idle: Some(host_pool.reaped.load(Ordering::Relaxed)),
+                    waiting: 0,
+                    wait_ms_p50: None,
+                    wait_ms_p99: None,
+                    wait_samples: 0,
+                }
+            })
+            .collect();
+        hosts.sort_by(|a, b| a.authority.cmp(&b.authority));
+        TransportStats { hosts }
+    }
+}
+
+/// The response body of one h1 attempt: every I/O error after the head means
+/// the body was cut short, so it surfaces as `BodyIncomplete` — an abnormal
+/// EOF must never look like a clean end (issue #96 rule 5). A *clean* end of
+/// an `UntilClose` body is `None`, by definition of that framing.
+struct H1BodyStream {
+    inner: H1Body,
+}
+
+impl Stream for H1BodyStream {
+    type Item = Result<Bytes, TransportError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.poll_next_inner(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
+            Poll::Ready(Some(Err(_))) => Poll::Ready(Some(Err(TransportError::BodyIncomplete))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Caller headers verbatim (HTTP/1.1 carries connection-specific fields
+/// legally — nothing is stripped), plus the mechanical rewrites: synthesized
+/// `content-length` and `host`, each named in the returned list.
+fn render_attempt_head(attempt: &Attempt) -> (Vec<u8>, Vec<&'static str>) {
+    let mut rewritten = Vec::new();
+    let mut headers = attempt.headers.clone();
+    if !attempt.body.is_empty() && !headers.contains_key(http::header::CONTENT_LENGTH) {
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from(attempt.body.len()),
+        );
+        rewritten.push("content-length");
+    }
+    if !headers.contains_key(http::header::HOST)
+        && let Some(auth) = attempt.uri.authority()
+        && let Ok(value) = HeaderValue::from_str(auth.as_str())
+    {
+        headers.insert(http::header::HOST, value);
+        rewritten.push("host");
+    }
+    let path = match attempt.uri.path_and_query() {
+        Some(pq) => pq.as_str(),
+        None => "/",
+    };
+    (render_h1_head(&attempt.method, path, &headers), rewritten)
+}
+
+/// Stale classification from the `io::ErrorKind` the exchange failed with.
+/// Never inferred from display strings.
+fn stale_kind_of(err: &io::Error) -> StaleKind {
+    match err.kind() {
+        io::ErrorKind::UnexpectedEof => StaleKind::PeerClosed,
+        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => StaleKind::Reset,
+        _ => StaleKind::Io,
+    }
+}
+
+/// See [`crate::h1::dial_h1`]: the dial tags failures by `io::ErrorKind`.
+fn map_dial_error(err: io::Error) -> TransportError {
+    match err.kind() {
+        io::ErrorKind::AddrNotAvailable => TransportError::Dns(err),
+        io::ErrorKind::InvalidData => TransportError::Tls(err),
+        _ => TransportError::Connect(err),
+    }
 }

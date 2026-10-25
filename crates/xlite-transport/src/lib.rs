@@ -37,6 +37,8 @@ pub use attempt::Attempt;
 pub use body::BodyStream;
 pub use config::TransportConfig;
 pub use error::{StaleKind, TransportError};
+#[cfg(feature = "h1")]
+pub use h1::H1Transport;
 #[cfg(feature = "h2")]
 pub use h2::H2Transport;
 pub use stats::{Backend, HostStats, TransportStats};
@@ -63,6 +65,21 @@ pub fn configure_tcp_socket(stream: &tokio::net::TcpStream) {
 /// Failed probes before the kernel reports the peer dead (see [`configure_tcp_socket`]).
 #[cfg(any(feature = "h1", feature = "h2"))]
 const TCP_KEEPALIVE_RETRIES: u32 = 3;
+
+/// Strip an optional port (and IPv6 brackets) from an authority, yielding the
+/// host part a TLS `ServerName` needs.
+#[cfg(any(feature = "h1", feature = "h2"))]
+pub fn tls_host_from_authority(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[')
+        && let Some((ipv6, _)) = rest.split_once(']')
+    {
+        return ipv6;
+    }
+    authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority)
+}
 /// Re-exported so callers can supply their own dial ([`H2Transport::with_dial`]).
 #[cfg(feature = "h2")]
 pub use xlite_h2_pool::{BoxIo, Dial};

@@ -15,14 +15,10 @@ use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool, PoolError, P
 
 use crate::attempt::{Attempt, CONNECTION_SPECIFIC};
 use crate::body::BodyStream;
-use crate::config::TransportConfig;
+use crate::config::{NEVER_RECLAIM, TransportConfig};
 use crate::error::{StaleKind, TransportError};
 use crate::stats::{Backend, HostStats, TransportStats, bucket_percentile};
 use crate::transport::{AttemptOutcome, AttemptTelemetry, Transport};
-
-/// How long a `None` [`TransportConfig::pool_idle_reclaim`] keeps idle
-/// connections: practically never, without overflowing the pool's ms counters.
-const NEVER_RECLAIM: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 
 /// HTTP/2 upstream transport, pooled per `scheme://authority`.
 pub struct H2Transport {

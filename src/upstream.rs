@@ -25,6 +25,7 @@ use xlite_h2_pool::{BoxIo, Config as PoolConfig, Dial, Lease, Pool, PoolError};
 use xlite_transport::h1::{
     BodyFraming, H1Body, H1Pool, H1Stream, dial_h1, render_h1_head, send_and_read_h1_head,
 };
+use xlite_transport::tls_host_from_authority;
 
 use crate::catalog::{HeaderPair, UpstreamShape};
 use crate::config::Config;
@@ -173,18 +174,6 @@ fn shared_tls_alpn_connector() -> &'static tokio_rustls::TlsConnector {
     TLS.get_or_init(|| build_tls_connector(vec![b"h2".to_vec(), b"http/1.1".to_vec()], &[]))
 }
 
-fn tls_host_from_authority(authority: &str) -> &str {
-    if let Some(rest) = authority.strip_prefix('[')
-        && let Some((ipv6, _)) = rest.split_once(']')
-    {
-        return ipv6;
-    }
-    authority
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(authority)
-}
-
 #[derive(Clone)]
 pub struct Upstream {
     h2c: bool,
@@ -312,7 +301,7 @@ impl Upstream {
                         }
                     }
                     h1.host_pool(true, &authority)
-                        .put(H1Stream::Tls(Box::new(tls_stream)));
+                        .put(H1Stream::tls(Box::new(tls_stream)));
                     Err(io::Error::new(
                         io::ErrorKind::Unsupported,
                         "upstream did not negotiate HTTP/2 (ALPN h2)",

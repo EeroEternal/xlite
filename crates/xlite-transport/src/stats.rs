@@ -18,7 +18,8 @@ pub struct HostStats {
     pub backend: Backend,
     /// Live connections.
     pub connections: u64,
-    /// Streams currently reserved.
+    /// Streams currently reserved. The h1 backend reports `0`: HTTP/1.1
+    /// serves one exchange per connection, there is nothing multiplexed.
     pub in_flight: u64,
     /// Connections dialled over this host's lifetime.
     pub dials: u64,
