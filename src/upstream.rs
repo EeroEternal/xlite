@@ -253,6 +253,7 @@ impl Upstream {
         let h1 = Arc::new(H1Pool::new(
             cfg.max_conns_per_host.max(64),
             xlite_h2_pool::DEFAULT_IDLE_TIMEOUT,
+            xlite_transport::DEFAULT_MAX_PARALLEL_DIALS,
         ));
         let h1_tls_hosts = Arc::new(ArcSwap::from_pointee(HashSet::new()));
         let h1_tls_mutate = Arc::new(Mutex::new(()));
@@ -663,6 +664,9 @@ impl Upstream {
         let (mut stream, reused) = match host_pool.take_idle() {
             Some(s) => (s, true),
             None => {
+                // One dial slot per host: a cold pool must not fire every
+                // waiting request's SYN at once (xlite#96).
+                let _dial_permit = host_pool.acquire_dial().await;
                 let s = dial_h1(
                     &target.authority,
                     target.tls_host.as_deref(),
@@ -685,6 +689,7 @@ impl Upstream {
                             // The idle keep-alive socket was closed by the upstream
                             // right as we wrote the request or waited for the first
                             // response byte. Transparently redial a fresh socket once.
+                            let dial_permit = host_pool.acquire_dial().await;
                             let mut fresh = dial_h1(
                                 &target.authority,
                                 target.tls_host.as_deref(),
@@ -692,6 +697,8 @@ impl Upstream {
                                 CONNECT_TIMEOUT,
                             )
                             .await?;
+                            // The slot covers the dial only, not the re-exchange.
+                            drop(dial_permit);
                             buf.clear();
                             let head =
                                 send_and_read_h1_head(&mut fresh, &req_head, &body, &mut buf)

@@ -419,3 +419,44 @@ async fn invalid_attempt_never_opens_a_socket() {
         "no host was ever created"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dial_gate_bounds_concurrency_per_host() {
+    use xlite_transport::h1::H1Pool;
+
+    // The gate is per host: different authorities have different accept
+    // queues (xlite#96 — a `listen(5)` server drops a 16-way SYN burst and
+    // every dropped SYN costs ~1s of kernel retransmit).
+    let pool = H1Pool::new(4, Duration::from_secs(90), 4);
+    let host_a = pool.host_pool(false, "a.example:80");
+    let host_b = pool.host_pool(false, "b.example:80");
+
+    // Fill host A's gate: exactly `max_parallel_dials` slots.
+    let held: Vec<_> = futures_util::future::join_all((0..4).map(|_| host_a.acquire_dial())).await;
+    assert_eq!(held.len(), 4, "the first four slots resolve immediately");
+
+    // The fifth dial on A must wait…
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), host_a.acquire_dial())
+            .await
+            .is_err(),
+        "host A's gate must hold at its limit"
+    );
+
+    // …while host B is unaffected: the limit is per host, not global.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), host_b.acquire_dial())
+            .await
+            .is_ok(),
+        "host B must not be throttled by host A"
+    );
+
+    // Releasing a slot lets the waiting dial proceed.
+    drop(held);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), host_a.acquire_dial())
+            .await
+            .is_ok(),
+        "the fifth dial must proceed once a slot frees"
+    );
+}

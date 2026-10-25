@@ -200,17 +200,39 @@ pub struct HostPool {
     /// Idle connections dropped because they expired (issue #96: h1 does
     /// count reclamation, so `reaped_idle` is `Some`).
     reaped: AtomicU64,
+    /// Per-host dial gate: bounds how many SYNs a cold pool can fire at this
+    /// host at once (see [`HostPool::acquire_dial`]).
+    dial_gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl HostPool {
-    fn new(max_idle: usize, idle_timeout: Duration) -> Self {
+    fn new(max_idle: usize, idle_timeout: Duration, max_parallel_dials: usize) -> Self {
         Self {
             max_idle,
             idle_timeout,
             idle: Mutex::new(VecDeque::new()),
             live: Arc::new(AtomicUsize::new(0)),
             reaped: AtomicU64::new(0),
+            dial_gate: Arc::new(tokio::sync::Semaphore::new(max_parallel_dials.max(1))),
         }
+    }
+
+    /// Hold one dial slot for this host while connecting (TCP + TLS).
+    ///
+    /// A cold pool can otherwise fire every waiting request's SYN at once;
+    /// the kernel silently drops whatever exceeds the server's accept queue
+    /// and each dropped SYN costs ~1s in retransmit delay (xlite#96: a
+    /// `listen(5)` mock turned a 16-way burst into 1–2s of first-wave
+    /// latency). The gate is **per host** — different authorities have
+    /// different accept queues and must not throttle each other. Holders
+    /// release as soon as `connect()` returns, so on a LAN the ramp is
+    /// sub-millisecond.
+    pub async fn acquire_dial(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.dial_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("dial gate is never closed")
     }
 
     /// Checkout the warmest healthy idle connection (LIFO), reaping expired
@@ -270,16 +292,22 @@ impl HostPool {
 pub struct H1Pool {
     max_idle_per_host: usize,
     idle_timeout: Duration,
+    max_parallel_dials: usize,
     plain_hosts: ArcSwap<HashMap<String, Arc<HostPool>>>,
     tls_hosts: ArcSwap<HashMap<String, Arc<HostPool>>>,
     mutate: Mutex<()>,
 }
 
 impl H1Pool {
-    pub fn new(max_idle_per_host: usize, idle_timeout: Duration) -> Self {
+    pub fn new(
+        max_idle_per_host: usize,
+        idle_timeout: Duration,
+        max_parallel_dials: usize,
+    ) -> Self {
         Self {
             max_idle_per_host,
             idle_timeout,
+            max_parallel_dials,
             plain_hosts: ArcSwap::from_pointee(HashMap::new()),
             tls_hosts: ArcSwap::from_pointee(HashMap::new()),
             mutate: Mutex::new(()),
@@ -300,7 +328,11 @@ impl H1Pool {
         if let Some(pool) = current.get(authority) {
             return Arc::clone(pool);
         }
-        let pool = Arc::new(HostPool::new(self.max_idle_per_host, self.idle_timeout));
+        let pool = Arc::new(HostPool::new(
+            self.max_idle_per_host,
+            self.idle_timeout,
+            self.max_parallel_dials,
+        ));
         let mut next = (**current).clone();
         next.insert(authority.to_string(), Arc::clone(&pool));
         map.store(Arc::new(next));
@@ -923,6 +955,7 @@ impl H1Transport {
         let pool = H1Pool::new(
             cfg.h1_max_conns_per_host.max(1),
             cfg.pool_idle_reclaim.unwrap_or(NEVER_RECLAIM),
+            cfg.max_parallel_dials,
         );
         #[cfg(feature = "tls-rustls")]
         let tls = cfg
@@ -1011,6 +1044,9 @@ impl Transport for H1Transport {
                 };
                 #[cfg(not(feature = "tls-rustls"))]
                 let tls_host: Option<&str> = None;
+                // One dial slot per host: the SYN burst of a cold pool must fit
+                // the peer's accept queue (xlite#96).
+                let _dial_permit = host_pool.acquire_dial().await;
                 match dial_h1(
                     &authority,
                     tls_host,

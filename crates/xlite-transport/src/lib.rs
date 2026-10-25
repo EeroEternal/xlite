@@ -35,7 +35,7 @@ mod h2;
 
 pub use attempt::Attempt;
 pub use body::BodyStream;
-pub use config::TransportConfig;
+pub use config::{DEFAULT_MAX_PARALLEL_DIALS, TransportConfig};
 pub use error::{StaleKind, TransportError};
 #[cfg(feature = "h1")]
 pub use h1::H1Transport;
