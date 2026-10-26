@@ -8,7 +8,7 @@
 # Requires network access (crates.io) once to vendor dependencies. Afterward, both
 # commands below run completely offline:
 #   cargo build --release --bin xlite --offline
-#   docker build -t xlite:0.8.0 .
+#   docker build -t xlite:0.9.0 .
 #
 # Usage:
 #   scripts/prepare_offline_vendor.sh            # generate / refresh vendor scaffolding
