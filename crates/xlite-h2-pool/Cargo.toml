@@ -5,6 +5,7 @@ edition = "2024"
 authors = ["lipicoder@qq.com"]
 description = "Native HTTP/2 upstream connection pool with Go-x/net/http2-equivalent per-connection stream accounting: reads the peer's real SETTINGS_MAX_CONCURRENT_STREAMS and dials a fresh connection instead of queueing inside a full one"
 license = "MIT"
+repository = "https://github.com/EeroEternal/xlite"
 
 [dependencies]
 h2 = { version = "0.4", features = ["stream"] }

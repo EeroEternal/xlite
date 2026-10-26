@@ -7,6 +7,8 @@ name = "xlite"
 version = "0.8.0"
 edition = "2024"
 description = "Headless multi-protocol AI traffic gateway. High-concurrency HTTP/2 pooling, channel routing, and protocol translation."
+license = "MIT"
+repository = "https://github.com/EeroEternal/xlite"
 
 [dependencies]
 tokio = { version = "1.43", features = ["full"] }
@@ -38,8 +40,8 @@ http = "1"
 futures-util = "0.3"
 url = "2"
 dotenvy = "0.15"
-xlite-h2-pool = { path = "crates/xlite-h2-pool" }
-xlite-transport = { path = "crates/xlite-transport", features = ["h1", "h2", "tls-rustls"] }
+xlite-h2-pool = { version = "0.1.0", path = "crates/xlite-h2-pool" }
+xlite-transport = { version = "0.1.0", path = "crates/xlite-transport", features = ["h1", "h2", "tls-rustls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.6"

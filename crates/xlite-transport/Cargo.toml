@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "In-process server-side transport client for AI upstreams: exactly one attempt per call, with routing, retries and deadlines owned by the caller (issue #96)."
 license = "MIT"
+repository = "https://github.com/EeroEternal/xlite"
 
 [features]
 default = ["h1", "h2", "tls-rustls"]
@@ -22,7 +23,7 @@ thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1.43", features = ["rt", "sync", "time", "net", "io-util"] }
 h2 = { version = "0.4", features = ["stream"], optional = true }
-xlite-h2-pool = { path = "../xlite-h2-pool", optional = true }
+xlite-h2-pool = { version = "0.1.0", path = "../xlite-h2-pool", optional = true }
 httparse = { version = "1", optional = true }
 arc-swap = { version = "1.7", optional = true }
 socket2 = { version = "0.6", optional = true }
