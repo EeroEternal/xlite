@@ -14,7 +14,7 @@
 
 ## 1. Planes & Module Boundaries
 
-`xlite` is compiled as a single static binary plus one transport crate (`xlite-h2-pool`):
+`xlite` is compiled as a single static binary plus two transport crates (`xlite-h2-pool`, `xlite-transport`):
 
 | Component | Path | Responsibility |
 | :--- | :--- | :--- |
@@ -23,6 +23,7 @@
 | **Routing Snapshot** | `src/store.rs` | Lock-free `ArcSwap<Snapshot>` holding pre-validated channels, provider names, SHA-256 key hashes, and pre-rendered HTTP headers |
 | **Upstream Client** | `src/upstream.rs` | Dispatches requests across `xlite-h2-pool` (`h2c` and TLS `ALPN: h2`) or the built-in LIFO `H1Pool` (HTTP/1.1 and HTTPS/TLS with transparent stale-socket redial) |
 | **HTTP/2 Pool** | `crates/xlite-h2-pool` | Peer `SETTINGS_MAX_CONCURRENT_STREAMS`-aware HTTP/2 multiplexing pool with stream cancellation propagation |
+| **Transport Client** | `crates/xlite-transport` | The `Transport` contract (one attempt per call, caller-owned retry/routing) over the extracted HTTP/1.1 pool and `xlite-h2-pool`, shared with Nebula — see [`architecture/transport-contract.md`](architecture/transport-contract.md) |
 | **Control Plane & Auth** | `src/admin.rs`, `src/auth.rs` | Headless REST API (`/api/*`) authenticated via stateless `Authorization: Bearer <ADMIN_PASSWORD>`, `x-admin-token`, or HMAC-SHA256 signed session cookies |
 | **Catalog Storage** | `src/catalog/` | Persistence backend (SQLite file, in-memory SQLite, or shared Redis key `xlite:catalog`) + YAML import/export (`yaml.rs`) |
 

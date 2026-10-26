@@ -20,8 +20,11 @@ pub struct TransportConfig {
     /// stall clock. (Protocol-level stall handling — SSE keep-alive comments,
     /// framing — is deliberately *not* this crate's job.)
     pub stall_timeout: Option<Duration>,
-    /// Upper bound of concurrent upstream connections per authority on the h1
-    /// backend. Should exceed the caller's per-replica concurrency.
+    /// Retained-idle cap per authority on the h1 backend: how many completed
+    /// keep-alive sockets stay warm. In-flight exchanges are **not** capped
+    /// by it (bound your own concurrency). Size it at or above the caller's
+    /// per-replica concurrency so finished exchanges return to the pool
+    /// instead of closing.
     pub h1_max_conns_per_host: usize,
     /// Upper bound of concurrent upstream connections per authority on the h2
     /// backend (streams are multiplexed within them).

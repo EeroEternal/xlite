@@ -179,6 +179,8 @@ if [[ "$want_rust" == "1" ]]; then
   cargo clippy -p xlite-h2-pool --lib --tests -- -D warnings
   cargo clippy -p xlite-transport --lib --tests --all-features -- -D warnings
   cargo clippy -p xlite-transport --lib --tests --no-default-features -- -D warnings
+  # `cargo test` does not build examples: compile them here so they cannot rot.
+  cargo build -p xlite-transport --examples
   ok "clippy"
 
   say "rust tests"

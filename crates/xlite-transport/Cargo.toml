@@ -34,3 +34,7 @@ rustls-pki-types = { version = "1", features = ["std"], optional = true }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 futures-util = "0.3"
 h2 = { version = "0.4", features = ["stream"] }
+
+[[example]]
+name = "transport-retry-outside"
+required-features = ["h1"]

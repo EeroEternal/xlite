@@ -29,6 +29,8 @@ struct Fixture {
     dials: Arc<AtomicUsize>,
     /// Set when the `/stream` route observed its stream die (cancellation).
     cancel_seen: Arc<AtomicBool>,
+    /// Request headers the server actually received, in arrival order.
+    seen: Arc<Mutex<Vec<HeaderMap>>>,
     /// The server task of the first dial (abortable: simulates a peer close).
     server: tokio::sync::oneshot::Receiver<tokio::task::JoinHandle<()>>,
 }
@@ -37,6 +39,7 @@ fn fixture(header_timeout: Option<Duration>) -> Fixture {
     let requests = Arc::new(AtomicUsize::new(0));
     let dials = Arc::new(AtomicUsize::new(0));
     let cancel_seen = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Arc::new(Mutex::new(Some(tx)));
 
@@ -44,14 +47,16 @@ fn fixture(header_timeout: Option<Duration>) -> Fixture {
         let requests = requests.clone();
         let dials = dials.clone();
         let cancel_seen = cancel_seen.clone();
+        let seen = seen.clone();
         move |_key: String| {
             let requests = requests.clone();
             let dials = dials.clone();
             let cancel_seen = cancel_seen.clone();
+            let seen = seen.clone();
             let tx = tx.clone();
             Box::pin(async move {
                 let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-                let handle = spawn_server(server_io, requests, cancel_seen);
+                let handle = spawn_server(server_io, requests, cancel_seen, seen);
                 if let Some(tx) = tx.lock().unwrap().take() {
                     let _ = tx.send(handle);
                 }
@@ -68,6 +73,7 @@ fn fixture(header_timeout: Option<Duration>) -> Fixture {
         requests,
         dials,
         cancel_seen,
+        seen,
         server: rx,
     }
 }
@@ -76,6 +82,7 @@ fn spawn_server(
     io: tokio::io::DuplexStream,
     requests: Arc<AtomicUsize>,
     cancel_seen: Arc<AtomicBool>,
+    seen: Arc<Mutex<Vec<HeaderMap>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let conn = h2::server::Builder::new()
@@ -88,6 +95,9 @@ fn spawn_server(
         };
         while let Some(Ok((req, mut respond))) = conn.accept().await {
             requests.fetch_add(1, Ordering::SeqCst);
+            seen.lock()
+                .expect("fixture seen mutex poisoned")
+                .push(req.headers().clone());
             let path = req.uri().path().to_string();
             let cancel_seen = cancel_seen.clone();
             tokio::spawn(async move {
@@ -127,6 +137,30 @@ fn spawn_server(
                         // on a typed reset, not winning a race.
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         sender.send_reset(h2::Reason::NO_ERROR);
+                    }
+                    "/chunks" => {
+                        // A body delivered across many DATA frames: SSE
+                        // frames arrive at arbitrary chunk boundaries and
+                        // must reassemble byte-exactly.
+                        let resp = http::Response::builder()
+                            .status(200)
+                            .header("content-length", "32")
+                            .body(())
+                            .unwrap();
+                        let mut sender = respond.send_response(resp, false).unwrap();
+                        let pieces: [&[u8]; 7] = [
+                            b"0",
+                            b"12",
+                            b"345",
+                            b"6789",
+                            b"abcde",
+                            b"fghijk",
+                            b"lmnopqrstuv",
+                        ];
+                        for (i, piece) in pieces.into_iter().enumerate() {
+                            let last = i == pieces.len() - 1;
+                            let _ = sender.send_data(Bytes::from_static(piece), last);
+                        }
                     }
                     "/stream" => {
                         let resp = http::Response::builder().status(200).body(()).unwrap();
@@ -220,6 +254,68 @@ async fn one_execute_one_request_verbatim_roundtrip_and_reuse() {
         "percentiles are over parked acquires; nothing ever parked here"
     );
     assert!(host.reaped_idle.is_some(), "h2 counts idle reaping");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn arbitrary_chunk_splits_reassemble_byte_exact() {
+    const EXPECTED: &[u8] = b"0123456789abcdefghijklmnopqrstuv";
+    let fx = fixture(None);
+
+    let outcome = fx.transport.execute(attempt("/chunks")).await.unwrap();
+    assert_eq!(outcome.status, http::StatusCode::OK);
+    assert_eq!(
+        collect(outcome.body).await,
+        EXPECTED,
+        "many DATA frames must reassemble byte-exactly"
+    );
+    assert_eq!(
+        fx.requests.load(Ordering::SeqCst),
+        1,
+        "one execute = one upstream request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_headers_pass_through_verbatim() {
+    let fx = fixture(None);
+    let uri: Uri = format!("{URI_BASE}/ok").parse().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.append("x-trace", HeaderValue::from_static("a"));
+    headers.append("x-trace", HeaderValue::from_static("b"));
+    headers.insert("x-binary", HeaderValue::from_bytes(&[0x80, 0xff]).unwrap());
+    // RFC 9113 §8.2.2: connection-specific fields must not reach h2 wire —
+    // stripped mechanically, and the strip is reported, not silent.
+    headers.insert("connection", HeaderValue::from_static("keep-alive"));
+    let attempt = Attempt {
+        method: Method::POST,
+        uri,
+        headers,
+        body: Bytes::from_static(b"{}"),
+    };
+
+    let outcome = fx.transport.execute(attempt).await.unwrap();
+    assert_eq!(outcome.status, http::StatusCode::OK);
+    assert_eq!(
+        outcome.telemetry.headers_rewritten,
+        vec!["connection", "content-length", "host"],
+        "the RFC 9113 strip is listed alongside the two syntheses"
+    );
+
+    let seen = fx.seen.lock().expect("fixture seen mutex poisoned");
+    let head = &seen[0];
+    let traces: Vec<_> = head.get_all("x-trace").iter().collect();
+    assert_eq!(traces.len(), 2, "duplicate request headers preserved");
+    assert_eq!(traces[0].as_bytes(), b"a");
+    assert_eq!(traces[1].as_bytes(), b"b");
+    assert_eq!(
+        head.get("x-binary").map(|v| v.as_bytes()),
+        Some(&[0x80u8, 0xff][..]),
+        "non-UTF-8 value verbatim"
+    );
+    assert!(
+        head.get("connection").is_none(),
+        "the connection-specific field never reached the wire"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

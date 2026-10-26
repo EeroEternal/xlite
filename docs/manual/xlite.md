@@ -18,7 +18,7 @@ Current version is the `version` field in the repo-root `Cargo.toml`. It is retu
 | `XLITE_ATTEMPT_WEBHOOK_URL` | unset | Optional HTTP(S) webhook receiving **one event per upstream attempt**, posted as soon as that attempt finishes (`event`, `request_id`, `model`, `api_key_name`, `attempt`) |
 | `XLITE_ATTEMPT_WEBHOOK_TOKEN` | unset | Optional Bearer token sent in `Authorization: Bearer <token>` when calling `XLITE_ATTEMPT_WEBHOOK_URL` |
 | `XLITE_UPSTREAM_H2C` | off | Plaintext HTTP/2 (`h2c`) to `http://` upstreams via `xlite-h2-pool` |
-| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and minimum idle pool size for the native HTTP/1.1 pool (`H1Pool`) |
+| `XLITE_UPSTREAM_MAX_CONNS_PER_HOST` | `32` | Per-host HTTP/2 connection cap (`xlite-h2-pool`) and retained-idle cap for the native HTTP/1.1 pool (`H1Pool`; in-flight h1 exchanges are not capped by it) |
 | `XLITE_UPSTREAM_STREAM_CAP` | peer's `SETTINGS` | Client-side cap on concurrent streams per upstream HTTP/2 connection |
 | `XLITE_CATALOG_RELOAD_SECS` | `5` | Snapshot reload period; `0` freezes the snapshot (load test) |
 | `XLITE_UPSTREAM_STALL_TIMEOUT_SECS` | `300` | End a response body with `TimedOut` after this many seconds of silence between chunks; `0` disables the watchdog. This is also the **longest a wedged body can hold its pool slot** — leaving it at `0` gives a stuck connection no self-healing path (issue #90) |

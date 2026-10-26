@@ -9,8 +9,8 @@
 
 #![cfg(feature = "h1")]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -29,16 +29,26 @@ struct Fixture {
     requests: Arc<AtomicUsize>,
     /// Set when `/stream` observed its socket die (cancellation).
     cancel_seen: Arc<AtomicBool>,
+    /// Raw bytes of the last request head the server received.
+    last_head: Arc<Mutex<Vec<u8>>>,
 }
 
 async fn fixture(header_timeout: Option<Duration>) -> Fixture {
+    let mut cfg = TransportConfig::cleartext();
+    cfg.header_timeout = header_timeout;
+    fixture_with(cfg).await
+}
+
+async fn fixture_with(cfg: TransportConfig) -> Fixture {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
     let cancel_seen = Arc::new(AtomicBool::new(false));
+    let last_head = Arc::new(Mutex::new(Vec::new()));
     {
         let requests = requests.clone();
         let cancel_seen = cancel_seen.clone();
+        let last_head = last_head.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -46,20 +56,20 @@ async fn fixture(header_timeout: Option<Duration>) -> Fixture {
                 };
                 let requests = requests.clone();
                 let cancel_seen = cancel_seen.clone();
+                let last_head = last_head.clone();
                 tokio::spawn(async move {
-                    let _ = handle_conn(stream, requests, cancel_seen).await;
+                    let _ = handle_conn(stream, requests, cancel_seen, last_head).await;
                 });
             }
         });
     }
 
-    let mut cfg = TransportConfig::cleartext();
-    cfg.header_timeout = header_timeout;
     Fixture {
         transport: H1Transport::new(cfg),
         addr,
         requests,
         cancel_seen,
+        last_head,
     }
 }
 
@@ -71,6 +81,7 @@ async fn handle_conn(
     mut stream: TcpStream,
     requests: Arc<AtomicUsize>,
     cancel_seen: Arc<AtomicBool>,
+    last_head: Arc<Mutex<Vec<u8>>>,
 ) -> std::io::Result<()> {
     let mut buf: Vec<u8> = Vec::new();
     let mut conn_requests = 0usize;
@@ -86,6 +97,11 @@ async fn handle_conn(
             }
             buf.extend_from_slice(&tmp[..n]);
         };
+        {
+            let mut guard = last_head.lock().expect("fixture head mutex poisoned");
+            guard.clear();
+            guard.extend_from_slice(&buf[..head_end]);
+        }
         let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
         let _ = buf.drain(..head_end); // `find_head_end` already includes the CRLFCRLF
         let path = head
@@ -142,6 +158,36 @@ async fn handle_conn(
                     }
                 }
                 return Ok(());
+            }
+            "/hold" => {
+                // Hold the exchange open so two concurrent attempts are
+                // really in flight at the same time.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong")
+                    .await?;
+            }
+            "/chunks" => {
+                // A body delivered in odd-sized, flushed pieces: SSE frames
+                // arrive at arbitrary chunk boundaries and must reassemble
+                // byte-exactly.
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n")
+                    .await?;
+                let pieces: [&[u8]; 7] = [
+                    b"0",
+                    b"12",
+                    b"345",
+                    b"6789",
+                    b"abcde",
+                    b"fghijk",
+                    b"lmnopqrstuv",
+                ];
+                for piece in pieces {
+                    stream.write_all(piece).await?;
+                    stream.flush().await?;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
             }
             "/fail-second" => {
                 if conn_requests == 1 {
@@ -418,6 +464,167 @@ async fn invalid_attempt_never_opens_a_socket() {
         fx.transport.stats().hosts.is_empty(),
         "no host was ever created"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn arbitrary_chunk_splits_reassemble_byte_exact() {
+    const EXPECTED: &[u8] = b"0123456789abcdefghijklmnopqrstuv";
+    let fx = fixture(None).await;
+
+    let outcome = fx.transport.execute(attempt(&fx, "/chunks")).await.unwrap();
+    assert_eq!(outcome.status, http::StatusCode::OK);
+    assert_eq!(
+        collect(outcome.body).await,
+        EXPECTED,
+        "odd-sized TCP writes must reassemble byte-exactly"
+    );
+    assert_eq!(
+        fx.requests.load(Ordering::SeqCst),
+        1,
+        "one execute = one upstream request"
+    );
+
+    // The exchange completed cleanly: keep-alive survived the chunking.
+    let outcome = fx.transport.execute(attempt(&fx, "/ok")).await.unwrap();
+    assert!(outcome.telemetry.reused, "the socket was recycled");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_headers_pass_through_verbatim() {
+    let fx = fixture(None).await;
+
+    let uri: Uri = format!("http://{}/ok", fx.addr).parse().unwrap();
+    let mut headers = HeaderMap::new();
+    headers.append("x-trace", HeaderValue::from_static("a"));
+    headers.append("x-trace", HeaderValue::from_static("b"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer sk-42"));
+    // Non-UTF-8 obs-text must survive byte-for-byte in both directions.
+    headers.insert("x-binary", HeaderValue::from_bytes(&[0x80, 0xff]).unwrap());
+    let attempt = Attempt {
+        method: Method::POST,
+        uri,
+        headers,
+        body: Bytes::from_static(b"{}"),
+    };
+
+    let outcome = fx.transport.execute(attempt).await.unwrap();
+    assert_eq!(outcome.status, http::StatusCode::OK);
+    assert_eq!(
+        outcome.telemetry.headers_rewritten,
+        vec!["content-length", "host"],
+        "only the two mechanical rewrites, nothing else touched"
+    );
+
+    let head = fx
+        .last_head
+        .lock()
+        .expect("fixture head mutex poisoned")
+        .clone();
+    let seen = |needle: &[u8]| head.windows(needle.len()).any(|w| w == needle);
+    assert!(seen(b"POST /ok HTTP/1.1\r\n"), "request line");
+    assert!(seen(b"x-trace: a\r\n"), "first duplicate preserved");
+    assert!(seen(b"x-trace: b\r\n"), "second duplicate preserved");
+    assert!(seen(b"authorization: Bearer sk-42\r\n"));
+    assert!(seen(b"x-binary: \x80\xff\r\n"), "non-UTF-8 value verbatim");
+    assert!(seen(b"content-length: 2\r\n"), "synthesized from the body");
+    assert!(seen(b"host: "), "synthesized from the authority");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_authorities_one_transport_separate_pools() {
+    let a = fixture(None).await;
+    let b = fixture(None).await;
+
+    // One transport, two upstreams: the pool keys on each Attempt's runtime
+    // authority — no catalog, no host list, no routing table in between.
+    let out = a.transport.execute(attempt(&a, "/ok")).await.unwrap();
+    assert_eq!(collect(out.body).await, b"pong");
+    let out = a.transport.execute(attempt(&b, "/ok")).await.unwrap();
+    assert_eq!(collect(out.body).await, b"pong");
+
+    // Warm both: each authority keeps its own socket.
+    let out = a.transport.execute(attempt(&a, "/ok")).await.unwrap();
+    assert!(out.telemetry.reused);
+    assert_eq!(collect(out.body).await, b"pong");
+    let out = a.transport.execute(attempt(&b, "/ok")).await.unwrap();
+    assert!(out.telemetry.reused);
+    assert_eq!(collect(out.body).await, b"pong");
+
+    let stats = a.transport.stats();
+    stats.assert_invariants();
+    assert_eq!(stats.hosts.len(), 2, "two authorities, one pool");
+    let mut authorities: Vec<String> = stats.hosts.iter().map(|h| h.authority.clone()).collect();
+    authorities.sort();
+    let mut expected = vec![a.addr.to_string(), b.addr.to_string()];
+    expected.sort();
+    assert_eq!(authorities, expected);
+    for host in &stats.hosts {
+        assert_eq!(
+            host.connections, 1,
+            "{} keeps exactly one socket",
+            host.authority
+        );
+        assert_eq!(host.dials, 1);
+        assert_eq!(host.reused, 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_reclaim_closes_expired_sockets_and_counts_them() {
+    let mut cfg = TransportConfig::cleartext();
+    cfg.pool_idle_reclaim = Some(Duration::from_millis(150));
+    let fx = fixture_with(cfg).await;
+
+    let outcome = fx.transport.execute(attempt(&fx, "/ok")).await.unwrap();
+    assert_eq!(
+        collect(outcome.body).await,
+        b"pong",
+        "body read out so the socket is pooled"
+    );
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let outcome = fx.transport.execute(attempt(&fx, "/ok")).await.unwrap();
+    assert!(
+        !outcome.telemetry.reused,
+        "the expired socket was reaped, not reused"
+    );
+    assert!(outcome.telemetry.dial.is_some(), "a fresh dial happened");
+    assert_eq!(collect(outcome.body).await, b"pong");
+
+    let host = &fx.transport.stats().hosts[0];
+    assert_eq!(host.dials, 2);
+    assert_eq!(
+        host.reaped_idle,
+        Some(1),
+        "the reclamation is counted, not silent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_pool_cap_retains_one_warm_socket() {
+    let mut cfg = TransportConfig::cleartext();
+    cfg.h1_max_conns_per_host = 1;
+    let fx = fixture_with(cfg).await;
+
+    // Two exchanges in flight at once: neither can reuse, both must dial.
+    let (first, second) = tokio::join!(
+        fx.transport.execute(attempt(&fx, "/hold")),
+        fx.transport.execute(attempt(&fx, "/hold")),
+    );
+    assert_eq!(collect(first.unwrap().body).await, b"pong");
+    assert_eq!(collect(second.unwrap().body).await, b"pong");
+
+    let host = &fx.transport.stats().hosts[0];
+    assert_eq!(
+        host.dials, 2,
+        "nothing warm to reuse while both were in flight"
+    );
+    assert_eq!(
+        host.connections, 1,
+        "the older socket was closed when the idle pool hit h1_max_conns_per_host"
+    );
+    assert_eq!(host.evicted, 0, "a capped put is reclamation, not distrust");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -4,6 +4,7 @@
 | --- | --- |
 | [getting-started.md](getting-started.md) | Run, import a catalog, call `/v1` |
 | [architecture.md](architecture.md) | Technical deep dive: zero-parse data plane, `ArcSwap` snapshot, `xlite-h2-pool`, routing & failover |
+| [architecture/transport-contract.md](architecture/transport-contract.md) | `xlite-transport` public API, stability promise, and the never-do list (retry, routing, parsing) |
 | [benchmarks.md](benchmarks.md) | Single-node load tests (1k–18k concurrent SSE streams, 10.55M requests) & transport ablations |
 | [changelog.md](changelog.md) | Released versions |
 | [manual/xlite.md](manual/xlite.md) | Operator env, YAML, HTTP/2 connection pool & companion `xLB` setup |

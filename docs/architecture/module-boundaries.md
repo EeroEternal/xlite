@@ -1,6 +1,8 @@
 # Module boundaries
 
-xlite stays a single binary plus one transport crate (`xlite-h2-pool`).
+xlite stays a single binary plus two transport crates (`xlite-h2-pool`, `xlite-transport`).
+
+- `crates/xlite-transport` — the `Transport` contract shared with Nebula (one attempt per call, no retry/routing/parsing); its rules are spelled out in [`transport-contract.md`](transport-contract.md). Never give it a catalog, database, env read, or HTTP endpoint.
 
 - `src/proxy.rs` — request path and async usage webhook reporting only.
 - `src/protocol.rs` — Anthropic `/v1/messages`, OpenAI `/v1/responses`, and `/v1/embeddings` translation.
